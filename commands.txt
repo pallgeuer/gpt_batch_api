@@ -1,5 +1,5 @@
-Install
--------
+Setup
+-----
 
 - Create conda environment:
 	conda create -n gpt_batch_api python=3.12
