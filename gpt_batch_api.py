@@ -23,9 +23,22 @@ logging.getLogger("filelock").setLevel(logging.WARNING)
 logging.getLogger('openai').setLevel(logging.WARNING)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
-# TODO: Argparse suboptions (as namespace that can be passed to one of these classes)
-def foo():
-	log.info("Hey there!")
+# Protocol-based type annotation for configuration parameters (e.g. argparse.Namespace, omegaconf.DictConfig)
+class Config(Protocol):
+
+	def __getattr__(self, name: str) -> Any:
+		...
+
+	def __getitem__(self, key: str) -> Any:
+		...
+
+# TODO: Argparse suboptions (as namespace that can be passed to one of these classes) -> Don't need as hydra (have hydra suboptions?)? But good for others?
+def foo(cfg: Config):
+	log.info(f"Hey there! {cfg.foo}")
+	requester = GPTRequester(working_dir='outputs/_gpt_batch_api/gpt_batch_api', name_prefix='prefix')
+	with requester:
+		log.info("ENTERED")
+	log.info("EXITED")
 
 # Lock file class
 class LockFile:

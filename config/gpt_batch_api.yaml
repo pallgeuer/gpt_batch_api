@@ -1,0 +1,9 @@
+# Hydra configuration parameters YAML
+
+###############
+##  General  ##
+###############
+
+# TODO: TEMP
+foo: value
+# EOF
