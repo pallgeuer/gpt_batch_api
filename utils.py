@@ -1,19 +1,29 @@
 # General utilities
 
 # Imports
+import os
 import copy
 import json
+import math
+import time
 import signal
 import inspect
+import logging
+import contextlib
 import dataclasses
 import typing
-from typing import Any, Type
+from typing import Any, Type, Self, Union, Optional, TextIO, BinaryIO, ContextManager
+from types import FrameType
+import filelock
 
 # Types
 DataclassInstance = typing.TypeVar('DataclassInstance')
 
+# Logging configuration
+logging.getLogger("filelock").setLevel(logging.WARNING)
+
 #
-# Logging/printing
+# Logging/Printing
 #
 
 # In-place printing (replace the current line and don't advance to the next line)
@@ -25,7 +35,7 @@ def print_clear_line():
 	print("\x1b[2K\r", end='')
 
 # Format a duration as a single nearest appropriate integral time unit (e.g. one of 15s, 3m, 6h, 4d)
-def format_duration_unit(seconds: float) -> str:
+def format_duration(seconds: float) -> str:
 	duration = abs(seconds)
 	round_duration = int(duration)
 	if round_duration < 60:
@@ -42,6 +52,19 @@ def format_duration_unit(seconds: float) -> str:
 				round_duration = int(duration / 86400)
 				round_duration_unit = 'd'
 	return f"{'-' if seconds < 0 else ''}{round_duration}{round_duration_unit}"
+
+# Format a size in bytes using the most appropriate unit (e.g. 24B, 16.8KiB, 5.74MiB)
+def format_size(size: int, fmt: str = '.3g') -> str:
+	if size < 0:
+		raise ValueError(f"Size cannot be negative: {size}")
+	base = 1
+	thres = 1000
+	for unit in ('B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB', 'ZiB'):
+		if size < thres:
+			return f'{size / base:{fmt}}{unit}'
+		base <<= 10
+		thres <<= 10
+	return f'{size / base:{fmt}}YiB'
 
 # Get the full class spec of a class (can also provide an instance of that class)
 def get_class_str(obj: Any) -> str:
@@ -76,14 +99,19 @@ def dataclass_from_dict(cls: Type[DataclassInstance], data: dict[str, Any], json
 	return _dataclass_from_dict_inner(typ=cls, data=data, json_mode=json_mode)
 
 # Convert a dataclass to JSON (supports only JSON-compatible types (or subclasses): dataclass, dict, list, tuple, str, float, int, bool, None)
-def json_from_dataclass(obj: DataclassInstance, **kwargs) -> str:
+def json_from_dataclass(obj: DataclassInstance, file: Optional[TextIO] = None, **kwargs) -> Optional[str]:
 	dumps_kwargs = dict(ensure_ascii=False, indent=2)
 	dumps_kwargs.update(kwargs)
-	return json.dumps(dict_from_dataclass(obj), **dumps_kwargs)
+	if file is None:
+		return json.dumps(dict_from_dataclass(obj), **dumps_kwargs)
+	else:
+		json.dump(dict_from_dataclass(obj), file, **dumps_kwargs)  # noqa
+		return None
 
 # Convert JSON to a dataclass (supports only JSON-compatible types (or subclasses): dataclass, dict, list, tuple, str, float, int, bool, None)
-def dataclass_from_json(cls: Type[DataclassInstance], json_data: str) -> DataclassInstance:
-	return dataclass_from_dict(cls=cls, data=json.loads(json_data), json_mode=True)
+def dataclass_from_json(cls: Type[DataclassInstance], json_data: Union[TextIO, str]) -> DataclassInstance:
+	data = json.loads(json_data) if isinstance(json_data, str) else json.load(json_data)
+	return dataclass_from_dict(cls=cls, data=data, json_mode=True)
 
 # Inner function for converting nested data structures as appropriate to dataclasses
 def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
@@ -167,8 +195,49 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 	return ret
 
 #
-# Signals
+# OS/System
 #
+
+# Context manager that performs an effectively atomic write to a file by using a temporary file (in the same directory) as an intermediate and performing an atomic file replace (i.e. move)
+class SafeOpenForWrite:
+
+	def __init__(self, path: str, mode: str = 'w', *, prefix: Optional[str] = None, root_suffix: Optional[str] = None, suffix: Optional[str] = None, **open_kwargs):
+		# path = Path of the file to safe-write to
+		# mode = File opening mode (should always be a 'write' mode that ensures the file is created)
+		# prefix, root_suffix, suffix = If path is /path/to/file.ext then the used temporary path becomes /path/to/{prefix}file{root_suffix}.ext{suffix} (if all are None then root_suffix defaults to .tmp)
+		# open_kwargs = Keyword arguments to provide to the internal call to open()
+		self.path = path
+		self.mode = mode
+		if all(m not in self.mode for m in 'wax'):
+			raise ValueError(f"File opening mode must be a write mode: {self.mode}")
+		self.open_kwargs = open_kwargs
+		self.prefix = prefix
+		self.root_suffix = root_suffix
+		self.suffix = suffix
+		if not (self.prefix or self.root_suffix or self.suffix):
+			self.root_suffix = '.tmp'
+		self.tmp_path = None
+		self.tmp_file = None
+
+	def __enter__(self) -> Union[TextIO, BinaryIO]:
+		dirname, basename = os.path.split(self.path)
+		root, ext = os.path.splitext(basename)
+		self.tmp_path = os.path.join(dirname, f"{self.prefix or ''}{root}{self.root_suffix or ''}{ext}{self.suffix or ''}")
+		self.tmp_file = open(self.tmp_path, mode=self.mode, **self.open_kwargs)
+		return self.tmp_file
+
+	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+		if self.tmp_file is not None:
+			self.tmp_file.close()
+			self.tmp_file = None
+		if exc_type is None:
+			os.replace(self.tmp_path, self.path)  # Internally atomic operation
+		else:
+			with contextlib.suppress(FileNotFoundError):
+				os.unlink(self.tmp_path)
+		if self.tmp_path is not None:
+			self.tmp_path = None
+		return False
 
 # Context manager that temporarily delays keyboard interrupts until the context manager exits
 class DelayKeyboardInterrupt:
@@ -182,14 +251,73 @@ class DelayKeyboardInterrupt:
 		self.original_handler = signal.signal(signal.SIGINT, self.sigint_handler)
 
 	# noinspection PyUnusedLocal
-	def sigint_handler(self, signum, frame):
+	def sigint_handler(self, signum: int, frame: Optional[FrameType]):
 		print("Received SIGINT: Waiting for next opportunity to raise KeyboardInterrupt... (use SIGTERM if this hangs)")
 		self.interrupted = True
 
-	def __exit__(self, exc_type, exc_val, exc_tb):
+	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		signal.signal(signal.SIGINT, self.original_handler)
 		if self.interrupted:
 			self.interrupted = False
 			self.original_handler(signal.SIGINT, inspect.currentframe())
 		self.original_handler = None
+		return False
+
+# Context manager that extends DelayKeyboardInterrupt to also by default provide an ExitStack that can be used to unwind partial operations in case one of the operations raises an exception
+@contextlib.contextmanager
+def DelayKeyboardInterruptStack() -> ContextManager[contextlib.ExitStack]:
+	with DelayKeyboardInterrupt(), contextlib.ExitStack() as stack:
+		yield stack
+
+# Lock file class that uses verbose prints to inform about the lock acquisition process in case it isn't quick
+class LockFile:
+
+	def __init__(
+		self,
+		path: str,                                # Lock file path (nominally *.lock extension)
+		timeout: Optional[float] = None,          # Timeout in seconds when attempting to acquire the lock (<0 = No timeout, 0 = Instantaneous check, >0 = Timeout, Default = -1)
+		poll_interval: Optional[float] = None,    # Polling interval when waiting for the lock (default 0.25s)
+		status_interval: Optional[float] = None,  # Time interval to regularly print a status update when waiting for the lock (default 5s)
+	):
+		self.lock = filelock.FileLock(lock_file=path)
+		self.timeout = timeout if timeout is not None else -1
+		self.poll_interval = poll_interval if poll_interval is not None else 0.25
+		self.status_interval = status_interval if status_interval is not None else 5.0
+		if self.poll_interval < 0.01:
+			raise ValueError(f"Poll interval must be at least 0.01s: {self.poll_interval}")
+		if self.status_interval < 0.01:
+			raise ValueError(f"Status interval must be at least 0.01s: {self.status_interval}")
+
+	def __enter__(self) -> Self:
+		start_time = time.perf_counter()
+		print_time = start_time + self.status_interval
+		if self.timeout >= 0:
+			timeout_time = start_time + self.timeout
+			timeout_str = f'/{format_duration(self.timeout)}'
+		else:
+			timeout_time = math.inf
+			timeout_str = ''
+		now = start_time
+		while True:
+			try:
+				self.lock.acquire(timeout=max(min(timeout_time, print_time) - now, 0), poll_interval=self.poll_interval)
+				print_clear_line()
+				return self
+			except filelock.Timeout:
+				now = time.perf_counter()
+				if now >= timeout_time:
+					print_in_place(f"Failed to acquire lock in {format_duration(now - start_time)}: {self.lock.lock_file}\n")
+					raise
+				elif now >= print_time:
+					print_in_place(f"Still waiting on lock after {format_duration(now - start_time)}{timeout_str}: {self.lock.lock_file} ")
+					print_time += self.status_interval
+
+	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+		self.lock.release()
+		return False
+
+# Get the size of an open file in bytes
+def get_file_size(file: Union[TextIO, BinaryIO]) -> int:
+	file.flush()  # Harmlessly does nothing if file is currently open for reading not writing
+	return os.fstat(file.fileno()).st_size
 # EOF
