@@ -9,10 +9,11 @@ import time
 import signal
 import inspect
 import logging
+import itertools
 import contextlib
 import dataclasses
 import typing
-from typing import Any, Type, Self, Union, Optional, TextIO, BinaryIO, ContextManager
+from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager
 from types import FrameType
 import filelock
 
@@ -205,12 +206,15 @@ class SafeOpenForWrite:
 		# path = Path of the file to safe-write to
 		# mode = File opening mode (should always be a 'write' mode that ensures the file is created)
 		# prefix, root_suffix, suffix = If path is /path/to/file.ext then the used temporary path becomes /path/to/{prefix}file{root_suffix}.ext{suffix} (if all are None then root_suffix defaults to .tmp)
-		# open_kwargs = Keyword arguments to provide to the internal call to open()
+		# open_kwargs = Keyword arguments to provide to the internal call to open() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
 		self.path = path
 		self.mode = mode
-		if all(m not in self.mode for m in 'wax'):
-			raise ValueError(f"File opening mode must be a write mode: {self.mode}")
+		if 'w' not in self.mode and 'x' not in self.mode:
+			raise ValueError(f"File opening mode must be a truncating write mode (w or x): {self.mode}")
 		self.open_kwargs = open_kwargs
+		if 'b' not in self.mode:
+			self.open_kwargs.setdefault('encoding', 'utf-8')
+			self.open_kwargs.setdefault('newline', '\n')
 		self.prefix = prefix
 		self.root_suffix = root_suffix
 		self.suffix = suffix
@@ -265,7 +269,7 @@ class DelayKeyboardInterrupt:
 
 # Context manager that extends DelayKeyboardInterrupt to also by default provide an ExitStack that can be used to unwind partial operations in case one of the operations raises an exception
 @contextlib.contextmanager
-def DelayKeyboardInterruptStack() -> ContextManager[contextlib.ExitStack]:
+def AtomicExitStack() -> ContextManager[contextlib.ExitStack]:
 	with DelayKeyboardInterrupt(), contextlib.ExitStack() as stack:
 		yield stack
 
@@ -320,4 +324,22 @@ class LockFile:
 def get_file_size(file: Union[TextIO, BinaryIO]) -> int:
 	file.flush()  # Harmlessly does nothing if file is currently open for reading not writing
 	return os.fstat(file.fileno()).st_size
+
+#
+# Miscellaneous
+#
+
+# Check whether an iterable is in ascending order
+def is_ascending(iterable: Iterable[Any], *, strict: bool) -> bool:
+	if strict:
+		return all(a < b for a, b in itertools.pairwise(iterable))
+	else:
+		return all(a <= b for a, b in itertools.pairwise(iterable))
+
+# Check whether an iterable is in descending order
+def is_descending(iterable: Iterable[Any], *, strict: bool) -> bool:
+	if strict:
+		return all(a > b for a, b in itertools.pairwise(iterable))
+	else:
+		return all(a >= b for a, b in itertools.pairwise(iterable))
 # EOF
