@@ -38,8 +38,8 @@ class GPTRequest:
 # Queue state class
 @dataclasses.dataclass
 class QueueState:
+	max_request_id: int = 0                                                                         # Maximum request ID used thus far (0 = No request ID used so far)
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the request queue (NOT including the request pool, ordered by ascending request ID)
-	# TODO: Always assert sizes when creating request_id_meta dicts (BatchState, QueueState) to make sure no key overlap
 
 # Batch state class
 @dataclasses.dataclass
@@ -50,7 +50,7 @@ class BatchState:
 	remote_jsonl_id: Optional[str] = None                 # Assigned string ID of the uploaded batch input file (OpenAI file storage)
 	remote_batch: Optional[str] = None                    # Assigned string ID of the running batch (OpenAI batches)
 	# TODO: Need like num_requests, num_tokens, etc? Whatever is relevant for cutoffs/thresholds/decisions
-	# TODO: Always assert sizes when creating request_id_meta dicts (BatchState, QueueState) to make sure no key overlap
+	# TODO: Always assert sizes when creating request_id_meta dicts (BatchState) to make sure no key overlap
 
 # State class
 @dataclasses.dataclass
@@ -79,6 +79,7 @@ class StateFile:
 				self.load()
 			except FileNotFoundError:
 				self.create()
+			assert self.state is not None
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
 		return self
@@ -88,20 +89,19 @@ class StateFile:
 
 	def create(self):
 		self.state = State()
-		self.save()
+		self.save(stack=None)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
-			log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
+		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
 
-	def save(self):
-		if self.state is not None:
-			with utils.SafeOpenForWrite(self.path) as file:
-				utils.json_from_dataclass(obj=self.state, file=file)
-				file_size = utils.get_file_size(file)
-			log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
+	def save(self, stack: Optional[contextlib.ExitStack[Optional[bool]]]):
+		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
+			utils.json_from_dataclass(obj=self.state, file=file)
+			file_size = utils.get_file_size(file)
+		log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
 
 	def unload(self):
 		self.state = None
@@ -122,7 +122,7 @@ class GPTRequestItem:
 class GPTRequestInfo:
 	json: str        # Full batch-style request in compact JSON string form (includes the payload, always ends with a single trailing newline)
 	json_size: int   # Number of bytes in the compact JSON string form when encoded with UTF-8
-	num_tokens: int  # A conservative approximation (overestimation) of how many input tokens the request has (the aim is to never actually end up with more input tokens in a batch than the sum of these approximations suggests)
+	num_tokens: int  # A conservative approximation (overestimation) of how many input tokens the request payload has (the aim is to never actually end up with more input tokens in a batch than the sum of these approximations suggests)
 
 # Cached GPT request class
 @dataclasses.dataclass(frozen=True)
@@ -140,15 +140,26 @@ class CachedGPTRequest:
 			info=GPTRequestInfo(
 				json=compact_json,
 				json_size=len(compact_json.encode('utf-8')),
-				num_tokens=0,  # TODO: Parse /v1/chat/completions, /v1/embeddings, and /v1/completions -style requests for text/images/tokens. SPECIAL IMAGES handling (low res vs high res)!
+				num_tokens=estimate_payload_tokens(item.req.payload),
 			),
 		)
 
 # Pool/queue class
 @dataclasses.dataclass(frozen=True)
 class PoolQueue:
+
 	pool: list[CachedGPTRequest] = dataclasses.field(default_factory=list)             # Request pool: Requests added to the GPT requester are first added to the request pool, which is purely in memory and not backed by a file (the request pool is 'lost' if a KeyboardInterrupt or crash occurs)
 	queue: list[Optional[CachedGPTRequest]] = dataclasses.field(default_factory=list)  # Request queue: When the GPT requester is made to commit, all requests in the request pool are moved to the request queue, which is backed by the queue file and thus persistent
+
+	@property
+	def queue_len(self) -> int:
+		return sum(1 for cached_req in self.queue if cached_req is not None)
+
+	def queue_request_id_meta(self) -> dict[int, Optional[dict[str, Any]]]:
+		request_id_meta = {cached_req.item.id: cached_req.item.req.meta for cached_req in self.queue if cached_req is not None}
+		if len(request_id_meta) != self.queue_len:
+			raise ValueError("Request queue contains duplicate request IDs")
+		return request_id_meta
 
 # Queue file class
 class QueueFile:
@@ -170,6 +181,7 @@ class QueueFile:
 				self.load()
 			except FileNotFoundError:
 				self.create()
+			assert self.pool_queue is not None
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
 		return self
@@ -179,31 +191,22 @@ class QueueFile:
 
 	def create(self):
 		self.pool_queue = PoolQueue()
-		self.save()
+		self.save(stack=None)
 
 	def load(self):
-		with (open(self.path, 'r', encoding='utf-8') as file):
+		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.pool_queue = PoolQueue(pool=[], queue=[CachedGPTRequest.from_item(utils.dataclass_from_json(cls=GPTRequestItem, json_data=line)) for line in file.readlines()])
-			log.info(f"Loaded GPT requester queue file with {len(self.pool_queue.queue)} requests ({utils.format_size(file_size)}): {self.name}")
+		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
 
-	def save(self, lazy: bool = False) -> bool:
-		# lazy = If true, only save if something has actually changed (added/removed requests)
-		# Returns whether a save was performed
-		if self.pool_queue is not None and not (lazy and not self.pool_queue.pool and all(cached_req is not None for cached_req in self.pool_queue.queue)):
-			merged_queue = [req for req in self.pool_queue.queue if req is not None]
-			merged_queue.extend(self.pool_queue.pool)
-			with utils.SafeOpenForWrite(self.path) as file:
-				for cached_req in merged_queue:
+	def save(self, stack: Optional[contextlib.ExitStack[Optional[bool]]]):
+		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
+			for cached_req in self.pool_queue.queue:
+				if cached_req is not None:
 					utils.json_from_dataclass(obj=cached_req.item, file=file)
 					file.write('\n')
-				file_size = utils.get_file_size(file)
-			self.pool_queue.pool.clear()
-			self.pool_queue.queue[:] = merged_queue
-			log.info(f"Saved GPT requester queue file with {len(self.pool_queue.queue)} requests ({utils.format_size(file_size)}): {self.name}")
-			return True
-		else:
-			return False
+			file_size = utils.get_file_size(file)
+		log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
 
 	def unload(self):
 		self.pool_queue = None
@@ -265,15 +268,25 @@ class GPTRequester:
 			self.default_endpoint = DEFAULT_ENDPOINT
 
 		self._enter_stack = contextlib.ExitStack()
+		self.S: Optional[State] = None
+		self.PQ: Optional[PoolQueue] = None
+		self.P: Optional[list[CachedGPTRequest]] = None
+		self.Q: Optional[list[Optional[CachedGPTRequest]]] = None
+		self.max_request_id: Optional[int] = None
 
 	# Enter method for the required use of GPTRequester as a context manager (acquires a lock on the state files and such and reads them in)
 	def __enter__(self) -> Self:
 		with self._enter_stack as stack:
 			stack.enter_context(self.lock)
+			stack.callback(self.on_exit)
 			stack.enter_context(self.state)
+			self.S = self.state.state
+			self.max_request_id = self.S.queue.max_request_id
 			stack.enter_context(self.queue)
-			self.validate_state_queue()
-			stack.callback(self.save_state_queue)  # TODO: Is this correct? Does this do the right thing?
+			self.PQ = self.queue.pool_queue
+			self.P = self.PQ.pool
+			self.Q = self.PQ.queue
+			self.validate_state_queue(clean=True)
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
 		return self
@@ -282,38 +295,42 @@ class GPTRequester:
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
-	# Validate that there are no obvious issues with the current state and queue
-	def validate_state_queue(self):
+	# Local actions to perform on exit
+	def on_exit(self):
+		self.S = self.PQ = self.P = self.Q = None
+		self.max_request_id = None
 
-		S, PQ = self.state.state, self.queue.pool_queue
-		assert S is not None and PQ is not None
+	# Validate that there are no obvious issues with the current state and queue (clean refers to the expected status right after a commit)
+	def validate_state_queue(self, *, clean: bool):
 
-		if S.queue.request_id_meta != {cached_req.item.id: cached_req.item.req.meta for cached_req in PQ.queue if cached_req is not None}:
+		if clean:
+			if self.P:
+				raise ValueError("Request pool state is unexpectedly not clean")
+			if any(cached_req is None for cached_req in self.Q):
+				raise ValueError("Request queue state is unexpectedly not clean")
+			if self.S.queue.max_request_id != self.max_request_id:
+				raise ValueError(f"Maximum request ID is inconsistent between GPT requester and queue state: {self.max_request_id} vs {self.S.queue.max_request_id}")
+
+		if self.S.queue.request_id_meta != self.PQ.queue_request_id_meta():
 			raise ValueError("ID-meta map is inconsistent between the state and queue files for the request queue")
 
-		for batch in S.batches:
+		for batch in self.S.batches:
 			if not utils.is_ascending(batch.request_id_meta.keys(), strict=True):
 				raise ValueError(f"The request IDs in a batch are not strictly ascending: {list(batch.request_id_meta.keys())}")
-		if not utils.is_ascending(S.queue.request_id_meta.keys(), strict=True):
-			raise ValueError(f"The request IDs in the request queue are not strictly ascending: {list(S.queue.request_id_meta.keys())}")
-		pool_request_ids = [cached_req.item.id for cached_req in PQ.pool]
-		if not utils.is_ascending(pool_request_ids, strict=True):
+		if not utils.is_ascending(self.S.queue.request_id_meta.keys(), strict=True):
+			raise ValueError(f"The request IDs in the request queue are not strictly ascending: {list(self.S.queue.request_id_meta.keys())}")
+		if not utils.is_ascending((pool_request_ids := [cached_req.item.id for cached_req in self.P]), strict=True):
 			raise ValueError(f"The request IDs in the request pool are not strictly ascending: {pool_request_ids}")
 
-		req_id_intervals = [(min(req_ids), max(req_ids)) for req_ids in (*(batch.request_id_meta.keys() for batch in S.batches), S.queue.request_id_meta.keys(), pool_request_ids)]
+		req_id_intervals = [(min(req_ids), max(req_ids)) for req_ids in (*(batch.request_id_meta.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
 		if not utils.is_ascending((req_id for req_id_interval in req_id_intervals for req_id in req_id_interval), strict=True):
 			raise ValueError(f"The request ID intervals overlap between the batches, request queue and request pool: {req_id_intervals}")
 
-	# Save the state and queue to their respective backing files
-	def save_state_queue(self):
-		self.validate_state_queue()
-		raise NotImplementedError  # TODO: unload() of state/queue (RIGHTLY!) does not auto-save the state, because who knows whether it should actually be saved - it could be in some errored broken state theoretically and NOT validated and NOT synced between state and queue (also avoids double-save right? or save during handler of error during saving)
-		# TODO: THIS class needs to make sure save_state_queue() is called in __exit__ (stack.callback(self.save_state_queue)?)
-		# TODO: def save() => Need something like this? Validate BEFORE every save (fail => error => no save => saved file must always be valid) Needs to make sure if saving State File fails (second) then change to queue file is reverted (queue is saved first so that request pool is collapsed into queue) (backup file)
-
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
-		raise NotImplementedError  # TODO: Wrap in GPTRequestItem, assign monotonic ID (can't immediately update state, but when committed?), stringify, num_tokens, num_bytes, apply default endpoint etc...
+		self.max_request_id += 1
+		item = GPTRequestItem(id=self.max_request_id, req=req, endpoint=req.endpoint if req.endpoint is not None else self.default_endpoint)
+		self.P.append(CachedGPTRequest.from_item(item))
 
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
 	# Note that reqs can also for convenience be a generator that executes some loop over source samples and yields instances of GPTRequest
@@ -325,7 +342,7 @@ class GPTRequester:
 	# The body of the context manager is executed within an AtomicExitStack (an ExitStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
 	# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be keyboard interrupted (or crash)
 	@contextlib.contextmanager
-	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, batch: bool = True, force_batch: bool = False, push: bool = True) -> ContextManager[contextlib.ExitStack]:
+	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, batch: bool = True, force_batch: bool = False, push: bool = True) -> ContextManager[contextlib.ExitStack[Optional[bool]]]:
 
 		if reqs is not None:
 			if isinstance(reqs, GPTRequest):
@@ -333,10 +350,29 @@ class GPTRequester:
 			else:
 				self.add_requests(reqs)
 
+		def revert_queue(P: list[CachedGPTRequest], Q: list[Optional[CachedGPTRequest]]):
+			self.P[:] = P
+			self.Q[:] = Q
+
+		def revert_queue_state(queue_state_dict: dict[str, Any]):
+			for field, value in queue_state_dict.items():
+				setattr(self.S.queue, field, value)
+
 		with utils.AtomicExitStack() as stack:
-			yield stack  # TODO: AtomicExitStack + yield
-		# TODO: Auto-monitor when you have enough requests to fill a batch (or multiple) and send them off
-		# TODO: The yield signifies within AtomicExitStack that all requests added so far have been committed
+			if self.P or any(cached_req is None for cached_req in self.Q):
+				stack.callback(revert_queue, P=self.P.copy(), Q=self.Q.copy())
+				self.Q[:] = [cached_req for cached_req in self.Q if cached_req is not None]
+				self.Q.extend(self.P)
+				self.P.clear()
+				stack.callback(revert_queue_state, queue_state_dict=dataclasses.asdict(self.S.queue))  # noqa
+				self.S.queue.max_request_id = self.max_request_id
+				self.S.queue.request_meta_id = self.PQ.queue_request_id_meta()
+				self.validate_state_queue(clean=True)
+				self.queue.save(stack=stack)
+				self.state.save(stack=stack)
+			else:
+				self.validate_state_queue(clean=True)
+			yield stack  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
 
 		if batch:
 			self.batch_requests(force=force_batch, push=push)
@@ -344,13 +380,12 @@ class GPTRequester:
 	# Process the request queue and generate full batches as much as possible (also generate a non-full trailing batch with whatever requests are left if force=True), and then optionally push the batches as much as possible for remote processing
 	def batch_requests(self, force: bool = False, push: bool = True):
 		# TODO: Implement (also trailing batch if force=True)
+		# TODO: Auto-monitor when you have enough requests to fill a batch (or multiple) and send them off
 		if push:
 			self.push_requests()
 
 	# Push as many batches as possible for remote processing
 	def push_requests(self):
-		import openai
-		client = openai.OpenAI()
 		pass  # TODO: See what unpushed batches there are and push them
 
 	# TODO: User test case is one that attempts to get character codes and descriptions of unicode characters (tests that UTF-8 and everything is working correctly and the characters arrive properly on OpenAI servers)
@@ -360,13 +395,14 @@ class GPTRequester:
 	# TODO: Safety margin that adds safety margin to all thresholds/limits (e.g. makes the limits 90% of the values actually passed)
 	# TODO: 100MB or 100MiB limit?
 
-# TODO: The openai.OpenAI() client automatically populates these, so you should probably retrieve these (careful: some are Optional) and add these to the header!
-#        - `api_key` from `OPENAI_API_KEY`
-#        - `organization` from `OPENAI_ORG_ID`
-#        - `project` from `OPENAI_PROJECT_ID`
-#       I have added OPENAI_ENDPOINT
-# TODO: OPENAI_BASE_URL is used in the client with a fallback of f"https://api.openai.com/v1" as the base URL -> When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
+	# TODO: The openai.OpenAI() client automatically populates these, so you should probably retrieve these (careful: some are Optional) and add these to the header!
+	#        - `api_key` from `OPENAI_API_KEY`
+	#        - `organization` from `OPENAI_ORG_ID`
+	#        - `project` from `OPENAI_PROJECT_ID`
+	#       I have added OPENAI_ENDPOINT
+	# TODO: OPENAI_BASE_URL is used in the client with a fallback of f"https://api.openai.com/v1" as the base URL -> When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
 
+	# TODO: Count tokens etc from single requests in a separate counter, and add them to a combined total elsewhere
 	# TODO: When creating a batch, add metadata about the GPT requester prefix, batch ID (monotonic int), local machine, local batch path, PID, etc... so that it can be uniquely identified where/why the batch comes from (e.g. dict(host=os.uname().nodename, script=__file__, action='annotate_batch', batch_local=local_json_file, batch_remote=remote_json_file.id))
 
 	# TODO: Auto-compute stats about the request (monotonic ID must be assigned, state file with next monotonic ID is only updated when request is committed!), convert it to string, etc -> But autocomputed stats don't necessarily need to be saved to file, e.g. the string conversion makes no sense to save => GPTRequestInfo(frozen)?
@@ -380,11 +416,20 @@ class GPTRequester:
 	# TODO: How to gracefully deal with an entire batch erroring out? Raise a runtime exception as no clue whether data is the problem or wrong limits configured, but not auto-recoverable in any case? Or maybe after 2-3 failed batches raise? Failed push? Failed result?
 	# TODO: Make direct (non-batched) immediate/sync request (sync_request(GPTRequest) -> GPTResponse)
 
+	# TODO: Debug mode that does everything (including uploading files?) except ACTUALLY start batches (everything that doesn't cost money)
+	# TODO: Maybe have two bools for no_upload / no_cost
 	# TODO: Function to direct evaluate a single request without using the Batch API (single_request() -> Response)
-	# TODO: Version
 	# TODO: Metrics (tokens in/out (what happens about thought tokens), per batch, num requests, divided by successful/unsuccessful)
 	# TODO: Wandb
 	# TODO: Remove tqdm if it is not actually used (would be better for wandb logs)
 	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)
+
+#
+# Miscellaneous
+#
+
+# Conservatively approximate (overestimate) how many input tokens a request payload has (the aim is to never actually end up with more input tokens in a batch than the sum of these approximations suggests)
+def estimate_payload_tokens(payload: dict[str, Any]) -> int:
+	raise NotImplementedError  # TODO: Parse /v1/chat/completions, /v1/embeddings, and /v1/completions -style requests for text/images/tokens. SPECIAL IMAGES handling (low res vs high res)!
 # EOF

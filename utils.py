@@ -142,7 +142,7 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 					data = generic_typ(data)
 			elif isinstance(data, dict) and generic_typ is not dict and issubclass(generic_typ, dict):
 				if hasattr(generic_typ, 'default_factory'):
-					newdata = generic_typ(None)  # noqa: We have no way of knowing what the default factory was prior to JSON serialization...
+					newdata = generic_typ(None)  # noqa / Note: We have no way of knowing what the default factory was prior to JSON serialization...
 					for key, value in data.items():
 						newdata[key] = value
 					data = newdata
@@ -202,9 +202,13 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 # Context manager that performs an effectively atomic write to a file by using a temporary file (in the same directory) as an intermediate and performing an atomic file replace (i.e. move)
 class SafeOpenForWrite:
 
-	def __init__(self, path: str, mode: str = 'w', *, prefix: Optional[str] = None, root_suffix: Optional[str] = None, suffix: Optional[str] = None, **open_kwargs):
+	# TODO: Dataclass for prefix options for tmp and bak
+	# TODO: Implement stack / perfectly reversible with clean up in every case / etc (if stack unwinds due to an exception then REVERSE otherwise just clean up the backup)
+	# TODO: Strategy should be that even a SIGKILL should never result in the main file being invalid (even if some temp files would still exist). SIGINT means all temp files also get cleaned up
+	def __init__(self, path: str, mode: str = 'w', *, stack: None, prefix: Optional[str] = None, root_suffix: Optional[str] = None, suffix: Optional[str] = None, **open_kwargs):
 		# path = Path of the file to safe-write to
 		# mode = File opening mode (should always be a 'write' mode that ensures the file is created)
+		# TODO: DOC
 		# prefix, root_suffix, suffix = If path is /path/to/file.ext then the used temporary path becomes /path/to/{prefix}file{root_suffix}.ext{suffix} (if all are None then root_suffix defaults to .tmp)
 		# open_kwargs = Keyword arguments to provide to the internal call to open() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
 		self.path = path
@@ -269,7 +273,7 @@ class DelayKeyboardInterrupt:
 
 # Context manager that extends DelayKeyboardInterrupt to also by default provide an ExitStack that can be used to unwind partial operations in case one of the operations raises an exception
 @contextlib.contextmanager
-def AtomicExitStack() -> ContextManager[contextlib.ExitStack]:
+def AtomicExitStack() -> ContextManager[contextlib.ExitStack[Optional[bool]]]:
 	with DelayKeyboardInterrupt(), contextlib.ExitStack() as stack:
 		yield stack
 
