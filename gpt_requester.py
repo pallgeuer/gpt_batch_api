@@ -293,6 +293,8 @@ class GPTRequester:
 
 	# Exit method for the required use of GPTRequester as a context manager (saves and releases all state files and such)
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+		if self.P:
+			log.warning(f"Exiting GPT requester with {len(self.P)} uncommitted requests in the request pool")
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	# Local actions to perform on exit
@@ -395,11 +397,6 @@ class GPTRequester:
 	# TODO: Safety margin that adds safety margin to all thresholds/limits (e.g. makes the limits 90% of the values actually passed)
 	# TODO: 100MB or 100MiB limit?
 
-	# TODO: The openai.OpenAI() client automatically populates these, so you should probably retrieve these (careful: some are Optional) and add these to the header!
-	#        - `api_key` from `OPENAI_API_KEY`
-	#        - `organization` from `OPENAI_ORG_ID`
-	#        - `project` from `OPENAI_PROJECT_ID`
-	#       I have added OPENAI_ENDPOINT
 	# TODO: OPENAI_BASE_URL is used in the client with a fallback of f"https://api.openai.com/v1" as the base URL -> When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
 
 	# TODO: Count tokens etc from single requests in a separate counter, and add them to a combined total elsewhere
@@ -420,7 +417,7 @@ class GPTRequester:
 	# TODO: Maybe have two bools for no_upload / no_cost
 	# TODO: Function to direct evaluate a single request without using the Batch API (single_request() -> Response)
 	# TODO: Metrics (tokens in/out (what happens about thought tokens), per batch, num requests, divided by successful/unsuccessful)
-	# TODO: Wandb
+	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc)
 	# TODO: Remove tqdm if it is not actually used (would be better for wandb logs)
 	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)

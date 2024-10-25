@@ -7,6 +7,7 @@ import json
 import math
 import time
 import signal
+import shutil
 import inspect
 import logging
 import itertools
@@ -199,53 +200,78 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 # OS/System
 #
 
-# Context manager that performs an effectively atomic write to a file by using a temporary file (in the same directory) as an intermediate and performing an atomic file replace (i.e. move)
-class SafeOpenForWrite:
+# Affix class
+@dataclasses.dataclass
+class Affix:                           # /path/to/file.ext --> /path/to/{prefix}file{root_suffix}.ext{suffix}
+	prefix: Optional[str] = None       # /path/to/file.ext --> /path/to/{prefix}file.ext
+	root_suffix: Optional[str] = None  # /path/to/file.ext --> /path/to/file{root_suffix}.ext
+	suffix: Optional[str] = None       # /path/to/file.ext --> /path/to/file.ext{suffix}
 
-	# TODO: Dataclass for prefix options for tmp and bak
-	# TODO: Implement stack / perfectly reversible with clean up in every case / etc (if stack unwinds due to an exception then REVERSE otherwise just clean up the backup)
-	# TODO: Strategy should be that even a SIGKILL should never result in the main file being invalid (even if some temp files would still exist). SIGINT means all temp files also get cleaned up
-	def __init__(self, path: str, mode: str = 'w', *, stack: None, prefix: Optional[str] = None, root_suffix: Optional[str] = None, suffix: Optional[str] = None, **open_kwargs):
-		# path = Path of the file to safe-write to
-		# mode = File opening mode (should always be a 'write' mode that ensures the file is created)
-		# TODO: DOC
-		# prefix, root_suffix, suffix = If path is /path/to/file.ext then the used temporary path becomes /path/to/{prefix}file{root_suffix}.ext{suffix} (if all are None then root_suffix defaults to .tmp)
-		# open_kwargs = Keyword arguments to provide to the internal call to open() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
-		self.path = path
-		self.mode = mode
-		if 'w' not in self.mode and 'x' not in self.mode:
-			raise ValueError(f"File opening mode must be a truncating write mode (w or x): {self.mode}")
-		self.open_kwargs = open_kwargs
-		if 'b' not in self.mode:
-			self.open_kwargs.setdefault('encoding', 'utf-8')
-			self.open_kwargs.setdefault('newline', '\n')
-		self.prefix = prefix
-		self.root_suffix = root_suffix
-		self.suffix = suffix
-		if not (self.prefix or self.root_suffix or self.suffix):
-			self.root_suffix = '.tmp'
-		self.tmp_path = None
-		self.tmp_file = None
+# Context manager that performs an effectively atomic write to a file by using a temporary file (in the same directory) as an intermediate and performing an atomic file replace (completely reversible on future error if an ExitStack is supplied)
+@contextlib.contextmanager
+def SafeOpenForWrite(
+	path: str,                                                     # path = Path of the file to safe-write to
+	mode: str = 'w',                                               # mode = File opening mode (should always be a 'write' mode that ensures the file is created, i.e. including 'w' or 'x')
+	*,                                                             # Keyword arguments only beyond here
+	temp_affix: Optional[Affix] = None,                            # temp_affix = Affix to use for the temporary file path to write to before atomically replacing the target file with the temporary written file (defaults to a suffix of '.tmp')
+	stack: Optional[contextlib.ExitStack[Optional[bool]]] = None,  # stack = If an ExitStack is provided, callbacks are pushed to the stack to revert all changes to the file if the stack unwinds with an exception
+	backup_affix: Optional[Affix] = None,                          # backup_affix = If an ExitStack is provided, the affix to use for the backup file path (defaults to a suffix of '.bak')
+	**open_kwargs,                                                 # open_kwargs = Keyword arguments to provide to the internal call to open() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
+) -> ContextManager[Union[TextIO, BinaryIO]]:
 
-	def __enter__(self) -> Union[TextIO, BinaryIO]:
-		dirname, basename = os.path.split(self.path)
-		root, ext = os.path.splitext(basename)
-		self.tmp_path = os.path.join(dirname, f"{self.prefix or ''}{root}{self.root_suffix or ''}{ext}{self.suffix or ''}")
-		self.tmp_file = open(self.tmp_path, mode=self.mode, **self.open_kwargs)
-		return self.tmp_file
+	if 'w' not in mode and 'x' not in mode:
+		raise ValueError(f"File opening mode must be a truncating write mode (w or x): {mode}")
+	if 'b' not in mode:
+		open_kwargs.setdefault('encoding', 'utf-8')
+		open_kwargs.setdefault('newline', '\n')
 
-	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
-		if self.tmp_file is not None:
-			self.tmp_file.close()
-			self.tmp_file = None
-		if exc_type is None:
-			os.replace(self.tmp_path, self.path)  # Internally atomic operation
-		else:
+	dirname, basename = os.path.split(path)
+	root, ext = os.path.splitext(basename)
+
+	if temp_affix is None:
+		temp_affix = Affix(prefix=None, root_suffix=None, suffix='.tmp')
+	temp_path = os.path.join(dirname, f"{temp_affix.prefix or ''}{root}{temp_affix.root_suffix or ''}{ext}{temp_affix.suffix or ''}")
+
+	# noinspection PyUnusedLocal
+	def unlink_temp_if_exc(exc_type, exc_val, exc_tb) -> bool:
+		if exc_type is not None:
 			with contextlib.suppress(FileNotFoundError):
-				os.unlink(self.tmp_path)
-		if self.tmp_path is not None:
-			self.tmp_path = None
+				os.unlink(temp_path)
 		return False
+
+	with contextlib.ExitStack() as stack_:
+		stack_.push(unlink_temp_if_exc)
+		yield stack_.enter_context(open(temp_path, mode=mode, **open_kwargs))
+
+	if stack is not None:
+
+		if backup_affix is None:
+			backup_affix = Affix(prefix=None, root_suffix=None, suffix='.bak')
+		backup_path = os.path.join(dirname, f"{backup_affix.prefix or ''}{root}{backup_affix.root_suffix or ''}{ext}{backup_affix.suffix or ''}")
+
+		def unlink_backup():
+			with contextlib.suppress(FileNotFoundError):
+				os.unlink(backup_path)
+		stack.callback(unlink_backup)
+
+		# noinspection PyUnusedLocal
+		def revert_backup_if_exc(exc_type, exc_val, exc_tb) -> bool:
+			if exc_type is not None:
+				os.replace(src=backup_path, dst=path)
+			return False
+
+		try:
+			shutil.copy2(src=path, dst=backup_path)
+			stack.push(revert_backup_if_exc)
+		except FileNotFoundError:
+			pass
+
+	try:
+		os.replace(src=temp_path, dst=path)  # Internally atomic operation
+	except OSError:
+		with contextlib.suppress(FileNotFoundError):
+			os.unlink(temp_path)
+		raise
 
 # Context manager that temporarily delays keyboard interrupts until the context manager exits
 class DelayKeyboardInterrupt:
