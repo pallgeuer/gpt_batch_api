@@ -4,8 +4,8 @@ Setup
 - Create conda environment:
 	conda create -n gpt_batch_api python=3.12
 	conda activate gpt_batch_api
-	conda install -c conda-forge filelock requests tqdm wandb
-	pip install openai
+	conda install -c conda-forge filelock pillow requests tqdm wandb
+	pip install openai tiktoken
 	pip check
 
 - Wandb login:
