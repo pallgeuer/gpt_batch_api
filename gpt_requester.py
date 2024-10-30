@@ -422,6 +422,9 @@ class GPTRequester:
 	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)
 
+	# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
+	# TODO: Have a dryrun mode that can be used to just see the cost of batches that WOULD be launched (NO actual state update - no cost, no file writes)
+
 #
 # Miscellaneous
 #

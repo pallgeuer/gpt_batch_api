@@ -11,7 +11,7 @@ import logging
 import binascii
 import collections
 import dataclasses
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Sequence
 import PIL.Image
 import requests
 import tiktoken
@@ -21,9 +21,7 @@ from .logger import log
 # Input tokens count class
 @dataclasses.dataclass(frozen=True)
 class InputTokensCount:
-
 	fixed: int          # Number of input tokens that are always required for every request
-
 	msg_system: int     # Number of input tokens for system messages
 	msg_user: int       # Number of input tokens for user messages
 	msg_assistant: int  # Number of input tokens for assistant messages
@@ -31,15 +29,51 @@ class InputTokensCount:
 	msg_function: int   # Number of input tokens for function messages
 	msg_other: int      # Number of input tokens for other messages
 	msg_total: int      # Total number of input tokens for messages of all types
-
 	meta: int           # Number of input tokens representing message metadata (non-extra non-content data)
 	text: int           # Number of input tokens representing text content
 	image: int          # Number of input tokens representing image content
 	tools: int          # Number of input tokens for specifying available tools
 	functions: int      # Number of input tokens for specifying available functions
 	extra: int          # Number of hidden extra input tokens (including fixed)
-
 	total: int          # Total number of input tokens
+
+# Chat completions core tokens configuration
+@dataclasses.dataclass
+class CCCoreTokensConfig:
+	tokens_per_response: int       # Fixed number of extra tokens required once in each response
+	tokens_per_message: int        # Number of extra tokens required for each message
+	tokens_per_message_gap: int    # Number of extra tokens required as separators between messages
+	tokens_per_name: int           # Number of extra tokens required for every message that has a name
+	tokens_last_text_unended: int  # Number of extra tokens required if the last content in a message is text that does not end in whitespace or punctuation
+
+# Chat completions image tokens configuration
+@dataclasses.dataclass
+class CCImageTokensConfig:
+	low_tokens: int        # Low detail: Fixed number of tokens required for every image
+	high_tokens_base: int  # High detail: Number of base tokens required for every image
+	high_tokens_tile: int  # High detail: Extra number of tokens required for every tile
+	high_res: int          # High detail: The smaller dimension is downscaled (if it is larger) to this resolution prior to tiling
+	high_tile: int         # High detail: Square tile size
+
+# Chat completions function tokens configuration
+@dataclasses.dataclass
+class CCFuncTokensConfig:
+	call_none: int           # Number of extra tokens required if the call mode is 'none'
+	desc_strip_dot: int      # Maximum number of trailing dots to strip from description fields after whitespace has been stripped from both beginning and end
+	func_init: int           # Number of extra tokens required to initialise each function
+	func_desc_pre: int       # Number of extra tokens required for descriptions that are non-empty prior to stripping whitespace
+	func_desc_post: int      # Number of extra tokens required for descriptions that are non-empty after stripping whitespace
+	func_end: int            # Number of extra tokens required at the end of all functions
+	root_props_init: int     # Number of fixed extra tokens required if the root properties are non-empty
+	prop_key_init: int       # Number of extra tokens required for each non-ignored property key
+	prop_enum_gap: int       # Number of extra tokens required for each enum item beyond the first
+	prop_special_obj: int    # Number of extra tokens required for each object that either has no properties or is last in an object
+	prop_special_last: int   # Number of extra tokens required if an array/enum is last in an object
+	prop_desc_value: int     # Number of extra tokens required for descriptions of value properties
+	prop_desc_obj: int       # Number of extra tokens required for descriptions of object properties
+	prop_desc_oth: int       # Number of extra tokens required for descriptions of other properties (array/enum)
+	prop_desc_item_obj: int  # Number of extra tokens required for descriptions of non-empty object array items
+	prop_desc_item_oth: int  # Number of extra tokens required for descriptions of other array items
 
 # Token estimator class
 class TokenEstimator:
@@ -77,55 +111,81 @@ class TokenEstimator:
 				encoding = tiktoken.get_encoding('o200k_base')
 				self.warning(f"Assuming '{encoding.name}' encoding for unrecognised model: {model}")
 
+			core_cfg = CCCoreTokensConfig(
+				tokens_per_response=3,
+				tokens_per_message=3,
+				tokens_per_message_gap=0,
+				tokens_per_name=1,
+				tokens_last_text_unended=0,
+			)
 			if re.match(r'(ft:)?(?:gpt-3.5|gpt-4|gpt-4-turbo|(?:chat)?gpt-4o(?:-mini)?)', model):
-				extra_tokens_per_response = 3
-				extra_tokens_per_message = 3
-				extra_tokens_per_message_gap = 0
-				extra_tokens_last_content_unended = 0
-				extra_tokens_per_name = 1
+				pass
 			elif re.match(r'(ft:)?o1', model):
-				extra_tokens_per_response = 3
-				extra_tokens_per_message = 3
-				extra_tokens_per_message_gap = 7
-				extra_tokens_last_content_unended = 1
-				extra_tokens_per_name = 4
+				core_cfg.tokens_per_message_gap = 7
+				core_cfg.tokens_per_name = 4
+				core_cfg.tokens_last_text_unended = 1
 			else:
-				self.warning(f"Assuming default extra token counts for unrecognised model: {model}")
-				extra_tokens_per_response = 3
-				extra_tokens_per_message = 3
-				extra_tokens_per_message_gap = 0
-				extra_tokens_last_content_unended = 0
-				extra_tokens_per_name = 1
+				self.warning(f"Assuming default chat completions core tokens configuration for unrecognised model: {model}")
 			special_end_tokens = (encoding.encode(' ')[0], encoding.encode('.')[0])
 
+			image_cfg = CCImageTokensConfig(
+				low_tokens=85,
+				high_tokens_base=85,
+				high_tokens_tile=170,
+				high_res=768,
+				high_tile=512,
+			)
 			supports_image = True
 			if re.match(r'(ft:)?gpt-4o-mini', model):
-				image_low_tokens = 2833
-				image_high_tokens_base = 2833
-				image_high_tokens_tile = 5667
-				image_high_res = 768
-				image_high_tile = 512
+				image_cfg.low_tokens = 2833
+				image_cfg.high_tokens_base = 2833
+				image_cfg.high_tokens_tile = 5667
 			elif re.match(r'(ft:)?(?:gpt-4-turbo|(?:chat)?gpt-4o)', model):
-				image_low_tokens = 85
-				image_high_tokens_base = 85
-				image_high_tokens_tile = 170
-				image_high_res = 768
-				image_high_tile = 512
+				pass
 			else:
-				image_low_tokens = 85
-				image_high_tokens_base = 85
-				image_high_tokens_tile = 170
-				image_high_res = 768
-				image_high_tile = 512
 				supports_image = False
 
-			fixed = extra_tokens_per_response
-			extra += extra_tokens_per_response
+			func_cfg = CCFuncTokensConfig(
+				call_none=1,
+				desc_strip_dot=4,
+				func_init=6,
+				func_desc_pre=1,
+				func_desc_post=0,
+				func_end=12,
+				root_props_init=2,
+				prop_key_init=2,
+				prop_enum_gap=3,
+				prop_special_obj=1,
+				prop_special_last=1,
+				prop_desc_value=2,
+				prop_desc_obj=1,
+				prop_desc_oth=1,
+				prop_desc_item_obj=4,
+				prop_desc_item_oth=5,
+			)
+			supports_tools = True
+			if re.match(r'(ft:)?(?:chat)?gpt-4o(?:-mini)?', model):
+				pass
+			elif re.match(r'(ft:)?(?:gpt-3.5-turbo|gpt-4|gpt-4-turbo)', model):
+				func_cfg.desc_strip_dot = 3
+				func_cfg.prop_desc_value = 3
+				func_cfg.prop_desc_obj = 2
+				func_cfg.prop_desc_oth = 2
+				if re.match(r'(ft:)?gpt-4(?!-turbo)', model):
+					func_cfg.func_desc_pre = 0
+					func_cfg.func_desc_post = 2
+				else:
+					func_cfg.func_desc_post = 1
+			else:
+				supports_tools = False
+
+			fixed = core_cfg.tokens_per_response
+			extra += core_cfg.tokens_per_response
 			for m, message in enumerate(payload['messages'], 1):
 				role = message['role']
-				message_tokens = extra_tokens_per_message
+				message_tokens = core_cfg.tokens_per_message
 				if m > 1:
-					message_tokens += extra_tokens_per_message_gap
+					message_tokens += core_cfg.tokens_per_message_gap
 				msg_tokens[role] += message_tokens
 				extra += message_tokens
 				for key, value in message.items():
@@ -133,7 +193,7 @@ class TokenEstimator:
 						if isinstance(value, str):
 							value_tokens = len(encoding.encode(value))
 							if value and value[-1] not in string.whitespace and value[-1] not in string.punctuation:
-								value_tokens += extra_tokens_last_content_unended
+								value_tokens += core_cfg.tokens_last_text_unended
 							msg_tokens[role] += value_tokens
 							type_tokens['text'] += value_tokens
 						elif value is not None:
@@ -153,16 +213,12 @@ class TokenEstimator:
 									type_tokens['text'] += text_tokens
 								elif content_type == 'image_url':
 									if not supports_image:
-										self.warning(f"Assuming default image token counts for unrecognised image model: {model}")
+										self.warning(f"Assuming default chat completions image tokens configuration for unrecognised image model: {model}")
 									image_spec = content_item['image_url']
-									image_tokens = self.image_input_tokens(
+									image_tokens = self.cc_image_input_tokens(
 										url=image_spec['url'],
 										detail=image_spec.get('detail', 'auto'),
-										low_tokens=image_low_tokens,
-										high_res=image_high_res,
-										high_tile=image_high_tile,
-										high_tokens_base=image_high_tokens_base,
-										high_tokens_tile=image_high_tokens_tile,
+										image_cfg=image_cfg,
 									)
 									msg_tokens[role] += image_tokens
 									type_tokens['image'] += image_tokens
@@ -170,15 +226,37 @@ class TokenEstimator:
 									self.warning(f"Ignoring input tokens corresponding to unrecognised content type: {content_type}")
 								last_content_type = content_type
 							if content_type == 'text' and content_text and content_text[-1] not in string.whitespace and content_text[-1] not in string.punctuation:
-								msg_tokens[role] += extra_tokens_last_content_unended
-								type_tokens['text'] += extra_tokens_last_content_unended
+								msg_tokens[role] += core_cfg.tokens_last_text_unended
+								type_tokens['text'] += core_cfg.tokens_last_text_unended
 					elif isinstance(value, str):
 						if key == 'name':
-							msg_tokens[role] += extra_tokens_per_name
-							extra += extra_tokens_per_name
+							msg_tokens[role] += core_cfg.tokens_per_name
+							extra += core_cfg.tokens_per_name
 						value_tokens = len(encoding.encode(value))
 						msg_tokens[role] += value_tokens
 						meta += value_tokens
+
+			payload_tools: Optional[Sequence[dict[str, Any]]] = payload.get('tools', None)
+			if payload_tools:
+				if not supports_tools:
+					self.warning(f"Assuming default chat completions function tokens configuration for unrecognised tool model: {model}")
+				type_tokens['tools'] += self.cc_tools_input_tokens(
+					encoding=encoding,
+					tools=payload_tools,
+					tool_choice=payload.get('tool_choice', None),
+					func_cfg=func_cfg,
+				)
+
+			payload_functions: Optional[Sequence[dict[str, Any]]] = payload.get('functions', None)
+			if payload_functions:
+				if not supports_tools:
+					self.warning(f"Assuming default chat completions function tokens configuration for unrecognised function model: {model}")
+				type_tokens['functions'] += self.cc_functions_input_tokens(
+					encoding=encoding,
+					functions=payload_functions,
+					function_call=payload.get('function_call', None),
+					func_cfg=func_cfg,
+				)
 
 		else:
 			raise ValueError(f"Cannot estimate input tokens for unrecognised endpoint: {endpoint}")
@@ -218,14 +296,14 @@ class TokenEstimator:
 			total=total,
 		)
 
-	# Estimate the number of input tokens required for an image
+	# Chat completions: Estimate the number of input tokens required for an image
 	# Helpful source (accessed 28/10/2024): https://platform.openai.com/docs/guides/vision/calculating-costs
-	def image_input_tokens(self, url: Union[str, tuple[int, int], None], detail: str, low_tokens: int, high_res: int, high_tile: int, high_tokens_base: int, high_tokens_tile: int) -> int:
+	def cc_image_input_tokens(self, url: Union[str, tuple[int, int], None], detail: str, image_cfg: CCImageTokensConfig) -> int:
 
 		if detail == 'low':
-			return low_tokens
+			return image_cfg.low_tokens
 
-		image_res = self.image_resolution(url) if isinstance(url, str) else url
+		image_res = self.cc_image_resolution(url) if isinstance(url, str) else url
 		if image_res is None:
 			return 0  # Ignore image if failed to identify its resolution
 		width, height = image_res
@@ -233,21 +311,21 @@ class TokenEstimator:
 			self.warning("Ignoring input tokens corresponding to image with non-positive resolution")
 			return 0  # Ignore image if identified resolution has non-positive entries
 
-		if min(width, height) > high_res:
-			scale = high_res / min(width, height)
+		if min(width, height) > image_cfg.high_res:
+			scale = image_cfg.high_res / min(width, height)
 			width = round(width * scale)
 			height = round(height * scale)
 
-		num_tiles = ((width - 1) // high_tile + 1) * ((height - 1) // high_tile + 1)
+		num_tiles = ((width - 1) // image_cfg.high_tile + 1) * ((height - 1) // image_cfg.high_tile + 1)
 		if detail == 'auto':
 			self.warning("Cannot accurately determine number of input image tokens if detail level is 'auto' => Explicitly specify high/low if possible")
 			if num_tiles <= 1:  # Assume low detail if resolution fits in a single tile (it is unclear how OpenAI decides on the detail level if auto is specified)
-				return low_tokens
+				return image_cfg.low_tokens
 
-		return high_tokens_base + num_tiles * high_tokens_tile
+		return image_cfg.high_tokens_base + num_tiles * image_cfg.high_tokens_tile
 
-	# Retrieve the resolution of an image URL
-	def image_resolution(self, image_url: str) -> Optional[tuple[int, int]]:
+	# Chat completions: Retrieve the resolution of an image URL
+	def cc_image_resolution(self, image_url: str) -> Optional[tuple[int, int]]:
 		if match := re.fullmatch(r'data:[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126};base64,([A-Za-z0-9+/]+={0,2})', image_url):
 			try:
 				return PIL.Image.open(io.BytesIO(base64.b64decode(match.group(1), validate=True))).size
@@ -267,10 +345,131 @@ class TokenEstimator:
 				self.warning("Ignoring input tokens corresponding to image URL that failed to open in PIL")
 			return None
 
-# TODO: Count tools tokens properly (no crash on extra fields)
-# TODO: Count functions tokens properly (no crash on extra fields)
-# TODO: Support /v1/embeddings
-# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
+	# Chat completions: Estimate the number of input tokens required for tool use
+	def cc_tools_input_tokens(self, encoding: tiktoken.Encoding, tools: Sequence[dict[str, Any]], tool_choice: Union[str, dict[str, Any], None], func_cfg: CCFuncTokensConfig) -> int:
+
+		functions = []
+		for tool in tools:
+			tool_type = tool['type']
+			if tool_type == 'function':
+				functions.append(tool['function'])
+			else:
+				self.warning(f"Ignoring input tokens corresponding to unrecognised tool type: {tool_type}")
+
+		if isinstance(tool_choice, str) or tool_choice is None:
+			function_call = tool_choice
+		else:
+			tool_type = tool_choice['type']
+			if tool_type == 'function':
+				function_call = tool_choice['function']
+			else:
+				self.warning(f"Ignoring input tokens corresponding to unrecognised tool choice type: {tool_type}")
+				function_call = None
+
+		return self.cc_functions_input_tokens(encoding=encoding, functions=functions, function_call=function_call, func_cfg=func_cfg)
+
+	# Chat completions: Estimate the number of input tokens required for function use
+	def cc_functions_input_tokens(self, encoding: tiktoken.Encoding, functions: Sequence[dict[str, Any]], function_call: Union[str, dict[str, Any], None], func_cfg: CCFuncTokensConfig) -> int:
+
+		if not functions:
+			return 0  # Note: It is actually an API error to pass empty tools/functions parameters, so we give it 0 tokens
+
+		total_tokens = 0
+		if function_call is None:
+			function_call = 'auto'
+		if function_call == 'none':
+			total_tokens += func_cfg.call_none
+
+		for function in functions:
+
+			total_tokens += func_cfg.func_init + len(encoding.encode(function['name']))
+
+			function_desc: Optional[str] = function.get('description', '')
+			if function_desc:
+				total_tokens += func_cfg.func_desc_pre
+			function_desc = function_desc.strip()
+			if function_desc:
+				total_tokens += func_cfg.func_desc_post
+			total_tokens += len(encoding.encode(re.sub(rf'\.{{0,{func_cfg.desc_strip_dot}}}$', r'', function_desc)))
+
+			function_params: Optional[dict[str, Any]] = function.get('parameters', None)
+			if function_params:
+				function_params_type: Optional[str] = function_params.get('type', None)
+				function_props: Optional[dict[str, Any]] = function_params.get('properties', None)
+				if function_params_type != 'object':
+					self.warning(f"Ignoring input tokens corresponding to functions due to unrecognised root function parameters type: {function_params_type}")
+				elif function_props:
+					total_tokens += func_cfg.root_props_init + self.cc_object_props_input_tokens(encoding=encoding, props=function_props, func_cfg=func_cfg)
+
+		total_tokens += func_cfg.func_end
+
+		return total_tokens
+
+	# Chat completions: Estimate the number of input tokens required for a particular set of object properties as part of function use
+	def cc_object_props_input_tokens(self, encoding: tiktoken.Encoding, props: dict[str, Any], func_cfg: CCFuncTokensConfig) -> int:
+		total_tokens = 0
+		last_valid = None
+		for prop_key, prop_spec in props.items():
+			last_valid = None
+			prop_type = prop_spec.get('type', None)
+			prop_desc = prop_spec.get('description', None)
+			prop_props = prop_spec.get('properties', None)
+			prop_items = prop_spec.get('items', None)
+			if prop_type is None:
+				self.warning("Ignoring input tokens corresponding to type-less property in function schema")
+			elif prop_type == 'object' and prop_props is None:
+				self.warning("Ignoring input tokens corresponding to properties-less object in function schema")
+			elif prop_type == 'array' and prop_items is None:
+				self.warning("Ignoring input tokens corresponding to items-less array in function schema")
+			elif prop_type == 'array' and prop_items and 'type' not in prop_items:
+				self.warning("Ignoring input tokens corresponding to a type-less array")
+			elif prop_type == 'array' and prop_items.get('type', None) == 'object' and 'properties' not in prop_items:
+				self.warning("Ignoring input tokens corresponding to array of properties-less objects in function schema")
+			else:
+				total_tokens += func_cfg.prop_key_init + len(encoding.encode(prop_key))
+				if prop_type == 'object':
+					total_tokens += self.cc_description_input_tokens(encoding=encoding, desc=prop_desc, func_cfg=func_cfg, prop_desc=func_cfg.prop_desc_obj)
+					if prop_props:
+						last_valid = 'object'
+						total_tokens += self.cc_object_props_input_tokens(encoding=encoding, props=prop_props, func_cfg=func_cfg)
+					else:
+						total_tokens += func_cfg.prop_special_obj
+				elif prop_type == 'array':
+					last_valid = 'array'
+					if not prop_items:
+						prop_items = {'type': 'object', 'properties': {}}
+					array_type = prop_items['type']
+					total_tokens += len(encoding.encode(array_type))
+					total_tokens += self.cc_description_input_tokens(encoding=encoding, desc=prop_desc, func_cfg=func_cfg, prop_desc=func_cfg.prop_desc_oth)
+					prop_items_desc = prop_items.get('description', None)
+					if array_type == 'object' and prop_items['properties']:
+						total_tokens += self.cc_object_props_input_tokens(encoding=encoding, props=prop_items['properties'], func_cfg=func_cfg)
+						total_tokens += self.cc_description_input_tokens(encoding=encoding, desc=prop_items_desc, func_cfg=func_cfg, prop_desc=func_cfg.prop_desc_item_obj)
+					else:
+						total_tokens += self.cc_description_input_tokens(encoding=encoding, desc=prop_items_desc, func_cfg=func_cfg, prop_desc=func_cfg.prop_desc_item_oth)
+				else:
+					total_tokens += len(encoding.encode(prop_type))
+					prop_enum = prop_spec.get('enum', None)
+					if prop_enum:
+						last_valid = 'enum'
+						total_tokens += (len(prop_enum) - 1) * func_cfg.prop_enum_gap + sum(len(encoding.encode(prop_enum_value)) for prop_enum_value in prop_enum)
+						total_tokens += self.cc_description_input_tokens(encoding=encoding, desc=prop_desc, func_cfg=func_cfg, prop_desc=func_cfg.prop_desc_oth)
+					else:
+						total_tokens += self.cc_description_input_tokens(encoding=encoding, desc=prop_desc, func_cfg=func_cfg, prop_desc=func_cfg.prop_desc_value)
+		if last_valid == 'array' or last_valid == 'enum':
+			total_tokens += func_cfg.prop_special_last
+		elif last_valid == 'object':
+			total_tokens += func_cfg.prop_special_obj
+		return total_tokens
+
+	# Chat completions: Estimate the number of input tokens required for a description as part of function use
+	@classmethod
+	def cc_description_input_tokens(cls, encoding: tiktoken.Encoding, desc: Optional[str], func_cfg: CCFuncTokensConfig, prop_desc: int) -> int:
+		if desc:
+			desc = desc.strip()
+			if desc:
+				return prop_desc + len(encoding.encode(re.sub(rf'\.{{0,{func_cfg.desc_strip_dot}}}$', r'', desc)))
+		return 0
 
 #
 # Test
@@ -279,23 +478,23 @@ class TokenEstimator:
 # Test input token calculation for chat completions endpoint
 def test_chat_completions(client: openai.OpenAI, token_est: TokenEstimator):
 
-	black_image = PIL.Image.new(mode='RGB', size=(16, 16))
-	black_image.save((buffered := io.BytesIO()), format="PNG")
-	black_image_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
 	def test_token_est(task_: dict[str, Any]):
 		log.info('-' * 120)
 		log.info(f"REQUEST:\n{json.dumps(task_, indent=2)}")
 		expected_tokens = token_est.payload_input_tokens(payload=task_, endpoint='/v1/chat/completions')
-		response = client.chat.completions.create(**task_)
-		if expected_tokens.total == response.usage.prompt_tokens:
-			log.info(f"INPUT TOKENS: Expected {expected_tokens} and got {response.usage.prompt_tokens}")
+		try:
+			response = client.chat.completions.create(**task_)
+		except openai.OpenAIError as e:
+			log.error(f"\033[31mINPUT TOKENS: Expected {expected_tokens} and got {e.__class__.__module__}.{e.__class__.__qualname__}: {e}\033[0m")
 		else:
-			log.warning(f"\033[31mINPUT TOKENS: Expected {expected_tokens} and got {response.usage.prompt_tokens}\033[0m")
+			if expected_tokens.total == response.usage.prompt_tokens:
+				log.info(f"\033[32mINPUT TOKENS: Expected {expected_tokens} and got {response.usage.prompt_tokens}\033[0m")
+			else:
+				log.warning(f"\033[33mINPUT TOKENS: Expected {expected_tokens} and got {response.usage.prompt_tokens}\033[0m")
 
 	for model in ('gpt-3.5-turbo', 'gpt-4', 'o1-preview', 'o1-mini'):
 
-		base_task_A = dict(
+		base_task = dict(
 			model=model,
 			messages=[
 				{
@@ -326,18 +525,22 @@ def test_chat_completions(client: openai.OpenAI, token_est: TokenEstimator):
 		)
 
 		for task in (
-			{**base_task_A, 'messages': [{**base_task_A['messages'][0], 'content': base_task_A['messages'][0]['content'][:1]}]},
-			{**base_task_A, 'messages': [{**base_task_A['messages'][0], 'content': base_task_A['messages'][0]['content'][:2]}]},
-			{**base_task_A, 'messages': [{**base_task_A['messages'][0], 'content': base_task_A['messages'][0]['content'][:3]}]},
-			{**base_task_A, 'messages': base_task_A['messages'][:2]},
-			{**base_task_A, 'messages': base_task_A['messages'][:3]},
-			{**base_task_A, 'messages': base_task_A['messages'][:4]},
+			{**base_task, 'messages': [{**base_task['messages'][0], 'content': base_task['messages'][0]['content'][:1]}]},
+			{**base_task, 'messages': [{**base_task['messages'][0], 'content': base_task['messages'][0]['content'][:2]}]},
+			{**base_task, 'messages': [{**base_task['messages'][0], 'content': base_task['messages'][0]['content'][:3]}]},
+			{**base_task, 'messages': base_task['messages'][:2]},
+			{**base_task, 'messages': base_task['messages'][:3]},
+			{**base_task, 'messages': base_task['messages'][:4]},
 		):
 			test_token_est(task)
 
-	for model in ('chatgpt-4o-latest', 'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'):
+	black_image = PIL.Image.new(mode='RGB', size=(16, 16))
+	black_image.save((buffered := io.BytesIO()), format="PNG")
+	black_image_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-		base_task_A = dict(
+	for model in ('gpt-4-turbo', 'chatgpt-4o-latest', 'gpt-4o', 'gpt-4o-mini'):
+
+		base_task = dict(
 			model=model,
 			messages=[
 				{
@@ -369,14 +572,14 @@ def test_chat_completions(client: openai.OpenAI, token_est: TokenEstimator):
 		)
 
 		for task in (
-			{**base_task_A, 'messages': base_task_A['messages'][:1]},
-			{**base_task_A, 'messages': [base_task_A['messages'][0], {**base_task_A['messages'][1], 'content': base_task_A['messages'][1]['content'][:1]}]},
-			{**base_task_A, 'messages': [base_task_A['messages'][0], {**base_task_A['messages'][1], 'content': base_task_A['messages'][1]['content'][:2]}]},
-			{**base_task_A, 'messages': [base_task_A['messages'][0], {**base_task_A['messages'][1], 'content': base_task_A['messages'][1]['content'][:3]}]},
-			{**base_task_A, 'messages': [base_task_A['messages'][0], {**base_task_A['messages'][1], 'content': base_task_A['messages'][1]['content'][:4]}]},
-			{**base_task_A, 'messages': [base_task_A['messages'][0], {**base_task_A['messages'][1], 'content': base_task_A['messages'][1]['content'][:5]}]},
-			{**base_task_A, 'messages': base_task_A['messages'][:3]},
-			{**base_task_A, 'messages': base_task_A['messages'][:4]},
+			{**base_task, 'messages': base_task['messages'][:1]},
+			{**base_task, 'messages': [base_task['messages'][0], {**base_task['messages'][1], 'content': base_task['messages'][1]['content'][:1]}]},
+			{**base_task, 'messages': [base_task['messages'][0], {**base_task['messages'][1], 'content': base_task['messages'][1]['content'][:2]}]},
+			{**base_task, 'messages': [base_task['messages'][0], {**base_task['messages'][1], 'content': base_task['messages'][1]['content'][:3]}]},
+			{**base_task, 'messages': [base_task['messages'][0], {**base_task['messages'][1], 'content': base_task['messages'][1]['content'][:4]}]},
+			{**base_task, 'messages': [base_task['messages'][0], {**base_task['messages'][1], 'content': base_task['messages'][1]['content'][:5]}]},
+			{**base_task, 'messages': base_task['messages'][:3]},
+			{**base_task, 'messages': base_task['messages'][:4]},
 		):
 			test_token_est(task)
 
@@ -386,12 +589,9 @@ def test_chat_completions(client: openai.OpenAI, token_est: TokenEstimator):
 
 # Main function
 def main():
-
 	logging.basicConfig(level=logging.INFO, format="[%(levelname)s][%(asctime)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
-
 	client = openai.OpenAI()
 	token_est = TokenEstimator(warn='always')
-
 	test_chat_completions(client=client, token_est=token_est)
 
 # Run main function
