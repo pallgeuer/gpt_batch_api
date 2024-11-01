@@ -425,11 +425,17 @@ class GPTRequester:
 	# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
 	# TODO: Have a dryrun mode that can be used to just see the cost of batches that WOULD be launched (NO actual state update - no cost, no file writes)
 
-#
-# Miscellaneous
-#
+	# TODO: Allow threshold below which a forced batch/push automatically uses single API requests instead
 
-# Conservatively approximate (overestimate) how many input tokens a request payload has (the aim is to never actually end up with more input tokens in a batch than the sum of these approximations suggests)
-def estimate_payload_tokens(payload: dict[str, Any]) -> int:
-	raise NotImplementedError  # TODO: Parse /v1/chat/completions, /v1/embeddings, and /v1/completions -style requests for text/images/tokens. SPECIAL IMAGES handling (low res vs high res)!
+	# TODO: wandb (conditional import to not require install if don't need it!)
+
+	# # TODO: Argparse suboptions (as namespace that can be passed to one of these classes) -> Don't need as hydra (have hydra suboptions?)? But good for others?
+	# # Protocol-based type annotation for configuration parameters (e.g. argparse.Namespace, omegaconf.DictConfig)
+	# class Config(Protocol):
+	#
+	# 	def __getattr__(self, name: str) -> Any:
+	# 		...
+	#
+	# 	def __getitem__(self, key: str) -> Any:
+	# 		...
 # EOF
