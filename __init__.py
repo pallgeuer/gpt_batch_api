@@ -1,5 +1,7 @@
-# GPT batch API module
+# OpenAI GPT Batch API package
 
 # Imports
-from .gpt_batch_api import *  # TODO: Make this more specific
+from .tokens import InputTokensCount, TokenEstimator
+from .gpt_requester import GPTRequest, GPTRequester
+# TODO: Finalise package-level imports
 # EOF
