@@ -32,6 +32,6 @@ Run Commands
 	Args:
 		Refer to --help
 	Output:
-		gpt_batch_api/tasks/demo_char_codes_*
+		gpt_batch_api/tasks/char_codes_*
 	Verify:
-		Verify that the final data output file(s) contain reasonable and complete data (e.g. gpt_batch_api/tasks/demo_char_codes_output*)
+		Verify that the final data output file(s) contain reasonable and complete data (e.g. gpt_batch_api/tasks/char_codes_output*)
