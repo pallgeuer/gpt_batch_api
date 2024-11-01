@@ -10,8 +10,8 @@ import dataclasses
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
 import httpx
 import openai
-from . import utils
 from .logger import log
+from . import tokens, utils
 
 # Constants
 DEFAULT_ENDPOINT = '/v1/chat/completions'
@@ -49,8 +49,6 @@ class BatchState:
 	local_jsonl_size: int                                 # Number of bytes in the local JSONL batch input file
 	remote_jsonl_id: Optional[str] = None                 # Assigned string ID of the uploaded batch input file (OpenAI file storage)
 	remote_batch: Optional[str] = None                    # Assigned string ID of the running batch (OpenAI batches)
-	# TODO: Need like num_requests, num_tokens, etc? Whatever is relevant for cutoffs/thresholds/decisions
-	# TODO: Always assert sizes when creating request_id_meta dicts (BatchState) to make sure no key overlap
 
 # State class
 @dataclasses.dataclass
@@ -132,7 +130,7 @@ class CachedGPTRequest:
 	info: GPTRequestInfo  # GPT request information (automatically calculated from the GPT request item, and cached in memory)
 
 	@staticmethod
-	def from_item(item: GPTRequestItem) -> CachedGPTRequest:
+	def from_item(item: GPTRequestItem, token_estimator: tokens.TokenEstimator) -> CachedGPTRequest:
 		full_request = dict(custom_id=f'id-{item.id}', method='POST', url=item.endpoint, body=item.req.payload)
 		compact_json = json.dumps(full_request) + '\n'
 		return CachedGPTRequest(
@@ -140,7 +138,7 @@ class CachedGPTRequest:
 			info=GPTRequestInfo(
 				json=compact_json,
 				json_size=len(compact_json.encode('utf-8')),
-				num_tokens=estimate_payload_tokens(item.req.payload),
+				num_tokens=token_estimator.payload_input_tokens(payload=item.req.payload, endpoint=item.endpoint).total,
 			),
 		)
 
@@ -166,11 +164,13 @@ class QueueFile:
 
 	pool_queue: Optional[PoolQueue]
 
-	def __init__(self, path: str):
+	def __init__(self, path: str, token_estimator: tokens.TokenEstimator):
 		# path = Path to the JSONL queue file to load/save/manage (nominally *.jsonl extension)
+		# token_estimator = Token estimator instance to use
 		self.path = os.path.abspath(path)
 		log.info(f"GPT requester queue file: {self.path}")
 		self.name = os.path.basename(self.path)
+		self.token_estimator = token_estimator
 		self._enter_stack = contextlib.ExitStack()
 		self.pool_queue = None
 
@@ -196,7 +196,10 @@ class QueueFile:
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
-			self.pool_queue = PoolQueue(pool=[], queue=[CachedGPTRequest.from_item(utils.dataclass_from_json(cls=GPTRequestItem, json_data=line)) for line in file.readlines()])
+			self.pool_queue = PoolQueue(pool=[], queue=[CachedGPTRequest.from_item(
+				item=utils.dataclass_from_json(cls=GPTRequestItem, json_data=line),
+				token_estimator=self.token_estimator,
+			) for line in file.readlines()])
 		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: Optional[contextlib.ExitStack[Optional[bool]]]):
@@ -234,6 +237,7 @@ class GPTRequester:
 		client_kwargs: Optional[dict[str, Any]] = None,       # Additional kwargs to use for the OpenAI API client (see openai.OpenAI)
 		client: Optional[openai.OpenAI] = None,               # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
 		default_endpoint: Optional[str] = None,               # Default endpoint to use for GPT requests that don't explicitly specify one (None = OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
+		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 	):
 
 		self.working_dir = os.path.abspath(working_dir)
@@ -256,9 +260,10 @@ class GPTRequester:
 		if not os.path.isdir(self.working_dir):
 			raise FileNotFoundError(f"GPT working directory does not exist: {self.working_dir}")
 
+		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn)
 		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
 		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"))
-		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"))
+		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator)
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **client_kwargs)
 		self.default_endpoint = default_endpoint
@@ -328,11 +333,13 @@ class GPTRequester:
 		if not utils.is_ascending((req_id for req_id_interval in req_id_intervals for req_id in req_id_interval), strict=True):
 			raise ValueError(f"The request ID intervals overlap between the batches, request queue and request pool: {req_id_intervals}")
 
+	# TODO: direct_request() => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
+
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
 		self.max_request_id += 1
 		item = GPTRequestItem(id=self.max_request_id, req=req, endpoint=req.endpoint if req.endpoint is not None else self.default_endpoint)
-		self.P.append(CachedGPTRequest.from_item(item))
+		self.P.append(CachedGPTRequest.from_item(item=item, token_estimator=self.token_estimator))
 
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
 	# Note that reqs can also for convenience be a generator that executes some loop over source samples and yields instances of GPTRequest
@@ -389,6 +396,10 @@ class GPTRequester:
 	# Push as many batches as possible for remote processing
 	def push_requests(self):
 		pass  # TODO: See what unpushed batches there are and push them
+
+	# TODO: BatchState:
+	# TODO:   Need like num_requests, num_tokens, etc? Whatever is relevant for cutoffs/thresholds/decisions
+	# TODO:   Always assert sizes when creating request_id_meta dicts (BatchState) to make sure no key overlap
 
 	# TODO: User test case is one that attempts to get character codes and descriptions of unicode characters (tests that UTF-8 and everything is working correctly and the characters arrive properly on OpenAI servers)
 	# TODO: Options like 'model' should be in the user state file (to remain consistent)
