@@ -14,7 +14,7 @@ import itertools
 import contextlib
 import dataclasses
 import typing
-from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager
+from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol
 from types import FrameType
 import filelock
 
@@ -372,4 +372,10 @@ def is_descending(iterable: Iterable[Any], *, strict: bool) -> bool:
 		return all(a > b for a, b in itertools.pairwise(iterable))
 	else:
 		return all(a >= b for a, b in itertools.pairwise(iterable))
+
+# Protocol-based type annotation for configuration parameters represented as an object of attributes (e.g. argparse.Namespace, flat omegaconf.DictConfig)
+class Config(Protocol):
+
+	def __getattribute__(self, name: str) -> Any:
+		...
 # EOF
