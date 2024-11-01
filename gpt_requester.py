@@ -225,8 +225,9 @@ class GPTRequester:
 	def __init__(
 		self,
 		working_dir: str,                                     # Path to the GPT working directory to use (will be used for automatically managed lock, state, requests and batch files)
+		name_prefix: str,                                     # Name prefix to use for all files created in the GPT working directory (e.g. 'my_gpt_requester')
+		*,                                                    # Keyword arguments only beyond here
 		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
-		name_prefix: str = 'gpt_requester',                   # Name prefix to use for all files created in the GPT working directory
 		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
 		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
 		lock_status_interval: Optional[float] = None,         # Lock file status update interval (see utils.LockFile)
@@ -333,7 +334,7 @@ class GPTRequester:
 		if not utils.is_ascending((req_id for req_id_interval in req_id_intervals for req_id in req_id_interval), strict=True):
 			raise ValueError(f"The request ID intervals overlap between the batches, request queue and request pool: {req_id_intervals}")
 
-	# TODO: direct_request() => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
+	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
@@ -390,6 +391,7 @@ class GPTRequester:
 	def batch_requests(self, force: bool = False, push: bool = True):
 		# TODO: Implement (also trailing batch if force=True)
 		# TODO: Auto-monitor when you have enough requests to fill a batch (or multiple) and send them off
+		# TODO: Have a batch size threshold below which direct requests are used instead (minimum batch size?)
 		if push:
 			self.push_requests()
 
@@ -440,12 +442,4 @@ class GPTRequester:
 	# TODO: wandb (conditional import to not require install if don't need it!)
 
 	# # TODO: Argparse suboptions (as namespace that can be passed to one of these classes) -> Don't need as hydra (have hydra suboptions?)? But good for others?
-	# # Protocol-based type annotation for configuration parameters (e.g. argparse.Namespace, omegaconf.DictConfig)
-	# class Config(Protocol):
-	#
-	# 	def __getattr__(self, name: str) -> Any:
-	# 		...
-	#
-	# 	def __getitem__(self, key: str) -> Any:
-	# 		...
 # EOF
