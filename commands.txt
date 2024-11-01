@@ -26,3 +26,12 @@ Run Commands
 	Verify:
 		Verify that all predicted token totals are equal or close to the actual required number of tokens
 
+- Demo the TaskManager class:
+	Command:
+		python -m gpt_batch_api.task_manager_demo --task char_codes
+	Args:
+		Refer to --help
+	Output:
+		gpt_batch_api/tasks/demo_char_codes_*
+	Verify:
+		Verify that the final data output file(s) contain reasonable and complete data (e.g. gpt_batch_api/tasks/demo_char_codes_output*)
