@@ -11,7 +11,18 @@ Setup
 - Wandb login:
 	wandb login
 
-Usage
------
+Run Commands
+------------
 
-TODO
+- General:
+	cd /path/to/gpt_batch_api/..
+	conda activate gpt_batch_api
+	export OPENAI_API_KEY=sk-...  # <-- NOTE: Replace with actual OpenAI API key
+	export WANDB_API_KEY=...  # <-- NOTE: Replace with actual Wandb API key
+
+- Test the token counting class TokenEstimator:
+	Command:
+		python -m gpt_batch_api.tokens_test
+	Verify:
+		Verify that all predicted token totals are equal or close to the actual required number of tokens
+
