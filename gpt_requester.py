@@ -4,7 +4,9 @@
 from __future__ import annotations
 import os
 import json
+import inspect
 import logging
+import argparse
 import contextlib
 import dataclasses
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
@@ -280,7 +282,21 @@ class GPTRequester:
 		self.Q: Optional[list[Optional[CachedGPTRequest]]] = None
 		self.max_request_id: Optional[int] = None
 
-	# Enter method for the required use of GPTRequester as a context manager (acquires a lock on the state files and such and reads them in)
+	# Dictionary of all __init__ keyword arguments and their default values
+	__kwargs__ = {name: param.default for name, param in inspect.signature(__init__).parameters.items() if name != 'self' and param.default != inspect.Parameter.empty}
+
+	# Populate a dictionary of __init__ keyword arguments based on an attribute-based config object (e.g. argparse.Namespace, flat omegaconf.DictConfig)
+	@classmethod
+	def get_kwargs(cls, cfg: utils.Config) -> dict[str, Any]:
+		return {key: getattr(cfg, key) for key in cls.__kwargs__.keys() if hasattr(cfg, key)}
+
+	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
+	@classmethod
+	def configure_argparse(cls, parser: argparse.ArgumentParser, *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, **kwargs) -> argparse._ArgumentGroup:  # noqa
+		group = parser.add_argument_group(title=title, description=description, **kwargs)
+		return group
+
+	# Enter method for the required use of GPTRequester as a context manager
 	def __enter__(self) -> Self:
 		with self._enter_stack as stack:
 			stack.enter_context(self.lock)
@@ -297,7 +313,7 @@ class GPTRequester:
 		assert self._enter_stack is not stack
 		return self
 
-	# Exit method for the required use of GPTRequester as a context manager (saves and releases all state files and such)
+	# Exit method for the required use of GPTRequester as a context manager
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		if self.P:
 			log.warning(f"Exiting GPT requester with {len(self.P)} uncommitted requests in the request pool")
