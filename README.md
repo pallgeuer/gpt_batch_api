@@ -22,8 +22,7 @@ Applications should subclass the `TaskManager` class to implement the desired ba
 - `OPENAI_PROJECT_ID`: An identifier for the specific OpenAI project, used for tracking usage and billing (e.g. `proj_...`)
 - `OPENAI_BASE_URL`: The base URL of where to direct API requests (e.g. `https://api.openai.com/v1`)
 - `OPENAI_ENDPOINT`: The default endpoint to use for `GPTRequester` instances, if not explicitly otherwise specified on a per-`GPTRequester` or per-request basis (e.g. `/v1/chat/completions`)
-- `WANDB_API_KEY`: [**Required if wandb support is enabled**] The API key for authenticating with Weights & Biases (e.g. `ff63...`)
-- `FORCE_COLUMNS`: Force a fixed printable terminal column width to be returned from `utils.get_printable_width()` (e.g. `235`)
+- `WANDB_API_KEY`: [**Required if Wandb support is enabled**] The API key for authenticating with Weights & Biases (e.g. `ff63...`)
 
 **Useful links:**
 - Manage the defined OpenAI projects: https://platform.openai.com/settings/organization/projects
