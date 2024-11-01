@@ -418,7 +418,6 @@ class GPTRequester:
 	# TODO: Function to direct evaluate a single request without using the Batch API (single_request() -> Response)
 	# TODO: Metrics (tokens in/out (what happens about thought tokens), per batch, num requests, divided by successful/unsuccessful)
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc)
-	# TODO: Remove tqdm if it is not actually used (would be better for wandb logs)
 	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)
 

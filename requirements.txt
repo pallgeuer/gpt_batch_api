@@ -3,5 +3,4 @@ openai
 pillow
 requests
 tiktoken
-tqdm
 wandb
