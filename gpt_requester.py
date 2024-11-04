@@ -386,7 +386,7 @@ class GPTRequester:
 	# The body of the context manager is executed within an AtomicExitStack (an ExitStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
 	# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be keyboard interrupted (or crash)
 	@contextlib.contextmanager
-	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, batch: bool = True, force_batch: bool = False, push: bool = True) -> ContextManager[contextlib.ExitStack[Optional[bool]]]:
+	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, batch: bool = True, force_batch: bool = False, push: bool = True) -> ContextManager[tuple[list[CachedGPTRequest], contextlib.ExitStack[Optional[bool]]]]:
 
 		if reqs is not None:
 			if isinstance(reqs, GPTRequest):
@@ -403,8 +403,9 @@ class GPTRequester:
 				setattr(self.S.queue, field, value)
 
 		with utils.AtomicExitStack() as stack:
+			orig_P = self.P.copy()
 			if self.P or any(cached_req is None for cached_req in self.Q):
-				stack.callback(revert_queue, P=self.P.copy(), Q=self.Q.copy())
+				stack.callback(revert_queue, P=orig_P, Q=self.Q.copy())
 				self.Q[:] = [cached_req for cached_req in self.Q if cached_req is not None]
 				self.Q.extend(self.P)
 				self.P.clear()
@@ -416,7 +417,7 @@ class GPTRequester:
 				self.state.save(stack=stack)
 			else:
 				self.validate_state_queue(clean=True)
-			yield stack  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
+			yield orig_P, stack  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
 
 		if batch:
 			self.batch_requests(force=force_batch, push=push)
