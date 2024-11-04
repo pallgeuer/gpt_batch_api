@@ -17,11 +17,12 @@ from . import gpt_requester, utils
 @dataclasses.dataclass
 class TaskState:
 	version: int = 1                                                             # Data format version number
-	meta: dict[str, Any] = dataclasses.field(default_factory=dict)               # Task-level metadata
-	committed_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples committed so far (arbitrary key-value store)
+	meta: dict[str, Any] = dataclasses.field(default_factory=dict)               # Task-level metadata (arbitrary JSON-compatible key-value store, e.g. can be used to store parameters that should/must not change throughout an entire task, even if the task is resumed with different configuration arguments)
+	committed_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples committed so far (arbitrary JSON-compatible key-value store)
 	committed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the samples committed so far (maps sample keys to corresponding JSON-compatible data)
-	completed_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples completed so far (arbitrary key-value store)
-	completed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the samples completed so far (maps sample keys to corresponding JSON-compatible data)
+	responded_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples that have received a response so far (arbitrary JSON-compatible key-value store)
+	failed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)     # Sample-level information about the committed samples that have received a response so far and failed (maps sample keys to corresponding JSON-compatible data)
+	succeeded_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the committed samples that have received a response so far and succeeded (maps sample keys to corresponding JSON-compatible data)
 
 # Task state file class
 class TaskStateFile:
@@ -61,13 +62,13 @@ class TaskStateFile:
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=TaskState, json_data=file)
-		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed and {len(self.state.completed_samples)} completed samples ({utils.format_size(file_size)}): {self.name}")
+		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: Optional[contextlib.ExitStack[Optional[bool]]]):
 		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
 			utils.json_from_dataclass(obj=self.state, file=file)
 			file_size = utils.get_file_size(file)
-		log.info(f"Saved task state file with {len(self.state.committed_samples)} committed and {len(self.state.completed_samples)} completed samples ({utils.format_size(file_size)}): {self.name}")
+		log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
 
 	def unload(self):
 		self.state = None
@@ -123,6 +124,8 @@ class TaskManager:
 
 	# Validate that there are no obvious issues with the current state
 	def validate_state(self):
-		if not self.T.committed_samples.keys() >= self.T.completed_samples.keys():
-			raise ValueError(f"Unexpected completed yet not committed samples: {sorted(self.T.completed_samples.keys() - self.T.committed_samples.keys())}")
+		if not self.T.committed_samples.keys() >= self.T.failed_samples.keys():
+			raise ValueError(f"Unexpected failed yet not committed samples: {sorted(self.T.failed_samples.keys() - self.T.committed_samples.keys())}")
+		if not self.T.committed_samples.keys() >= self.T.succeeded_samples.keys():
+			raise ValueError(f"Unexpected succeeded yet not committed samples: {sorted(self.T.succeeded_samples.keys() - self.T.committed_samples.keys())}")
 # EOF
