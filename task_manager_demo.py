@@ -24,17 +24,66 @@ from . import gpt_requester, task_manager, utils
 class CharCodesTask(task_manager.TaskManager):
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
+		self.cfg = cfg
 		super().__init__(
 			task_dir=task_dir,
-			name_prefix=cfg.task_prefix,
-			init_meta=dict(model=cfg.model),
-			**gpt_requester.GPTRequester.get_kwargs(cfg),
+			name_prefix=self.cfg.task_prefix,
+			init_meta=dict(model=self.cfg.model),
+			default_endpoint=self.cfg.chat_endpoint,
+			**gpt_requester.GPTRequester.get_kwargs(self.cfg),
 		)
-		self.char_ranges = char_ranges  # TODO: Recall that you still want to ignore non-printable characters: char = chr(code_point); if char.isprintable(): PROCESS sample
-		# # TODO: Recall that ultimately you should only add requests for samples (code points) that haven't been committed yet! UNLESS they also completed and FAILED => How to deal with that??
+		self.char_ranges = char_ranges
+		# TODO: Recall that you still want to ignore non-printable characters: char = chr(code_point); if char.isprintable(): PROCESS sample
+		# TODO: Recall that ultimately you should only add requests for samples (code points) that haven't been committed yet! UNLESS they also completed and FAILED => How to deal with that??
 
+	# TODO: Generate more requests that have not been committed/completed yet => Return bool whether this is all
+	def generate_requests(self) -> bool:
 
+		new_committed = False
+		for char_range in self.char_ranges:
 
+			# TODO: Standardise structured output error handling (refusals etc)
+			# TODO: Retrying: Can it be lower, inside GPTRequester? => Means you also don't have to rebuild the payload
+			# TODO: When response comes, can attempt to parse, and return a bool saying RETRY if the exact same payload should be retried => If NOT retry, then it has to end up in failed_samples or succeeded_samples
+
+			for char_code_point in range(char_range[0], char_range[1] + 1):
+				char = chr(char_code_point)
+				if char.isprintable():
+					sample_key = f'char-{char}'
+					committed_sample_meta = self.T.committed_samples.get(sample_key, None)
+					failed_sample_meta = self.T.failed_samples.get(sample_key, None)
+					if committed_sample_meta is None or (failed_sample_meta is not None and MAX_ATTEMPTS > failed_sample_meta.attempt >= committed_sample_meta.attempt):  # TODO: Standardise max attempts
+						self.GR.add_request(gpt_requester.GPTRequest(
+							payload=dict(
+								model=self.T.meta['model'],
+								max_tokens=512,
+								temperature=0.2,
+								top_p=0.6,
+								messages=[
+									dict(role='system', content="Given a unicode character, provide information about it."),
+									dict(role='user', content=f"Character: {char}"),
+								],  # TODO: Structured outputs via pydantic with descriptions
+							),
+							meta=dict(
+								sample_key=sample_key,
+								attempt=failed_sample_meta.attempt + 1,
+								char=char,
+							),
+						))
+
+			# TODO: Make this a separate sandboxed method (MUST be enforced somehow)!! commit_generated_requests()?
+			# TODO: This should NOT use ANY source of information other than cached_reqs!! This means that if a commit fails and the pool is reinstated, then the next commit can automatically process those pool requests without any context required at all
+			with self.GR.commit_requests() as (cached_reqs, stack):
+				if cached_reqs:
+					assert len({cached_req.item.req.meta['sample_key'] for cached_req in cached_reqs}) == len(cached_reqs)
+					for cached_req in cached_reqs:
+						req_meta = cached_req.item.req.meta
+						self.T.committed_samples[req_meta['sample_key']] = task_manager.SampleMeta(attempt=req_meta['attempt'], meta=None)
+					self.validate_state()
+					self.task.save(stack=stack)
+					new_committed = True
+
+		return new_committed
 
 	# # TODO: State what the unicode character is, give a one sentence description of what the symbol represents and where it comes from, give a sample sentence including the character at least once (if not included then this is a 'parse error' situation, i.e. soft fail)
 	#
@@ -53,9 +102,6 @@ class CharCodesTask(task_manager.TaskManager):
 	# 	code_point_a, code_point_b = unicode_blocks[0]
 	# 	for code_point, char in ((cp, chr(cp)) for cp in range(code_point_a, code_point_b + 1) if chr(cp).isprintable()):
 	# 		response = gpt_requester.direct_request(TODO)
-
-
-
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
 def demo_char_codes(cfg: utils.Config, task_dir: str):
@@ -90,6 +136,7 @@ def main():
 
 	parser_common = parser.add_argument_group('Common')
 	parser_common.add_argument('--model', type=str, default='gpt-4o-mini', help="Model to use for new tasks")
+	parser_common.add_argument('--chat_endpoint', type=str, default='/v1/chat/completions', help='Default chat completions endpoint to use')
 
 	gpt_requester.GPTRequester.configure_argparse(parser=parser)
 	args = parser.parse_args()
