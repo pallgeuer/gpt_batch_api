@@ -434,6 +434,8 @@ class GPTRequester:
 	def push_requests(self):
 		pass  # TODO: See what unpushed batches there are and push them
 
+	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
+
 	# TODO: BatchState:
 	# TODO:   Need like num_requests, num_tokens, etc? Whatever is relevant for cutoffs/thresholds/decisions
 	# TODO:   Always assert sizes when creating request_id_meta dicts (BatchState) to make sure no key overlap
