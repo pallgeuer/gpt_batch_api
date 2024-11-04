@@ -229,10 +229,6 @@ class GPTRequester:
 		working_dir: str,                                     # Path to the GPT working directory to use (will be used for automatically managed lock, state, requests and batch files)
 		name_prefix: str,                                     # Name prefix to use for all files created in the GPT working directory (e.g. 'my_gpt_requester')
 		*,                                                    # Keyword arguments only beyond here
-		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
-		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
-		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
-		lock_status_interval: Optional[float] = None,         # Lock file status update interval (see utils.LockFile)
 		openai_api_key: Optional[str] = None,                 # OpenAI API key (see openai.OpenAI, ends up in request headers)
 		openai_organization: Optional[str] = None,            # OpenAI organization (see openai.OpenAI, ends up in request headers)
 		openai_project: Optional[str] = None,                 # OpenAI project (see openai.OpenAI, ends up in request headers)
@@ -240,6 +236,10 @@ class GPTRequester:
 		client_kwargs: Optional[dict[str, Any]] = None,       # Additional kwargs to use for the OpenAI API client (see openai.OpenAI)
 		client: Optional[openai.OpenAI] = None,               # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
 		default_endpoint: Optional[str] = None,               # Default endpoint to use for GPT requests that don't explicitly specify one (None = OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
+		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
+		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
+		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
+		lock_status_interval: Optional[float] = None,         # Lock file status update interval (see utils.LockFile)
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 	):
 
@@ -292,8 +292,26 @@ class GPTRequester:
 
 	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
 	@classmethod
-	def configure_argparse(cls, parser: argparse.ArgumentParser, *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, **kwargs) -> argparse._ArgumentGroup:  # noqa
-		group = parser.add_argument_group(title=title, description=description, **kwargs)
+	def configure_argparse(cls, parser: argparse.ArgumentParser, *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, group_kwargs: Optional[dict[str, Any]] = None, **custom_defaults) -> argparse._ArgumentGroup:  # noqa
+
+		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {}))
+
+		# noinspection PyShadowingBuiltins
+		def add_argument(name: str, type: type, help: str, unit: str = ''):
+			default_value = custom_defaults.get(name, cls.__kwargs__[name])
+			group.add_argument(f'--{name}', type=type, default=default_value, help=help if default_value is None else f'{help} [default: {default_value}{unit}]')
+
+		add_argument(name='openai_api_key', type=str, help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='openai_organization', type=str, help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='openai_project', type=str, help="OpenAI project (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='client_base_url', type=str, help="Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)")
+
+		add_argument(name='autocreate_working_dir', type=bool, help="Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)")
+		add_argument(name='lock_timeout', type=float, unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
+		add_argument(name='lock_poll_interval', type=float, unit='s', help="Lock file polling interval (see utils.LockFile)")
+		add_argument(name='lock_status_interval', type=float, unit='s', help="Lock file status update interval (see utils.LockFile)")
+		add_argument(name='token_estimator_warn', type=str, help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
+
 		return group
 
 	# Enter method for the required use of GPTRequester as a context manager

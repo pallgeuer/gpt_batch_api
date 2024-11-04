@@ -84,15 +84,13 @@ def main():
 
 	logging.basicConfig(level=logging.INFO, format="[%(levelname)s][%(asctime)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 
-	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications")
+	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.")
 	parser.add_argument('--task', type=str, required=True, help='Which task to run (e.g. char_codes)')
 	parser.add_argument('--task_prefix', type=str, help='Name prefix to use for task-related files')
 
 	parser_common = parser.add_argument_group('Common')
 	parser_common.add_argument('--model', type=str, default='gpt-4o-mini', help="Model to use for new tasks")
 
-	# TODO: GPT requester argument group: Demonstrate default argparse use to supply configs (also allow custom default values with fallback to default default-values)
-	# TODO: Also populate gpt_batch_api.yaml for the Hydra alternative (will need it later when using gpt_batch_api from nounnetdev)
 	gpt_requester.GPTRequester.configure_argparse(parser=parser)
 	args = parser.parse_args()
 	if args.task_prefix is None:
