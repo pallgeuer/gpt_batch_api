@@ -292,9 +292,12 @@ class GPTRequester:
 
 	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
 	@classmethod
-	def configure_argparse(cls, parser: argparse.ArgumentParser, *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, group_kwargs: Optional[dict[str, Any]] = None, **custom_defaults) -> argparse._ArgumentGroup:  # noqa
+	def configure_argparse(cls, parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup], *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, group_kwargs: Optional[dict[str, Any]] = None, **custom_defaults) -> argparse._ArgumentGroup:  # noqa
 
-		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {}))
+		if isinstance(parser, argparse.ArgumentParser):
+			group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {}))
+		else:
+			group = parser
 
 		# noinspection PyShadowingBuiltins
 		def add_argument(name: str, type: type, help: str, unit: str = ''):
@@ -305,6 +308,7 @@ class GPTRequester:
 		add_argument(name='openai_organization', type=str, help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='openai_project', type=str, help="OpenAI project (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='client_base_url', type=str, help="Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)")
+		add_argument(name='default_endpoint', type=str, help="Default API endpoint to use")
 
 		add_argument(name='autocreate_working_dir', type=bool, help="Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)")
 		add_argument(name='lock_timeout', type=float, unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
