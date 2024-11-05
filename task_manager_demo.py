@@ -5,7 +5,7 @@ import os
 import sys
 import logging
 import argparse
-from typing import Sequence
+from typing import Sequence, Optional, Any
 from . import gpt_requester, task_manager, utils
 
 # TODO: Add any new demos to gpt_batch_api/commands.txt
@@ -16,6 +16,13 @@ from . import gpt_requester, task_manager, utils
 # TODO: At least one demo should use structured outputs, and at least one shouldn't
 # TODO: Direct is tested by having an auto-direct thing when an odd small number of samples left at the end (make sure the numbers are such that a small thing is left over)
 
+# TODO: Standardise structured output error handling (refusals, stop reason is length (in all cases), etc)
+# TODO: Retrying: Can it be lower, inside GPTRequester? => Means you also don't have to rebuild the payload
+# TODO: When response comes, can attempt to parse, and return a bool saying RETRY if the exact same payload should be retried => If NOT retry, then it has to end up in failed_samples or succeeded_samples
+# TODO: State what the unicode character is, give a one sentence description of what the symbol represents and where it comes from, give a sample sentence including the character at least once (if not included then this is a 'parse error' situation, i.e. soft fail)
+# TODO: _task.json file for storing basically information about what you've already processed (must be hashable after lists are converted to tuples and dicts are converted to tuples of items?)
+# TODO: _output.json OR _data_001.jsonl file for storing the ACTUAL output/processed response data (NOT needed to determine what samples are needed in future)
+
 #
 # Demo: Character codes
 #
@@ -24,84 +31,60 @@ from . import gpt_requester, task_manager, utils
 class CharCodesTask(task_manager.TaskManager):
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
-		self.cfg = cfg
+		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
+		gpt_requester_kwargs.update(default_endpoint=cfg.chat_endpoint)
 		super().__init__(
 			task_dir=task_dir,
-			name_prefix=self.cfg.task_prefix,
-			init_meta=dict(model=self.cfg.model),
-			default_endpoint=self.cfg.chat_endpoint,
-			**gpt_requester.GPTRequester.get_kwargs(self.cfg),
+			name_prefix=cfg.task_prefix,
+			reinit_meta=cfg.reinit_meta,
+			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
+				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
+				max_tokens=resolve(cfg.max_tokens, default=384),
+				temperature=resolve(cfg.temperature, default=0.2),
+				top_p=resolve(cfg.top_p, default=0.6),
+			),
+			**gpt_requester_kwargs,
 		)
+		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.char_ranges = char_ranges
-		# TODO: Recall that you still want to ignore non-printable characters: char = chr(code_point); if char.isprintable(): PROCESS sample
-		# TODO: Recall that ultimately you should only add requests for samples (code points) that haven't been committed yet! UNLESS they also completed and FAILED => How to deal with that??
 
-	# TODO: Generate more requests that have not been committed/completed yet => Return bool whether this is all
 	def generate_requests(self) -> bool:
 
-		new_committed = False
 		for char_range in self.char_ranges:
-
-			# TODO: Standardise structured output error handling (refusals etc)
-			# TODO: Retrying: Can it be lower, inside GPTRequester? => Means you also don't have to rebuild the payload
-			# TODO: When response comes, can attempt to parse, and return a bool saying RETRY if the exact same payload should be retried => If NOT retry, then it has to end up in failed_samples or succeeded_samples
 
 			for char_code_point in range(char_range[0], char_range[1] + 1):
 				char = chr(char_code_point)
 				if char.isprintable():
 					sample_key = f'char-{char}'
-					committed_sample_meta = self.T.committed_samples.get(sample_key, None)
-					failed_sample_meta = self.T.failed_samples.get(sample_key, None)
-					if committed_sample_meta is None or (failed_sample_meta is not None and MAX_ATTEMPTS > failed_sample_meta.attempt >= committed_sample_meta.attempt):  # TODO: Standardise max attempts
+					if sample_key not in self.T.committed_samples:
 						self.GR.add_request(gpt_requester.GPTRequest(
 							payload=dict(
 								model=self.T.meta['model'],
-								max_tokens=512,
-								temperature=0.2,
-								top_p=0.6,
+								max_tokens=self.T.meta['max_tokens'],
+								temperature=self.T.meta['temperature'],
+								top_p=self.T.meta['top_p'],
 								messages=[
 									dict(role='system', content="Given a unicode character, provide information about it."),
 									dict(role='user', content=f"Character: {char}"),
-								],  # TODO: Structured outputs via pydantic with descriptions
+								],
+								# TODO: Structured outputs via pydantic with descriptions
 							),
 							meta=dict(
 								sample_key=sample_key,
-								attempt=failed_sample_meta.attempt + 1,
 								char=char,
 							),
 						))
 
-			# TODO: Make this a separate sandboxed method (MUST be enforced somehow)!! commit_generated_requests()?
-			# TODO: This should NOT use ANY source of information other than cached_reqs!! This means that if a commit fails and the pool is reinstated, then the next commit can automatically process those pool requests without any context required at all
-			with self.GR.commit_requests() as (cached_reqs, stack):
-				if cached_reqs:
-					assert len({cached_req.item.req.meta['sample_key'] for cached_req in cached_reqs}) == len(cached_reqs)
-					for cached_req in cached_reqs:
-						req_meta = cached_req.item.req.meta
-						self.T.committed_samples[req_meta['sample_key']] = task_manager.SampleMeta(attempt=req_meta['attempt'], meta=None)
-					self.validate_state()
-					self.task.save(stack=stack)
-					new_committed = True
+			if self.commit_requests():
+				return True
 
-		return new_committed
+		return False
 
-	# # TODO: State what the unicode character is, give a one sentence description of what the symbol represents and where it comes from, give a sample sentence including the character at least once (if not included then this is a 'parse error' situation, i.e. soft fail)
-	#
-	# # Create a GPT requester to manage getting information about unicode characters
-	#
-	# # TODO: _task.json file for storing basically information about what you've already processed (must be hashable after lists are converted to tuples and dicts are converted to tuples of items?)
-	# # TODO: _output.json OR _data_001.jsonl file for storing the ACTUAL output/processed response data (NOT needed to determine what samples are needed in future)
-	#
-	# # Enter the GPT requester and thereby allow it to obtain a lock on the state files
-	# with gpt_requester:
-	# 	# Hard-code the unicode characters we are interested in getting information about (we restrict these ranges further to printable characters)
-	#
-	# 	# TODO: Sample key should uniquely identify the VALUE of the sample in some explicit/implicit way (so that if I change my set of noun candidates, it just automatically does whichever ones are new and leaves everything else untouched)
-	#
-	# 	# TODO: DOC, check which actually still need to be done
-	# 	code_point_a, code_point_b = unicode_blocks[0]
-	# 	for code_point, char in ((cp, chr(cp)) for cp in range(code_point_a, code_point_b + 1) if chr(cp).isprintable()):
-	# 		response = gpt_requester.direct_request(TODO)
+	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:
+		pass  # TODO: IMPLEMENT
+
+	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
+		pass  # TODO: Implement generate_requests for CharCodes as None/None/None where sheer key existence indicates whether KEY has been committed/succeeded/failed
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
 def demo_char_codes(cfg: utils.Config, task_dir: str):
@@ -122,6 +105,14 @@ def demo_char_codes(cfg: utils.Config, task_dir: str):
 	).run()
 
 #
+# Miscellaneous
+#
+
+# Resolve a default non-None value
+def resolve(value: Any, default: Any) -> Any:
+	return value if value is not None else default
+
+#
 # Run
 #
 
@@ -132,13 +123,18 @@ def main():
 
 	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.")
 	parser.add_argument('--task', type=str, required=True, help='Which task to run (e.g. char_codes)')
-	parser.add_argument('--task_prefix', type=str, help='Name prefix to use for task-related files')
+	parser.add_argument('--task_prefix', type=str, help='Name prefix to use for task-related files (default is same as task)')
+	parser.add_argument('--chat_endpoint', type=str, default='/v1/chat/completions', help='Default chat completions endpoint to use')
 
-	parser_common = parser.add_argument_group('Common')
-	parser_common.add_argument('--model', type=str, default='gpt-4o-mini', help="Model to use for new tasks")
-	parser_common.add_argument('--chat_endpoint', type=str, default='/v1/chat/completions', help='Default chat completions endpoint to use')
+	parser_meta = parser.add_argument_group(title='Task metadata', description='Specifications of the task metadata to be used for new tasks (the default values are defined per-task in the corresponding task implementations).')
+	parser_meta.add_argument('--reinit_meta', action='store_true', help="Force reinitialisation of the task metadata for an existing task (normally the task metadata arguments in this group are only used for initialisation of a new task and remain fixed after that across all future runs)")
+	parser_meta.add_argument('--model', type=str, help="LLM model to use")
+	parser_meta.add_argument('--max_tokens', type=int, help="Maximum number of generated output tokens per request")
+	parser_meta.add_argument('--temperature', type=float, help="What sampling temperature to use")
+	parser_meta.add_argument('--top_p', type=float, help="Nucleus sampling probability mass")
 
 	gpt_requester.GPTRequester.configure_argparse(parser=parser)
+
 	args = parser.parse_args()
 	if args.task_prefix is None:
 		args.task_prefix = args.task

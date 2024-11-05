@@ -112,17 +112,22 @@ class TaskManager:
 
 		self._enter_stack = contextlib.ExitStack()
 		self.T: Optional[TaskState] = None
+		self.step_num: Optional[int] = None
 
 	# Run the task manager to completion
 	def run(self):
+		log.info(f"Running task manager {self.GR.name_prefix}...")
 		with self:
-			raise NotImplementedError  # TODO: Is it possible to have this be a while True: step(); wait() where step() does everything it can up to the point where it would have to wait for a batch to complete?
+			while self.step():
+				pass  # TODO: Need to wait for at least one batch to finish and/or for there to be no batch pending?
+		log.info(f"Finished running task manager {self.GR.name_prefix}")
 
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
 		with self._enter_stack as stack:
 			stack.enter_context(self.GR)
 			stack.callback(self.on_exit)
+			self.step_num = 0
 			stack.enter_context(self.task)
 			self.T = self.task.state
 			self.validate_state()
@@ -136,12 +141,107 @@ class TaskManager:
 
 	# Local actions to perform on exit
 	def on_exit(self):
-		self.T = None
+		self.T = self.step_num = None
 
 	# Validate that there are no obvious issues with the current state
 	def validate_state(self):
+		# Note: This method can be overridden to sanity check task-specific task state conditions
 		if not self.T.committed_samples.keys() >= self.T.failed_samples.keys():
 			raise ValueError(f"Unexpected failed yet not committed samples: {sorted(self.T.failed_samples.keys() - self.T.committed_samples.keys())}")
 		if not self.T.committed_samples.keys() >= self.T.succeeded_samples.keys():
 			raise ValueError(f"Unexpected succeeded yet not committed samples: {sorted(self.T.succeeded_samples.keys() - self.T.committed_samples.keys())}")
+
+	# Execute a single non-blocking step of the task manager (generates and processes as much as is currently possible without waiting)
+	def step(self) -> bool:
+		# Returns whether the task manager has work left to do, i.e. the request/batch pipeline is empty (no request is currently added, committed or pending a response) AND having called generate_requests() returned True (there are currently no requests to generate)
+
+		self.step_num += 1
+		log.info('-' * 80)
+		log.info(f"{self.GR.name_prefix}: Step {self.step_num}...")
+
+		work_ongoing = True
+		while True:
+			# TODO: Process any batches that are complete and update the task state accordingly => must return whether any batches are somehow in the pipeline...?
+			log.info(f"{self.GR.name_prefix}: Generating requests...")
+			generation_ongoing = self.generate_requests()  # TODO: If congested then this could always return True until no longer congested
+			congested = self.commit_requests(force_batch=not generation_ongoing)
+			# TODO: return True instead of wait (=> Generation is congested, because batches are congested), return False if all done
+
+		log.info(f"{self.GR.name_prefix}: Finished step {self.step_num}")
+		return work_ongoing  # TODO: Step shouldn't be able to finish with no pushed batches pending / with any unbatched requests (although some batches could be not pushed due to congestion)
+
+	# Generate requests based on the current task state and add the requests to the GPT requester
+	def generate_requests(self) -> bool:
+		# Iterate through available samples and generate GPTRequest instances for work yet to do (i.e. requests that haven't previously already been generated and committed).
+		# The task state, and in particular the committed_meta/committed_samples fields thereof (in combination with sample key strings) can be used to determine what work has already been generated, and what work is yet to do.
+		# Return a boolean whether there is (potentially) more work that can be generated right now, e.g. because not all available samples were iterated through right now.
+		# It must be the case that if generate_requests() is called repeatedly in succession it eventually returns False when there is nothing more that can be generated right now (e.g. at least until some currently in-progress requests potentially finish in the future).
+		# Generated requests must contain enough metadata to allow unambiguous updating of the task state later in commit_cached_request(), i.e. at the very least the sample key(s) associated with the request, as well as any metadata required for later response processing and output file writing.
+		# To allow samples to be committed and batched more incrementally (memory/disk consideration), it is permitted to manually call self.commit_requests() at any intermediate time in this method. Otherwise, it can be assumed that self.commit_requests() will be called automatically after this method returns.
+		# If calling self.commit_requests() returns that the batch pipeline is currently congested (a certain number of batches are complete and pending but cannot be pushed yet due to thresholds), it is recommended to return early from this method and leave the generation of further requests to future calls of this method.
+		raise NotImplementedError
+
+	# Commit generated requests, and optionally batch and push them
+	def commit_requests(self, batch: bool = True, force_batch: bool = False, push: bool = True) -> bool:
+		# batch = Whether to batch requests after committing them
+		# force_batch = Whether to force batching of all requests, i.e. whether to generate a trailing non-full batch with whatever requests are left
+		# push = Whether to push batches (if possible) after creating them
+		# Returns whether the batch pipeline is currently congested (always False if push=False)
+
+		log.info(f"{self.GR.name_prefix}: Committing generated requests...")
+
+		with self.GR.commit_requests() as (cached_reqs, stack):
+			if cached_reqs:
+
+				def revert_committed_state(meta: dict[str, Any], samples_all: bool, samples: dict[str, Any]):
+					self.T.committed_meta.clear()
+					self.T.committed_meta.update(meta)
+					if samples_all:
+						self.T.committed_samples.clear()
+						self.T.committed_samples.update(samples)
+					else:
+						for sample_key, data in samples.items():
+							if data is DELETE:
+								self.T.committed_samples.pop(sample_key, None)
+							else:
+								self.T.committed_samples[sample_key] = data
+
+				DELETE = object()
+				if (sample_keys := self.cached_request_keys(cached_reqs)) is None:
+					stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=True, samples=copy.deepcopy(self.T.committed_samples))
+				else:
+					stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=False, samples={sample_key: (copy.deepcopy(self.T.committed_samples[sample_key]) if sample_key in self.T.committed_samples else DELETE) for sample_key in sample_keys})
+
+				for cached_req in cached_reqs:
+					self.commit_cached_request(cached_req)
+				self.validate_state()
+				self.task.save(stack=stack)
+
+		log.info(f"{self.GR.name_prefix}: Committed {len(cached_reqs)} generated requests")
+
+		if batch:
+			self.GR.batch_requests(force=force_batch)
+
+		if push:
+			congested = self.GR.push_batches()
+		else:
+			congested = False
+
+		return congested
+
+	# Extract from a list of CachedGPTRequest's a set of sample keys that is enough to cover all possible changes to the committed_samples task state when supplying these CachedGPTRequest's to commit_cached_request()
+	# noinspection PyMethodMayBeStatic, PyUnusedLocal
+	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:
+		# cached_reqs = List of CachedGPTRequest's to extract all relevant sample key strings from
+		# Return a set of sample key strings (the set or superset of sample key strings that will be modified by commit_cached_request()), or None (caller must assume all sample keys could be modified)
+		return None
+
+	# Update the committed_meta/committed_samples task state to reflect that a particular CachedGPTRequest has been committed
+	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
+		# cached_req = CachedGPTRequest that has been committed
+		raise NotImplementedError
+
+	# TODO: Calls some abstract methods to do the task-specific processing
+	def process_batches(self):
+		pass
 # EOF
