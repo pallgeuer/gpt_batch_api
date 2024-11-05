@@ -134,7 +134,7 @@ class CachedGPTRequest:
 	@staticmethod
 	def from_item(item: GPTRequestItem, token_estimator: tokens.TokenEstimator) -> CachedGPTRequest:
 		full_request = dict(custom_id=f'id-{item.id}', method='POST', url=item.endpoint, body=item.req.payload)
-		compact_json = json.dumps(full_request) + '\n'
+		compact_json = json.dumps(full_request, ensure_ascii=False, indent=None) + '\n'
 		return CachedGPTRequest(
 			item=item,
 			info=GPTRequestInfo(

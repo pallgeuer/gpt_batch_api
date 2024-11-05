@@ -21,7 +21,7 @@ def test_chat_completions(client: openai.OpenAI, token_est: tokens.TokenEstimato
 
 	def test_token_est(task_: dict[str, Any]):
 		log.info('-' * 120)
-		log.info(f"REQUEST:\n{json.dumps(task_, indent=2)}")
+		log.info(f"REQUEST:\n{json.dumps(task_, ensure_ascii=False, indent=2)}")
 		expected_tokens = token_est.payload_input_tokens(payload=task_, endpoint='/v1/chat/completions')
 		try:
 			response = client.chat.completions.create(**task_)
