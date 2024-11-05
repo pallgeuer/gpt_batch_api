@@ -3,6 +3,7 @@
 # Imports
 import os
 import copy
+import json
 import contextlib
 import dataclasses
 from typing import Any, Optional, Self
@@ -29,24 +30,38 @@ class TaskStateFile:
 
 	state: Optional[TaskState]
 
-	def __init__(self, path: str, init_meta: Optional[dict[str, Any]]):
+	def __init__(self, path: str, reinit_meta: bool, init_meta: Optional[dict[str, Any]]):
 		# path = Path to the JSON task state file to load/save/manage (nominally *.json extension)
+		# reinit_meta = Whether to force a reinitialisation of the meta field even if the task state file already exists
 		# init_meta = Value to initialise the meta field with if the task state file is newly created (deep copy on create)
 		self.path = os.path.abspath(path)
 		log.info(f"Task state file: {self.path}")
 		self.name = os.path.basename(self.path)
+		self.reinit_meta = reinit_meta
 		self.init_meta = init_meta if init_meta is not None else {}
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
 
+	# noinspection PyUnusedLocal
+	def clear_reinit_meta(self, exc_type, exc_val, exc_tb) -> bool:
+		if exc_type is None:
+			self.reinit_meta = False
+		return False
+
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack:
+		with self._enter_stack as stack, utils.AtomicExitStack() as atomic_stack:
 			stack.callback(self.unload)
 			try:
 				self.load()
+				if self.reinit_meta:
+					self.state.meta.clear()
+					self.state.meta.update(copy.deepcopy(self.init_meta))
+					self.save(stack=atomic_stack)
 			except FileNotFoundError:
 				self.create(stack=atomic_stack)
+			atomic_stack.push(self.clear_reinit_meta)
 			assert self.state is not None
+			log.info(f"Task metadata:\n{'\n'.join(f'    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.state.meta.items())}")
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
 		return self
@@ -86,12 +101,13 @@ class TaskManager:
 		task_dir: str,                               # Path to the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
 		name_prefix: str,                            # Name prefix to use for all files created in the task working directory (e.g. 'my_task')
 		*,                                           # Keyword arguments only beyond here
+		reinit_meta: bool = False,                   # Whether to force a reinitialisation of the task state meta field even if the task state file already exists
 		init_meta: Optional[dict[str, Any]] = None,  # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
 		**gpt_requester_kwargs,                      # Keyword arguments to be passed on to the internal GPTRequester instance
 	):
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
-		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), init_meta=init_meta)
+		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta)
 		# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 
 		self._enter_stack = contextlib.ExitStack()
