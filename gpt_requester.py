@@ -386,11 +386,11 @@ class GPTRequester:
 		for req in reqs:
 			self.add_request(req)
 
-	# Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue, and then optionally batch the requests as much as possible (use force_batch=True to ensure all requests are batched), and push as many batches as possible for remote processing
+	# Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
 	# The body of the context manager is executed within an AtomicExitStack (an ExitStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
-	# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be keyboard interrupted (or crash)
+	# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far (given by a list[CachedGPTRequest]) do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be immediately keyboard interrupted (or crash)
 	@contextlib.contextmanager
-	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, batch: bool = True, force_batch: bool = False, push: bool = True) -> ContextManager[tuple[list[CachedGPTRequest], contextlib.ExitStack[Optional[bool]]]]:
+	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None) -> ContextManager[tuple[list[CachedGPTRequest], contextlib.ExitStack[Optional[bool]]]]:
 
 		if reqs is not None:
 			if isinstance(reqs, GPTRequest):
@@ -407,9 +407,9 @@ class GPTRequester:
 				setattr(self.S.queue, field, value)
 
 		with utils.AtomicExitStack() as stack:
-			orig_P = self.P.copy()
+			cached_reqs = self.P.copy()
 			if self.P or any(cached_req is None for cached_req in self.Q):
-				stack.callback(revert_queue, P=orig_P, Q=self.Q.copy())
+				stack.callback(revert_queue, P=cached_reqs, Q=self.Q.copy())
 				self.Q[:] = [cached_req for cached_req in self.Q if cached_req is not None]
 				self.Q.extend(self.P)
 				self.P.clear()
@@ -421,22 +421,24 @@ class GPTRequester:
 				self.state.save(stack=stack)
 			else:
 				self.validate_state_queue(clean=True)
-			yield orig_P, stack  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
+			yield cached_reqs, stack  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
+			stack.pop_all()
 
-		if batch:
-			self.batch_requests(force=force_batch, push=push)
-
-	# Process the request queue and generate full batches as much as possible (also generate a non-full trailing batch with whatever requests are left if force=True), and then optionally push the batches as much as possible for remote processing
-	def batch_requests(self, force: bool = False, push: bool = True):
+	# Process the request queue and generate full batches as much as possible (also generate a trailing non-full batch with whatever requests are left if force=True)
+	def batch_requests(self, force: bool = False):
+		pass  # TODO: Return number of current pending batches or what? Or just nothing?
 		# TODO: Implement (also trailing batch if force=True)
 		# TODO: Auto-monitor when you have enough requests to fill a batch (or multiple) and send them off
 		# TODO: Have a batch size threshold below which direct requests are used instead (minimum batch size?)
-		if push:
-			self.push_requests()
 
-	# Push as many batches as possible for remote processing
-	def push_requests(self):
+	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
+	def push_batches(self) -> bool:
+		# TODO: Return whether batch pipeline is congested
 		pass  # TODO: See what unpushed batches there are and push them
+
+	# TODO
+	def process_batches(self):
+		pass
 
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
 
