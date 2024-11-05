@@ -323,14 +323,18 @@ class LockFile:
 			raise ValueError(f"Status interval must be at least 0.01s: {self.status_interval}")
 
 	def __enter__(self) -> Self:
+
 		start_time = time.perf_counter()
 		print_time = start_time + self.status_interval
+		print_duration_str = None
+
 		if self.timeout >= 0:
 			timeout_time = start_time + self.timeout
 			timeout_str = f'/{format_duration(self.timeout)}'
 		else:
 			timeout_time = math.inf
 			timeout_str = ''
+
 		now = start_time
 		while True:
 			try:
@@ -343,7 +347,10 @@ class LockFile:
 					print_in_place(f"Failed to acquire lock in {format_duration(now - start_time)}: {self.lock.lock_file}\n")
 					raise
 				elif now >= print_time:
-					print_in_place(f"Still waiting on lock after {format_duration(now - start_time)}{timeout_str}: {self.lock.lock_file} ")
+					duration_str = format_duration(now - start_time)
+					if duration_str != print_duration_str:
+						print_in_place(f"Still waiting on lock after {duration_str}{timeout_str}: {self.lock.lock_file} ")
+						print_duration_str = duration_str
 					print_time += self.status_interval
 
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
