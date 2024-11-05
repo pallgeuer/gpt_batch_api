@@ -45,7 +45,7 @@ class TaskStateFile:
 			try:
 				self.load()
 			except FileNotFoundError:
-				self.create()
+				self.create(stack=atomic_stack)
 			assert self.state is not None
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
@@ -54,9 +54,9 @@ class TaskStateFile:
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
-	def create(self):
+	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
 		self.state = TaskState(meta=copy.deepcopy(self.init_meta))
-		self.save(stack=None)
+		self.save(stack=stack)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
@@ -64,7 +64,7 @@ class TaskStateFile:
 			self.state = utils.dataclass_from_json(cls=TaskState, json_data=file)
 		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
 
-	def save(self, stack: Optional[contextlib.ExitStack[Optional[bool]]]):
+	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
 			utils.json_from_dataclass(obj=self.state, file=file)
 			file_size = utils.get_file_size(file)

@@ -73,12 +73,12 @@ class StateFile:
 		self.state = None
 
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack:
+		with self._enter_stack as stack, utils.AtomicExitStack() as atomic_stack:
 			stack.callback(self.unload)
 			try:
 				self.load()
 			except FileNotFoundError:
-				self.create()
+				self.create(stack=atomic_stack)
 			assert self.state is not None
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
@@ -87,9 +87,9 @@ class StateFile:
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
-	def create(self):
+	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
 		self.state = State()
-		self.save(stack=None)
+		self.save(stack=stack)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
@@ -97,7 +97,7 @@ class StateFile:
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
 		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
 
-	def save(self, stack: Optional[contextlib.ExitStack[Optional[bool]]]):
+	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
 			utils.json_from_dataclass(obj=self.state, file=file)
 			file_size = utils.get_file_size(file)
@@ -177,12 +177,12 @@ class QueueFile:
 		self.pool_queue = None
 
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack:
+		with self._enter_stack as stack, utils.AtomicExitStack() as atomic_stack:
 			stack.callback(self.unload)
 			try:
 				self.load()
 			except FileNotFoundError:
-				self.create()
+				self.create(atomic_stack)
 			assert self.pool_queue is not None
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
@@ -191,9 +191,9 @@ class QueueFile:
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
-	def create(self):
+	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
 		self.pool_queue = PoolQueue()
-		self.save(stack=None)
+		self.save(stack=stack)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
@@ -204,7 +204,7 @@ class QueueFile:
 			) for line in file.readlines()])
 		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
 
-	def save(self, stack: Optional[contextlib.ExitStack[Optional[bool]]]):
+	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
 			for cached_req in self.pool_queue.queue:
 				if cached_req is not None:
