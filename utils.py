@@ -260,11 +260,18 @@ def SafeOpenForWrite(
 				os.replace(src=backup_path, dst=path)
 			return False
 
+		# noinspection PyUnusedLocal
+		def unlink_path_if_exc(exc_type, exc_val, exc_tb) -> bool:
+			if exc_type is not None:
+				with contextlib.suppress(FileNotFoundError):
+					os.unlink(path)
+			return False
+
 		try:
 			shutil.copy2(src=path, dst=backup_path)
 			stack.push(revert_backup_if_exc)
 		except FileNotFoundError:
-			pass
+			stack.push(unlink_path_if_exc)
 
 	try:
 		os.replace(src=temp_path, dst=path)  # Internally atomic operation
