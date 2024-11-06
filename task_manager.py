@@ -10,6 +10,8 @@ from typing import Any, Optional, Self
 from .logger import log
 from . import gpt_requester, utils
 
+# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
+
 #
 # Task state file
 #
@@ -108,7 +110,6 @@ class TaskManager:
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
 		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta)
-		# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 
 		self._enter_stack = contextlib.ExitStack()
 		self.T: Optional[TaskState] = None
@@ -118,8 +119,9 @@ class TaskManager:
 	def run(self):
 		log.info(f"Running task manager {self.GR.name_prefix}...")
 		with self:
-			while self.step():
-				pass  # TODO: Need to wait for at least one batch to finish and/or for there to be no batch pending?
+			while self.step():  # Returns True only if F and not R => There must be at least one remote batch that is unfinished, and no remote batches that are finished yet unprocessed
+				self.GR.wait_for_batches()  # Waits until not F or R (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
+		log.info('-' * 80)
 		log.info(f"Finished running task manager {self.GR.name_prefix}")
 
 	# Enter method for the required use of TaskManager as a context manager
@@ -153,32 +155,68 @@ class TaskManager:
 
 	# Execute a single non-blocking step of the task manager (generates and processes as much as is currently possible without waiting)
 	def step(self) -> bool:
-		# Returns whether the task manager has work left to do, i.e. the request/batch pipeline is empty (no request is currently added, committed or pending a response) AND having called generate_requests() returned True (there are currently no requests to generate)
+		# Returns whether the task manager has work left to do
+		#
+		# Assumption: The available samples (on the basis of which generate_requests() generates requests) are fixed for the entire duration that a task manager is entered, e.g. for an entire call to run()
+		# Assumption: When finished remote batches are processed, they do not have any influence on the push limits anymore, and thus on whether the batch pipeline is congested or not
+		# Conditions are boolean variables that are true if the condition is definitely true, and false if something occurs (nullification) that could possibly make the condition untrue and rechecking is needed to have it set to true again (all conditions start as untrue as they are unchecked)
+		#
+		# Condition G = No more requests can be generated at this time based on the available samples and task state (nullified whenever the task state is modified other than to commit generated requests)
+		# Condition P = The request pool is empty (nullified if requests are added to the pool)
+		# Condition Q = The request queue is empty (nullified if requests from the pool are committed to the queue)
+		# Condition B = The request queue does not have enough requests to automatically trigger a full local batch (nullified if requests from the pool are committed to the queue)
+		# Condition L = There are no unpushed local batches (nullified whenever a local batch is created)
+		# Condition M = No local batch can currently be pushed, either because there are no local batches or because push limits have been reached (nullified whenever a local batch is created or a finished remote batch is processed)
+		# Condition R = There are no pushed remote batches that are unfinished (nullified whenever a local batch is pushed)
+		# Condition F = There are no pushed remote batches that are finished and unprocessed (nullified and must be rechecked whenever a non-insignificant amount of time passes)
+		# Condition C = [Batch pipeline congestion] No local batches can currently be pushed due to push limits having been reached, but there are at least some configured threshold of local batches waiting to be pushed (nullified whenever a local batch is created or a finished remote batch is processed)
+		#
+		# Condition relations: Q implies B, C implies not L, C implies M, C implies not RF = not R or not F
+		# Condition to end a step = E = PBMF(GQ + C)
+		# Condition to be completely done = GPQBLMRF = ELR (as C implies not L and not RF, C must be false in order to potentially be completely done)
 
 		self.step_num += 1
 		log.info('-' * 80)
 		log.info(f"{self.GR.name_prefix}: Step {self.step_num}...")
 
-		work_ongoing = True
 		while True:
-			# TODO: Process any batches that are complete and update the task state accordingly => must return whether any batches are somehow in the pipeline...?
-			log.info(f"{self.GR.name_prefix}: Generating requests...")
-			generation_ongoing = self.generate_requests()  # TODO: If congested then this could always return True until no longer congested
-			congested = self.commit_requests(force_batch=not generation_ongoing)
-			# TODO: return True instead of wait (=> Generation is congested, because batches are congested), return False if all done
+
+			# Process all finished remote batches (ensures condition F, nullifies conditions M and C), and update the task state (nullifies condition G)
+			# Requests may internally be auto-retried (if it occurs, temporarily nullifies condition P then re-ensures it and nullifies conditions Q and B)
+			self.process_batches()
+
+			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
+			batch_congestion = self.GR.push_batches()  # C = Returns whether no further local batches can be pushed due to push limits having been reached, despite there being at least a certain threshold of local batches waiting to be pushed
+
+			# Generate requests based on the available samples and task state (sets condition G if generation_done is True) and add them to the request pool (nullifies condition P)
+			if batch_congestion:
+				generation_done = False  # G = Batch congestion is preventing further requests from being generated, so there may be more once the congestion is over
+			else:
+				log.info(f"{self.GR.name_prefix}: Generating requests...")
+				generation_done = self.generate_requests()  # G = Returns whether there are no more requests that can be generated right now
+
+			# Commit all pooled requests to the request queue (may also happen intermittently inside generate_requests() call above, ensures condition P, nullifies conditions Q and B)
+			# Create local batches out of the requests in the request queue, including a non-full trailing batch if G, otherwise some requests may remain in the queue (ensures condition B, ensures condition Q if G, nullifies conditions L, M and C)
+			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
+			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # C = Returns whether no further local batches can be pushed due to push limits having been reached, despite there being at least a certain threshold of local batches waiting to be pushed
+
+			assert self.GR.PQ.pool_len <= 0 and self.GR.num_finished_batches() <= 0  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
+			if (generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion:  # E = PBMF(GQ + C) = GQ + C as conditions P, B, M and F are all guaranteed due to the commands above and just reaching this line
+				all_done = (self.GR.num_unpushed_batches() <= 0 and self.GR.num_unfinished_batches() <= 0)  # LR = There are no unpushed local batches and no unfinished remote batches
+				break
 
 		log.info(f"{self.GR.name_prefix}: Finished step {self.step_num}")
-		return work_ongoing  # TODO: Step shouldn't be able to finish with no pushed batches pending / with any unbatched requests (although some batches could be not pushed due to congestion)
+		return not all_done
 
 	# Generate requests based on the current task state and add the requests to the GPT requester
 	def generate_requests(self) -> bool:
-		# Iterate through available samples and generate GPTRequest instances for work yet to do (i.e. requests that haven't previously already been generated and committed).
+		# Iterate through available samples and generate and add (using self.GR.add_request() / self.GR.add_requests()) GPTRequest instances for work yet to do (i.e. requests that haven't previously already been generated and committed).
 		# The task state, and in particular the committed_meta/committed_samples fields thereof (in combination with sample key strings) can be used to determine what work has already been generated, and what work is yet to do.
-		# Return a boolean whether there is (potentially) more work that can be generated right now, e.g. because not all available samples were iterated through right now.
-		# It must be the case that if generate_requests() is called repeatedly in succession it eventually returns False when there is nothing more that can be generated right now (e.g. at least until some currently in-progress requests potentially finish in the future).
+		# Return a boolean whether there are no more requests that can be generated right now, e.g. because all available samples have been iterated through, and all corresponding requests that can be foreseen for now have been generated.
+		# It must be the case that if generate_requests() is called repeatedly in succession it eventually returns True when there is nothing more that can be generated right now (e.g. at least until some currently in-progress requests finish in the future and potentially allow more requests to then be required).
 		# Generated requests must contain enough metadata to allow unambiguous updating of the task state later in commit_cached_request(), i.e. at the very least the sample key(s) associated with the request, as well as any metadata required for later response processing and output file writing.
 		# To allow samples to be committed and batched more incrementally (memory/disk consideration), it is permitted to manually call self.commit_requests() at any intermediate time in this method. Otherwise, it can be assumed that self.commit_requests() will be called automatically after this method returns.
-		# If calling self.commit_requests() returns that the batch pipeline is currently congested (a certain number of batches are complete and pending but cannot be pushed yet due to thresholds), it is recommended to return early from this method and leave the generation of further requests to future calls of this method.
+		# If calling self.commit_requests() returns that the batch pipeline is currently congested (a certain number of batches are complete and pending but cannot be pushed yet due to thresholds), it is recommended to return early from this method (with return value False as generation is not necessarily done just because congestion occurs) and leave the generation of further requests to future calls of this method.
 		raise NotImplementedError
 
 	# Commit generated requests, and optionally batch and push them
@@ -223,11 +261,11 @@ class TaskManager:
 			self.GR.batch_requests(force=force_batch)
 
 		if push:
-			congested = self.GR.push_batches()
+			batch_congestion = self.GR.push_batches()
 		else:
-			congested = False
+			batch_congestion = False
 
-		return congested
+		return batch_congestion
 
 	# Extract from a list of CachedGPTRequest's a set of sample keys that is enough to cover all possible changes to the committed_samples task state when supplying these CachedGPTRequest's to commit_cached_request()
 	# noinspection PyMethodMayBeStatic, PyUnusedLocal
@@ -242,6 +280,10 @@ class TaskManager:
 		raise NotImplementedError
 
 	# TODO: Calls some abstract methods to do the task-specific processing
-	def process_batches(self):
+	def process_batches(self) -> bool:
+		# TODO: RETURN self.GR.num_unfinished_batches() ORRRR the return value of GR.process_batches, which is potentially (rather not??) how many finished batches were processed?
+		# TODO: Return whether there are some ongoing started batches AFTER processing any finished ones now and successfully updating the task state and output file
+		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)
+		# TODO: Log how many samples errored for whatever reasons (be specific), and how many were internally auto-retried by GPT requester
 		pass
 # EOF

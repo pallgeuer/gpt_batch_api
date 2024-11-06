@@ -1,11 +1,14 @@
 # Demonstrate the task manager module
 
 # Imports
+from __future__ import annotations
 import os
 import sys
+import enum
 import logging
 import argparse
 from typing import Sequence, Optional, Any
+import pydantic
 from . import gpt_requester, task_manager, utils
 
 # TODO: Add any new demos to gpt_batch_api/commands.txt
@@ -29,6 +32,24 @@ from . import gpt_requester, task_manager, utils
 
 # Character codes task class
 class CharCodesTask(task_manager.TaskManager):
+
+	class UnicodeCharacterType(str, enum.Enum):
+		LETTER = "letter"            # Any alphabetic character
+		NUMBER = "number"            # Numeric characters
+		PUNCTUATION = "punctuation"  # Characters like commas, periods, and such
+		SYMBOL = "symbol"            # Mathematical or other symbols
+		CURRENCY = "currency"        # Currency symbols
+		CONTROL = "control"          # Control characters
+		SPACE = "space"              # Whitespace characters
+		MARK = "mark"                # Combining marks
+		EMOJI = "emoji"              # Emoji characters
+		OTHER = "other"              # Any other type not covered by the above categories
+
+	class UnicodeCharacterInfo(pydantic.BaseModel):
+		character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (string containing only a single literal character).")
+		type: CharCodesTask.UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.")
+		description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
+		sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words).")
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
 		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
@@ -67,7 +88,7 @@ class CharCodesTask(task_manager.TaskManager):
 									dict(role='system', content="Given a unicode character, provide information about it."),
 									dict(role='user', content=f"Character: {char}"),
 								],
-								# TODO: Structured outputs via pydantic with descriptions
+								response_format=CharCodesTask.UnicodeCharacterInfo,
 							),
 							meta=dict(
 								sample_key=sample_key,
@@ -76,15 +97,17 @@ class CharCodesTask(task_manager.TaskManager):
 						))
 
 			if self.commit_requests():
-				return True
+				return False
 
-		return False
+		return True
 
 	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:
-		pass  # TODO: IMPLEMENT
+		sample_keys = {cached_req.item.req.meta['sample_key'] for cached_req in cached_reqs}
+		assert len(sample_keys) == len(cached_reqs)
+		return sample_keys
 
 	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
-		pass  # TODO: Implement generate_requests for CharCodes as None/None/None where sheer key existence indicates whether KEY has been committed/succeeded/failed
+		self.T.committed_samples[cached_req.item.req.meta['sample_key']] = None
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
 def demo_char_codes(cfg: utils.Config, task_dir: str):

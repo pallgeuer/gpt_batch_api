@@ -152,6 +152,10 @@ class PoolQueue:
 	queue: list[Optional[CachedGPTRequest]] = dataclasses.field(default_factory=list)  # Request queue: When the GPT requester is made to commit, all requests in the request pool are moved to the request queue, which is backed by the queue file and thus persistent
 
 	@property
+	def pool_len(self) -> int:
+		return len(self.pool)
+
+	@property
 	def queue_len(self) -> int:
 		return sum(1 for cached_req in self.queue if cached_req is not None)
 
@@ -229,6 +233,7 @@ class GPTRequester:
 		working_dir: str,                                     # Path to the GPT working directory to use (will be used for automatically managed lock, state, requests and batch files)
 		name_prefix: str,                                     # Name prefix to use for all files created in the GPT working directory (e.g. 'my_gpt_requester')
 		*,                                                    # Keyword arguments only beyond here
+
 		openai_api_key: Optional[str] = None,                 # OpenAI API key (see openai.OpenAI, ends up in request headers)
 		openai_organization: Optional[str] = None,            # OpenAI organization (see openai.OpenAI, ends up in request headers)
 		openai_project: Optional[str] = None,                 # OpenAI project (see openai.OpenAI, ends up in request headers)
@@ -236,6 +241,7 @@ class GPTRequester:
 		client_kwargs: Optional[dict[str, Any]] = None,       # Additional kwargs to use for the OpenAI API client (see openai.OpenAI)
 		client: Optional[openai.OpenAI] = None,               # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
 		default_endpoint: Optional[str] = None,               # Default endpoint to use for GPT requests that don't explicitly specify one (None = OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
+
 		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
 		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
 		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
@@ -425,19 +431,50 @@ class GPTRequester:
 			stack.pop_all()
 
 	# Process the request queue and generate full batches as much as possible (also generate a trailing non-full batch with whatever requests are left if force=True)
-	def batch_requests(self, force: bool = False):
-		pass  # TODO: Return number of current pending batches or what? Or just nothing?
+	def batch_requests(self, force: bool = False):  # TODO: Return value annotation
+		# TODO: Log info about how many batches were created (one for each created batch with stats?)
+		pass  # TODO: Return number of current unpushed batches or what (num_unpushed_batches())? Or just nothing?
 		# TODO: Implement (also trailing batch if force=True)
+		# TODO: Everything needs to be completely reversible and with utils.AtomicExitStack() as stack: and self.validate_state_queue(clean=False) and self.state.save(stack=stack)
 		# TODO: Auto-monitor when you have enough requests to fill a batch (or multiple) and send them off
 		# TODO: Have a batch size threshold below which direct requests are used instead (minimum batch size?)
+		# TODO: MUST: After this function the return value of num_unpushed_batches() must be correct
+
+	# Retrieve the number of unpushed local batches
+	def num_unpushed_batches(self) -> int:
+		pass  # TODO: Must stay up to date with batch_requests() and push_batches() => Automatically just because of state right?
 
 	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
 	def push_batches(self) -> bool:
+		# TODO: Log info about how many batches were pushed (one for each pushed batch with stats, e.g. remote ID?)
+		# TODO: Need to be totally safe that congested can only be True if not(RF)
 		# TODO: Return whether batch pipeline is congested
+		# TODO: Log info if return value is true (batch_congestion)
+		# TODO: MUST: Update whatever state is necessary so that the output of num_unfinished_batches() is still correct without a call to retrieve_remote_batches or whatever (don't really need to do anything actually?)
+		# TODO: MUST: After this function the return value of num_unpushed_batches() must be correct
 		pass  # TODO: See what unpushed batches there are and push them
 
-	# TODO
-	def process_batches(self):
+	# Retrieve the current state of all pushed remote batches and update the local state of information about them
+	def retrieve_remote_batches(self):
+		pass  # TODO
+
+	# Return how many unfinished remote batches there are according to the latest local state of information (see retrieve_remote_batches())
+	def num_unfinished_batches(self) -> int:
+		pass  # TODO: If push_batches pushed some new batches then they should appear here as unfinished, at least until a subsequent retrieve_remote_batches call sees that it is in fact done now
+
+	# Return how many finished remote batches there are according to the latest local state of information (see retrieve_remote_batches())
+	def num_finished_batches(self) -> int:
+		pass  # TODO: If process_batches processed some finished batches then they should automatically disappear from here without further calls to retrieve_remote_batches required
+
+	# Wait until there is at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
+	def wait_for_batches(self) -> bool:
+		# TODO: Uses sleep scheme like utils.LockFile, retrieve_remote_batches(), num_unfinished_batches()
+		pass  # TODO: Return whether remote batches are all finished and processed (i.e. no unfinished and/or unprocessed remote batches at all)
+
+	# TODO: Does this need to be more like "retrieve finished batches"? Does it return a context manager? And iterable?
+	def process_batches(self):  # TODO: Return value annotation (does this return num_unfinished_batches? Or rather (NOT?) how many it processed?)
+		# TODO: MUST Use retrieve_remote_batches()
+		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		pass
 
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
@@ -473,7 +510,7 @@ class GPTRequester:
 	# TODO: Maybe have two bools for no_upload / no_cost
 	# TODO: Function to direct evaluate a single request without using the Batch API (single_request() -> Response)
 	# TODO: Metrics (tokens in/out (what happens about thought tokens), per batch, num requests, divided by successful/unsuccessful)
-	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc)
+	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)
 
