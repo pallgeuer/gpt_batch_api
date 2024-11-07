@@ -56,8 +56,7 @@ class TaskStateFile:
 			try:
 				self.load()
 				if self.reinit_meta:
-					self.state.meta.clear()
-					self.state.meta.update(copy.deepcopy(self.init_meta))
+					self.state.meta = copy.deepcopy(self.init_meta)
 					self.save(stack=atomic_stack)
 			except FileNotFoundError:
 				self.create(stack=atomic_stack)
@@ -82,7 +81,7 @@ class TaskStateFile:
 		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
-		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
+		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 			utils.json_from_dataclass(obj=self.state, file=file)
 			file_size = utils.get_file_size(file)
 		log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
@@ -232,11 +231,9 @@ class TaskManager:
 			if cached_reqs:
 
 				def revert_committed_state(meta: dict[str, Any], samples_all: bool, samples: dict[str, Any]):
-					self.T.committed_meta.clear()
-					self.T.committed_meta.update(meta)
+					self.T.committed_meta = meta
 					if samples_all:
-						self.T.committed_samples.clear()
-						self.T.committed_samples.update(samples)
+						self.T.committed_samples = samples
 					else:
 						for sample_key, data in samples.items():
 							if data is DELETE:
@@ -258,9 +255,13 @@ class TaskManager:
 		log.info(f"{self.GR.name_prefix}: Committed {len(cached_reqs)} generated requests")
 
 		if batch:
-			self.GR.batch_requests(force=force_batch)
+			log.info(f"{self.GR.name_prefix}: Creating unpushed batches from committed requests...")
+			num_unpushed_batches = self.GR.batch_requests(force=force_batch)
+			log.info(f"{self.GR.name_prefix}: The total number of unpushed batches is now {num_unpushed_batches}")
 
 		if push:
+			# TODO: Logging before/after call here (or inside method?) Update how many unpushed/remote batches there are now?
+			log.info(f"{self.GR.name_prefix}: Pushing batches to remote server...")
 			batch_congestion = self.GR.push_batches()
 		else:
 			batch_congestion = False

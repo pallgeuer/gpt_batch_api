@@ -27,4 +27,21 @@ lock_poll_interval: null
 lock_status_interval: null
 # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 token_estimator_warn: once
+
+ # Maximum number of requests allowed in a batch
+max_batch_requests: 50000
+# Maximum allowed batch size in MB (not MiB)
+max_batch_mb: 100
+# Maximum number of tokens to include in a single batch (in units of 1000)
+max_batch_ktokens: 2000
+# Maximum number of unpushed local batches at any one time
+max_unpushed_batches: 10
+# Maximum number of remote batches at any one time
+max_remote_batches: 100
+# Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
+max_remote_mb: 5000
+# Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
+max_remote_ktokens: 5000
+# Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
+max_token_safety: 1.05
 # EOF

@@ -7,6 +7,8 @@ import json
 import inspect
 import logging
 import argparse
+import datetime
+import itertools
 import contextlib
 import dataclasses
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
@@ -46,18 +48,24 @@ class QueueState:
 # Batch state class
 @dataclasses.dataclass
 class BatchState:
-	request_id_meta: dict[int, Optional[dict[str, Any]]]  # A map of request ID to custom metadata for all requests in the batch (order is the same as in the local JSONL batch input file, which is by ascending request ID)
-	local_jsonl: str                                      # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
-	local_jsonl_size: int                                 # Number of bytes in the local JSONL batch input file
-	remote_jsonl_id: Optional[str] = None                 # Assigned string ID of the uploaded batch input file (OpenAI file storage)
-	remote_batch: Optional[str] = None                    # Assigned string ID of the running batch (OpenAI batches)
+	id: int = 0                                                                                     # Unique monotonic ID corresponding to the batch
+	local_jsonl: str = ''                                                                           # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
+	local_jsonl_size: int = 0                                                                       # Number of bytes in the local JSONL batch input file
+	num_requests: int = 0                                                                           # Number of requests in the batch
+	num_tokens: dict[int, int] = dataclasses.field(default_factory=dict)                            # An approximation of the number of input tokens in each request payload
+	total_tokens: int = 0                                                                           # An approximation of the total number of input tokens in all of the request payloads together
+	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the batch (order is the same as in the local JSONL batch input file, which is by ascending request ID)
+	full_batch: bool = False                                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
+	remote_jsonl_id: Optional[str] = None                                                           # Assigned string ID of the uploaded batch input file (OpenAI file storage)
+	remote_batch: Optional[str] = None                                                              # Assigned string ID of the running batch (OpenAI batches)
 
 # State class
 @dataclasses.dataclass
 class State:
 	version: int = 1                                                     # Data format version number
 	queue: QueueState = dataclasses.field(default_factory=QueueState)    # State of the request queue
-	batches: list[BatchState] = dataclasses.field(default_factory=list)  # States of all batches that are currently pending or in progress
+	max_batch_id: int = 0                                                # Maximum batch ID used thus far (0 = No batch ID used so far)
+	batches: list[BatchState] = dataclasses.field(default_factory=list)  # States of all batches that are currently pending or in progress (in ascending batch ID order)
 
 # State file class
 class StateFile:
@@ -98,7 +106,7 @@ class StateFile:
 		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
-		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
+		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 			utils.json_from_dataclass(obj=self.state, file=file)
 			file_size = utils.get_file_size(file)
 		log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
@@ -122,7 +130,7 @@ class GPTRequestItem:
 class GPTRequestInfo:
 	json: str        # Full batch-style request in compact JSON string form (includes the payload, always ends with a single trailing newline)
 	json_size: int   # Number of bytes in the compact JSON string form when encoded with UTF-8
-	num_tokens: int  # A conservative approximation (overestimation) of how many input tokens the request payload has (the aim is to never actually end up with more input tokens in a batch than the sum of these approximations suggests)
+	num_tokens: int  # An approximation of how many input tokens the request payload has
 
 # Cached GPT request class
 @dataclasses.dataclass(frozen=True)
@@ -209,7 +217,7 @@ class QueueFile:
 		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
-		with utils.SafeOpenForWrite(self.path, stack=stack) as file:
+		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 			for cached_req in self.pool_queue.queue:
 				if cached_req is not None:
 					utils.json_from_dataclass(obj=cached_req.item, file=file)
@@ -247,6 +255,16 @@ class GPTRequester:
 		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
 		lock_status_interval: Optional[float] = None,         # Lock file status update interval (see utils.LockFile)
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
+
+		# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
+		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
+		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
+		max_batch_ktokens: int = 2000,                        # Maximum number of tokens to include in a single batch (in units of 1000)
+		max_unpushed_batches: int = 10,                       # Maximum number of unpushed local batches at any one time
+		max_remote_batches: int = 100,                        # TODO: Maximum number of remote batches at any one time
+		max_remote_mb: int = 5000,                            # TODO: Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
+		max_remote_ktokens: int = 5000,                       # TODO: Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
+		max_token_safety: float = 1.05,                       # Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 	):
 
 		self.working_dir = os.path.abspath(working_dir)
@@ -280,6 +298,31 @@ class GPTRequester:
 			self.default_endpoint = os.environ.get("OPENAI_ENDPOINT")
 		if self.default_endpoint is None:
 			self.default_endpoint = DEFAULT_ENDPOINT
+
+		self.max_batch_requests = max_batch_requests
+		if self.max_batch_requests < 1:
+			raise ValueError(f"Maximum number of requests in a batch must be at least 1: {self.max_batch_requests}")
+		self.max_batch_mb = max_batch_mb
+		if self.max_batch_mb < 1:
+			raise ValueError(f"Maximum batch size in MB must be at least 1: {self.max_batch_mb}")
+		self.max_batch_ktokens = max_batch_ktokens
+		if self.max_batch_ktokens < 1:
+			raise ValueError(f"Maximum batch ktokens must be at least 1: {self.max_batch_ktokens}")
+		self.max_unpushed_batches = max_unpushed_batches
+		if self.max_unpushed_batches < 1:
+			raise ValueError(f"Maximum number of unpushed batches must be at least 1: {self.max_unpushed_batches}")
+		self.max_remote_batches = max_remote_batches
+		if self.max_remote_batches < 1:
+			raise ValueError(f"Maximum number of remote batches must be at least 1: {self.max_remote_batches}")
+		self.max_remote_mb = max_remote_mb
+		if self.max_remote_mb < self.max_batch_mb:
+			raise ValueError(f"Maximum total uploaded remote batch size in MB must be at least as great as the maximum batch size in MB: {self.max_remote_mb} vs {self.max_batch_mb}")
+		self.max_remote_ktokens = max_remote_ktokens
+		if self.max_remote_ktokens < self.max_batch_ktokens:
+			raise ValueError(f"Maximum total uploaded remote batch ktokens must be at least as great as the maximum batch ktokens: {self.max_remote_ktokens} vs {self.max_batch_ktokens}")
+		self.max_token_safety = max_token_safety
+		if self.max_token_safety < 1.0:
+			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety}")
 
 		self._enter_stack = contextlib.ExitStack()
 		self.S: Optional[State] = None
@@ -322,6 +365,15 @@ class GPTRequester:
 		add_argument(name='lock_status_interval', type=float, unit='s', help="Lock file status update interval (see utils.LockFile)")
 		add_argument(name='token_estimator_warn', type=str, help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 
+		add_argument(name='max_batch_requests', type=int, help="Maximum number of requests allowed in a batch")
+		add_argument(name='max_batch_mb', type=int, unit='MB', help="Maximum allowed batch size in MB (not MiB)")
+		add_argument(name='max_batch_ktokens', type=int, unit=' ktokens', help="Maximum number of tokens to include in a single batch (in units of 1000)")
+		add_argument(name='max_unpushed_batches', type=int, help="Maximum number of unpushed local batches at any one time")
+		add_argument(name='max_remote_batches', type=int, help="Maximum number of remote batches at any one time")
+		add_argument(name='max_remote_mb', type=int, unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
+		add_argument(name='max_remote_ktokens', type=int, unit=' ktokens', help="Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time")
+		add_argument(name='max_token_safety', type=int, help="Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
+
 		return group
 
 	# Enter method for the required use of GPTRequester as a context manager
@@ -344,7 +396,7 @@ class GPTRequester:
 	# Exit method for the required use of GPTRequester as a context manager
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		if self.P:
-			log.warning(f"Exiting GPT requester with {len(self.P)} uncommitted requests in the request pool")
+			log.warning(f"{self.name_prefix}: Exiting GPT requester with {len(self.P)} uncommitted requests in the request pool")
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	# Local actions to perform on exit
@@ -367,6 +419,16 @@ class GPTRequester:
 			raise ValueError("ID-meta map is inconsistent between the state and queue files for the request queue")
 
 		for batch in self.S.batches:
+			if batch.id <= 0:
+				raise ValueError(f"Invalid batch ID: {batch.id}")
+			if batch.id > self.S.max_batch_id:
+				raise ValueError(f"Batch ID is greater than the supposed maximum assigned batch ID: {batch.id} > {self.S.max_batch_id}")
+			if not (batch.remote_jsonl_id is None) == (batch.remote_batch is None):
+				raise ValueError(f"Batch ID {batch.id} is in an inconsistent remote status")
+		if not utils.is_ascending((batch.id for batch in self.S.batches), strict=True):
+			raise ValueError(f"The batch IDs are not strictly ascending: {list(batch.id for batch in self.S.batches)}")
+
+		for batch in self.S.batches:
 			if not utils.is_ascending(batch.request_id_meta.keys(), strict=True):
 				raise ValueError(f"The request IDs in a batch are not strictly ascending: {list(batch.request_id_meta.keys())}")
 		if not utils.is_ascending(self.S.queue.request_id_meta.keys(), strict=True):
@@ -374,9 +436,12 @@ class GPTRequester:
 		if not utils.is_ascending((pool_request_ids := [cached_req.item.id for cached_req in self.P]), strict=True):
 			raise ValueError(f"The request IDs in the request pool are not strictly ascending: {pool_request_ids}")
 
-		req_id_intervals = [(min(req_ids), max(req_ids)) for req_ids in (*(batch.request_id_meta.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
-		if not utils.is_ascending((req_id for req_id_interval in req_id_intervals for req_id in req_id_interval), strict=True):
+		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in (*(batch.request_id_meta.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
+		flat_req_id_bounds = [req_id for req_id_interval in req_id_intervals for req_id in req_id_interval if req_id is not None]
+		if not utils.is_ascending(flat_req_id_bounds, strict=True):
 			raise ValueError(f"The request ID intervals overlap between the batches, request queue and request pool: {req_id_intervals}")
+		if any(req_id > self.S.queue.max_request_id for req_id in flat_req_id_bounds):
+			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.S.queue.max_request_id}: {req_id_intervals}")
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 
@@ -421,7 +486,7 @@ class GPTRequester:
 				self.P.clear()
 				stack.callback(revert_queue_state, queue_state_dict=dataclasses.asdict(self.S.queue))  # noqa
 				self.S.queue.max_request_id = self.max_request_id
-				self.S.queue.request_meta_id = self.PQ.queue_request_id_meta()
+				self.S.queue.request_id_meta = self.PQ.queue_request_id_meta()
 				self.validate_state_queue(clean=True)
 				self.queue.save(stack=stack)
 				self.state.save(stack=stack)
@@ -431,28 +496,122 @@ class GPTRequester:
 			stack.pop_all()
 
 	# Process the request queue and generate full batches as much as possible (also generate a trailing non-full batch with whatever requests are left if force=True)
-	def batch_requests(self, force: bool = False):  # TODO: Return value annotation
-		# TODO: Log info about how many batches were created (one for each created batch with stats?)
-		pass  # TODO: Return number of current unpushed batches or what (num_unpushed_batches())? Or just nothing?
-		# TODO: Implement (also trailing batch if force=True)
-		# TODO: Everything needs to be completely reversible and with utils.AtomicExitStack() as stack: and self.validate_state_queue(clean=False) and self.state.save(stack=stack)
-		# TODO: Auto-monitor when you have enough requests to fill a batch (or multiple) and send them off
-		# TODO: Have a batch size threshold below which direct requests are used instead (minimum batch size?)
-		# TODO: MUST: After this function the return value of num_unpushed_batches() must be correct
+	def batch_requests(self, force: bool = False) -> int:
 
-	# Retrieve the number of unpushed local batches
-	def num_unpushed_batches(self) -> int:
-		pass  # TODO: Must stay up to date with batch_requests() and push_batches() => Automatically just because of state right?
+		num_created = 0
+		num_created_requests = 0
+
+		index = 0
+		while index < len(self.Q):
+
+			num_unpushed_batches = self.num_unpushed_batches()
+			if num_unpushed_batches >= self.max_unpushed_batches:
+				log.info(f"{self.name_prefix}: Not batching {sum(1 for cached_req in itertools.islice(self.Q, index, None) if cached_req is not None)} requests left in the request queue as there are already {num_unpushed_batches} unpushed batches (max {self.max_unpushed_batches} allowed)")
+				break
+
+			batch_index = index
+			batch_reqs = []
+			batch = BatchState()
+
+			num_nones = 0
+			while index < len(self.Q):
+
+				cached_req = self.Q[index]
+				if cached_req is None:
+					num_nones += 1
+				else:
+
+					next_local_jsonl_size = batch.local_jsonl_size + cached_req.info.json_size
+					next_num_requests = batch.num_requests + 1
+					next_total_tokens = batch.total_tokens + cached_req.info.num_tokens
+
+					if (
+						next_num_requests >= self.max_batch_requests or
+						next_local_jsonl_size >= self.max_batch_mb * 1000000 or
+						next_total_tokens * self.max_token_safety >= self.max_batch_ktokens * 1000
+					):
+						if batch.num_requests <= 0:
+							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} >= {self.max_batch_requests} OR Batch bytes {next_local_jsonl_size} >= {self.max_batch_mb * 1000000} OR Batch tokens {next_total_tokens} >= {round(self.max_batch_ktokens * 1000 / self.max_token_safety)}")
+						batch.full_batch = True
+						break
+
+					req_id = cached_req.item.id
+					batch_reqs.append(cached_req.info.json)
+					batch.local_jsonl_size = next_local_jsonl_size
+					batch.num_requests = next_num_requests
+					assert req_id not in batch.num_tokens and cached_req.info.num_tokens >= 0
+					batch.num_tokens[req_id] = cached_req.info.num_tokens
+					batch.total_tokens = next_total_tokens
+					assert req_id not in batch.request_id_meta
+					batch.request_id_meta[req_id] = cached_req.item.req.meta
+
+				index += 1
+
+			assert index - batch_index == batch.num_requests + num_nones
+			assert batch.num_requests == len(batch.num_tokens) == len(batch.request_id_meta)
+			assert batch.total_tokens == sum(batch.num_tokens)
+			assert batch.num_tokens.keys() == batch.request_id_meta.keys()
+
+			if (batch.full_batch or force) and batch.num_requests >= 1:
+
+				def revert_state(max_batch_id: int, request_id_meta: dict[int, Optional[dict[str, Any]]], queue: list[Optional[CachedGPTRequest]]):
+					self.Q[batch_index:index] = queue
+					self.S.queue.request_id_meta = request_id_meta
+					if self.S.batches and self.S.batches[-1] is batch:
+						self.S.batches.pop()
+					self.S.max_batch_id = max_batch_id
+
+				with utils.AtomicExitStack() as stack:
+
+					stack.callback(revert_state, max_batch_id=self.S.max_batch_id, request_id_meta=self.S.queue.request_id_meta.copy(), queue=self.Q[batch_index:index])
+
+					self.S.max_batch_id += 1
+					batch.id = self.S.max_batch_id
+					batch.local_jsonl = os.path.join(self.working_dir, f"{self.name_prefix}_batch{batch.id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jsonl")
+
+					self.S.batches.append(batch)
+					for req_id, req_meta in batch.request_id_meta.items():
+						assert self.S.queue.request_id_meta[req_id] == req_meta
+						del self.S.queue.request_id_meta[req_id]
+					self.Q[batch_index:index] = (None,) * (index - batch_index)
+
+					with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
+						file.writelines(batch_reqs)
+						file_size = utils.get_file_size(file)
+					assert file_size == batch.local_jsonl_size
+					log.info(f"{self.name_prefix}: Created batch {batch.id}, a {'full' if batch.full_batch else 'trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
+
+					self.validate_state_queue(clean=False)
+					self.queue.save(stack=stack)
+					self.state.save(stack=stack)
+
+					stack.pop_all()
+
+				num_created += 1
+				num_created_requests += batch.num_requests
+
+		log.info(f"{self.name_prefix}: Created {num_created} batches from {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
+		return self.num_unpushed_batches()
 
 	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
 	def push_batches(self) -> bool:
-		# TODO: Log info about how many batches were pushed (one for each pushed batch with stats, e.g. remote ID?)
+		# TODO: Log info about how many batches were pushed (one for each pushed batch with stats, e.g. batch ID and remote ID and file ID and such as well?)
 		# TODO: Need to be totally safe that congested can only be True if not(RF)
 		# TODO: Return whether batch pipeline is congested
 		# TODO: Log info if return value is true (batch_congestion)
 		# TODO: MUST: Update whatever state is necessary so that the output of num_unfinished_batches() is still correct without a call to retrieve_remote_batches or whatever (don't really need to do anything actually?)
 		# TODO: MUST: After this function the return value of num_unpushed_batches() must be correct
-		pass  # TODO: See what unpushed batches there are and push them
+		# TODO: See what unpushed batches there are and push them
+		# TODO: Also want to know exactly which push limit is reached when and why (explicit?)
+		return CANNOT_PUSH_ANY_CURRENT_BATCH and self.num_unpushed_batches() >= self.max_unpushed_batches
+
+	# Retrieve the number of unpushed local batches
+	def num_unpushed_batches(self) -> int:
+		return sum(1 for batch in self.S.batches if batch.remote_batch is None)
+
+	# Return how many remote batches there are
+	def num_remote_batches(self) -> int:
+		return sum(1 for batch in self.S.batches if batch.remote_batch is not None)
 
 	# Retrieve the current state of all pushed remote batches and update the local state of information about them
 	def retrieve_remote_batches(self):
@@ -479,9 +638,13 @@ class GPTRequester:
 
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
 
+	# TODO: Errors that one should not attempt to continue from (e.g. inconsistent state?) so that manual intervention can fix, errors like timeouts that could benefit from a simple retry (but need to back off?), errors like requests/samples that permanently fail and never go through - when to accept? How to retry after accepted? (allow a launch to clear the failed task manager state / gpt requester attempts state?)
+
 	# TODO: BatchState:
 	# TODO:   Need like num_requests, num_tokens, etc? Whatever is relevant for cutoffs/thresholds/decisions
 	# TODO:   Always assert sizes when creating request_id_meta dicts (BatchState) to make sure no key overlap
+
+	# TODO: Have a batch size threshold below which direct requests are used instead of Batch API (minimum batch size?)
 
 	# TODO: User test case is one that attempts to get character codes and descriptions of unicode characters (tests that UTF-8 and everything is working correctly and the characters arrive properly on OpenAI servers)
 	# TODO: Options like 'model' should be in the user state file (to remain consistent)
