@@ -45,6 +45,13 @@ class QueueState:
 	max_request_id: int = 0                                                                         # Maximum request ID used thus far (0 = No request ID used so far)
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the request queue (NOT including the request pool, ordered by ascending request ID)
 
+# Remote batch state class
+@dataclasses.dataclass
+class RemoteBatchState:
+	file_id: str            # Assigned string ID of the uploaded batch input file (OpenAI file storage)
+	batch_id: str           # Assigned string ID of the running batch (OpenAI batches)
+	finished: bool = False  # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked)
+
 # Batch state class
 @dataclasses.dataclass
 class BatchState:
@@ -56,8 +63,7 @@ class BatchState:
 	total_tokens: int = 0                                                                           # An approximation of the total number of input tokens in all of the request payloads together
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the batch (order is the same as in the local JSONL batch input file, which is by ascending request ID)
 	full_batch: bool = False                                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
-	remote_jsonl_id: Optional[str] = None                                                           # Assigned string ID of the uploaded batch input file (OpenAI file storage)
-	remote_batch: Optional[str] = None                                                              # Assigned string ID of the running batch (OpenAI batches)
+	remote: Optional[RemoteBatchState] = None                                                       # Remote state of the batch once it has been pushed
 
 # State class
 @dataclasses.dataclass
@@ -423,8 +429,6 @@ class GPTRequester:
 				raise ValueError(f"Invalid batch ID: {batch.id}")
 			if batch.id > self.S.max_batch_id:
 				raise ValueError(f"Batch ID is greater than the supposed maximum assigned batch ID: {batch.id} > {self.S.max_batch_id}")
-			if not (batch.remote_jsonl_id is None) == (batch.remote_batch is None):
-				raise ValueError(f"Batch ID {batch.id} is in an inconsistent remote status")
 		if not utils.is_ascending((batch.id for batch in self.S.batches), strict=True):
 			raise ValueError(f"The batch IDs are not strictly ascending: {list(batch.id for batch in self.S.batches)}")
 
@@ -607,11 +611,11 @@ class GPTRequester:
 
 	# Retrieve the number of unpushed local batches
 	def num_unpushed_batches(self) -> int:
-		return sum(1 for batch in self.S.batches if batch.remote_batch is None)
+		return sum(1 for batch in self.S.batches if batch.remote is None)
 
 	# Return how many remote batches there are
 	def num_remote_batches(self) -> int:
-		return sum(1 for batch in self.S.batches if batch.remote_batch is not None)
+		return sum(1 for batch in self.S.batches if batch.remote is not None)
 
 	# Retrieve the current state of all pushed remote batches and update the local state of information about them
 	def retrieve_remote_batches(self):
@@ -619,11 +623,11 @@ class GPTRequester:
 
 	# Return how many unfinished remote batches there are according to the latest local state of information (see retrieve_remote_batches())
 	def num_unfinished_batches(self) -> int:
-		pass  # TODO: If push_batches pushed some new batches then they should appear here as unfinished, at least until a subsequent retrieve_remote_batches call sees that it is in fact done now
+		return sum(1 for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)
 
 	# Return how many finished remote batches there are according to the latest local state of information (see retrieve_remote_batches())
 	def num_finished_batches(self) -> int:
-		pass  # TODO: If process_batches processed some finished batches then they should automatically disappear from here without further calls to retrieve_remote_batches required
+		return sum(1 for batch in self.S.batches if batch.remote is not None and batch.remote.finished)
 
 	# Wait until there is at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
 	def wait_for_batches(self) -> bool:
@@ -634,6 +638,7 @@ class GPTRequester:
 	def process_batches(self):  # TODO: Return value annotation (does this return num_unfinished_batches? Or rather (NOT?) how many it processed?)
 		# TODO: MUST Use retrieve_remote_batches()
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
+		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
 
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
