@@ -318,6 +318,7 @@ class GPTRequester:
 			self.default_endpoint = os.environ.get("OPENAI_ENDPOINT")
 		if self.default_endpoint is None:
 			self.default_endpoint = DEFAULT_ENDPOINT
+		log.info(f"{self.name_prefix}: Using client base URL '{self.client.base_url}' with default endpoint '{self.default_endpoint}'")
 
 		self.remote_update_interval = remote_update_interval
 		if self.remote_update_interval < 1.0:
@@ -351,12 +352,26 @@ class GPTRequester:
 		if self.max_token_safety < 1.0:
 			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety}")
 
+		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {self.max_batch_mb}MB, {self.max_batch_tokens} tokens (safety factor {self.max_token_safety:.3g})")
+		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {self.max_remote_mb}MB, {self.max_remote_tokens} tokens (safety factor {self.max_token_safety:.3g})")
+		log.info(f"{self.name_prefix}: Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
+
 		self._enter_stack = contextlib.ExitStack()
 		self.S: Optional[State] = None
 		self.PQ: Optional[PoolQueue] = None
 		self.P: Optional[list[CachedGPTRequest]] = None
 		self.Q: Optional[list[Optional[CachedGPTRequest]]] = None
 		self.max_request_id: Optional[int] = None
+
+	@property
+	def max_batch_tokens(self) -> int:
+		# Returns the maximum number of tokens allowed in a batch (including possible reduction due to the token safety factor)
+		return max(round(self.max_batch_ktokens * 1000 / self.max_token_safety), 1000)
+
+	@property
+	def max_remote_tokens(self) -> int:
+		# Returns the maximum number of tokens allowed across all remote batches (including possible reduction due to the token safety factor)
+		return max(round(self.max_remote_ktokens * 1000 / self.max_token_safety), 1000)
 
 	# Dictionary of all __init__ keyword arguments and their default values
 	__kwargs__ = {name: param.default for name, param in inspect.signature(__init__).parameters.items() if name != 'self' and param.default != inspect.Parameter.empty}
@@ -626,7 +641,7 @@ class GPTRequester:
 						file.writelines(batch_reqs)
 						file_size = utils.get_file_size(file)
 					assert file_size == batch.local_jsonl_size
-					log.info(f"{self.name_prefix}: Created batch {batch.id}, a {'full' if batch.full_batch else 'trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
+					log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
 
 					self.validate_state_queue(clean=False)
 					self.queue.save(stack=stack)
@@ -637,7 +652,9 @@ class GPTRequester:
 				num_created += 1
 				num_created_requests += batch.num_requests
 
-		log.info(f"{self.name_prefix}: Created {num_created} batches from {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
+		if num_created > 0:
+			log.info(f"{self.name_prefix}: Created {num_created} batches from {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
+
 		return self.num_unpushed_batches()
 
 	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
