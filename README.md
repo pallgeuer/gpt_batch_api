@@ -21,7 +21,7 @@ Applications should subclass the `TaskManager` class to implement the desired ba
 - `OPENAI_ORG_ID`: The organization ID associated with the OpenAI account, if required (e.g. `org-...`)
 - `OPENAI_PROJECT_ID`: An identifier for the specific OpenAI project, used for tracking usage and billing (e.g. `proj_...`)
 - `OPENAI_BASE_URL`: The base URL of where to direct API requests (e.g. `https://api.openai.com/v1`)
-- `OPENAI_ENDPOINT`: The default endpoint to use for `GPTRequester` instances, if not explicitly otherwise specified on a per-`GPTRequester` or per-request basis (e.g. `/v1/chat/completions`)
+- `OPENAI_ENDPOINT`: The default endpoint to use for `GPTRequester` instances, if not explicitly otherwise specified on a per-`GPTRequester` basis (e.g. `/v1/chat/completions`)
 - `WANDB_API_KEY`: [**Required if Wandb support is enabled**] The API key for authenticating with Weights & Biases (e.g. `ff63...`)
 
 **Useful links:**

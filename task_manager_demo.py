@@ -53,7 +53,7 @@ class CharCodesTask(task_manager.TaskManager):
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
 		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
-		gpt_requester_kwargs.update(default_endpoint=cfg.chat_endpoint)
+		gpt_requester_kwargs.update(endpoint=cfg.chat_endpoint)
 		super().__init__(
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
@@ -147,7 +147,7 @@ def main():
 	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.")
 	parser.add_argument('--task', type=str, required=True, help='Which task to run (e.g. char_codes)')
 	parser.add_argument('--task_prefix', type=str, help='Name prefix to use for task-related files (default is same as task)')
-	parser.add_argument('--chat_endpoint', type=str, default='/v1/chat/completions', help='Default chat completions endpoint to use')
+	parser.add_argument('--chat_endpoint', type=str, default='/v1/chat/completions', help='Chat completions endpoint to use')
 
 	parser_meta = parser.add_argument_group(title='Task metadata', description='Specifications of the task metadata to be used for new tasks (the default values are defined per-task in the corresponding task implementations).')
 	parser_meta.add_argument('--reinit_meta', action='store_true', help="Force reinitialisation of the task metadata for an existing task (normally the task metadata arguments in this group are only used for initialisation of a new task and remain fixed after that across all future runs)")

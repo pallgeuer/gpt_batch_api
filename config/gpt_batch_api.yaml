@@ -12,6 +12,8 @@ openai_organization: null
 openai_project: null
 # Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)
 client_base_url: null
+# API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)
+endpoint: null
 
 #####################
 ##  GPT Requester  ##

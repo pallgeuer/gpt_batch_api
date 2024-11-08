@@ -35,7 +35,6 @@ logging.getLogger('openai').setLevel(logging.WARNING)
 @dataclasses.dataclass(frozen=True)
 class GPTRequest:
 	payload: dict[str, Any]                # Request payload (JSON-compatible OpenAI request) => Is batched into JSONL files and uploaded to OpenAI for processing
-	endpoint: Optional[str] = None         # Endpoint to use for the request (e.g. /v1/chat/completions, None = Default)
 	meta: Optional[dict[str, Any]] = None  # Optional custom metadata to associate with this request (JSON-compatible) => Is batched and stored in the state file while OpenAI is processing the payloads, and is returned alongside the response
 
 #
@@ -134,7 +133,7 @@ class StateFile:
 class GPTRequestItem:
 	id: int          # Unique monotonic ID corresponding to the GPT request
 	req: GPTRequest  # The actual GPT request
-	endpoint: str    # Resolved endpoint to use for the request
+	endpoint: str    # API endpoint to use for the request
 
 # GPT request information class
 @dataclasses.dataclass(frozen=True)
@@ -267,7 +266,7 @@ class GPTRequester:
 		client_base_url: Union[str, httpx.URL, None] = None,  # Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)
 		client_kwargs: Optional[dict[str, Any]] = None,       # Additional kwargs to use for the OpenAI API client (see openai.OpenAI)
 		client: Optional[openai.OpenAI] = None,               # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
-		default_endpoint: Optional[str] = None,               # Default endpoint to use for GPT requests that don't explicitly specify one (None = OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
+		endpoint: Optional[str] = None,                       # Endpoint to use for all GPT requests (None => OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
 
 		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
 		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
@@ -276,7 +275,6 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
-		# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
 		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
 		max_batch_ktokens: int = 2000,                        # Maximum number of tokens to include in a single batch (in units of 1000)
@@ -314,12 +312,12 @@ class GPTRequester:
 		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator)
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
-		self.default_endpoint = default_endpoint
-		if self.default_endpoint is None:
-			self.default_endpoint = os.environ.get("OPENAI_ENDPOINT")
-		if self.default_endpoint is None:
-			self.default_endpoint = DEFAULT_ENDPOINT
-		log.info(f"{self.name_prefix}: Using client base URL '{self.client.base_url}' with default endpoint '{self.default_endpoint}'")
+		self.endpoint = endpoint
+		if self.endpoint is None:
+			self.endpoint = os.environ.get("OPENAI_ENDPOINT")
+		if self.endpoint is None:
+			self.endpoint = DEFAULT_ENDPOINT
+		log.info(f"{self.name_prefix}: Using client base URL '{self.client.base_url}' with endpoint '{self.endpoint}'")
 
 		self.remote_update_interval = remote_update_interval
 		if self.remote_update_interval < 1.0:
@@ -386,11 +384,12 @@ class GPTRequester:
 
 	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
 	@classmethod
-	def configure_argparse(cls, parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup], *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, group_kwargs: Optional[dict[str, Any]] = None, **custom_defaults) -> argparse._ArgumentGroup:  # noqa
+	def configure_argparse(cls, parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup], *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, group_kwargs: Optional[dict[str, Any]] = None, include_endpoint: bool = False, **custom_defaults) -> argparse._ArgumentGroup:  # noqa
 		# parser = Argument parser or group
 		# title = If parser is not already an argument group, the title to use for the created argument group
 		# description = If parser is not already an argument group, the description to use for the created argument group
 		# group_kwargs = If parser is not already an argument group, the extra keyword arguments to use for the created argument group
+		# include_endpoint = Whether to include an argument for the API endpoint to use (often this should be task-specific and more specific arguments like chat_endpoint should be defined and used by the task itself)
 		# custom_defaults = Keyword arguments that can be used to override individual default argument values
 		# Returns the passed or newly created argument group
 
@@ -408,7 +407,8 @@ class GPTRequester:
 		add_argument(name='openai_organization', type=str, help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='openai_project', type=str, help="OpenAI project (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='client_base_url', type=str, help="Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)")
-		add_argument(name='default_endpoint', type=str, help="Default API endpoint to use")
+		if include_endpoint:
+			add_argument(name='endpoint', type=str, help="API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)")
 
 		add_argument(name='autocreate_working_dir', type=bool, help="Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)")
 		add_argument(name='lock_timeout', type=float, unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
@@ -498,13 +498,11 @@ class GPTRequester:
 		if any(req_id > self.S.queue.max_request_id for req_id in flat_req_id_bounds):
 			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.S.queue.max_request_id}: {req_id_intervals}")
 
-	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
-
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
 		# req = The request to add to the request pool
 		self.max_request_id += 1
-		item = GPTRequestItem(id=self.max_request_id, req=req, endpoint=req.endpoint if req.endpoint is not None else self.default_endpoint)
+		item = GPTRequestItem(id=self.max_request_id, req=req, endpoint=self.endpoint)
 		self.P.append(CachedGPTRequest.from_item(item=item, token_estimator=self.token_estimator))
 
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
@@ -701,9 +699,10 @@ class GPTRequester:
 						if file_object.bytes != batch.local_jsonl_size:
 							log.warning(f"{self.name_prefix}: Uploaded input JSONL file {file_object.id} for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
 
+						# noinspection PyTypeChecker
 						batch_object = self.client.batches.create(
 							completion_window='24h',
-							endpoint=CHAT_COMPLETIONS_ENDPOINT,  # TODO: REDO WHOLE ENDPOINT THING TO HAVE A FIXED ONE PER GPT REQUESTER!
+							endpoint=self.endpoint,
 							input_file_id=file_object.id,
 							metadata=dict(
 								host=os.uname().nodename,
@@ -857,6 +856,9 @@ class GPTRequester:
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
+
+	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
+	# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
 
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
 
