@@ -312,7 +312,7 @@ class GPTRequester:
 		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"))
 		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator)
 
-		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **client_kwargs)
+		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.default_endpoint = default_endpoint
 		if self.default_endpoint is None:
 			self.default_endpoint = os.environ.get("OPENAI_ENDPOINT")
@@ -406,6 +406,7 @@ class GPTRequester:
 		add_argument(name='max_batch_ktokens', type=int, unit=' ktokens', help="Maximum number of tokens to include in a single batch (in units of 1000)")
 		add_argument(name='max_unpushed_batches', type=int, help="Maximum number of unpushed local batches at any one time")
 		add_argument(name='max_remote_batches', type=int, help="Maximum number of remote batches at any one time")
+		add_argument(name='max_remote_requests', type=int, help="Maximum number of requests across all uploaded remote batches at any one time")
 		add_argument(name='max_remote_mb', type=int, unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
 		add_argument(name='max_remote_ktokens', type=int, unit=' ktokens', help="Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time")
 		add_argument(name='max_token_safety', type=int, help="Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
@@ -572,12 +573,12 @@ class GPTRequester:
 					next_total_tokens = batch.total_tokens + cached_req.info.num_tokens
 
 					if (
-						next_num_requests >= self.max_batch_requests or
-						next_local_jsonl_size >= self.max_batch_mb * 1000000 or
-						next_total_tokens * self.max_token_safety >= self.max_batch_ktokens * 1000
+						next_num_requests > self.max_batch_requests or
+						next_local_jsonl_size > self.max_batch_mb * 1000000 or
+						next_total_tokens > self.max_batch_tokens
 					):
 						if batch.num_requests <= 0:
-							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} >= {self.max_batch_requests} OR Batch bytes {next_local_jsonl_size} >= {self.max_batch_mb * 1000000} OR Batch tokens {next_total_tokens} >= {round(self.max_batch_ktokens * 1000 / self.max_token_safety)}")
+							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_mb * 1000000} OR Batch tokens {next_total_tokens} > {self.max_batch_tokens}")
 						batch.full_batch = True
 						break
 
