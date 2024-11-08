@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import json
 import time
+import getpass
 import inspect
 import logging
 import argparse
@@ -20,6 +21,7 @@ from . import tokens, utils
 
 # Constants
 DEFAULT_ENDPOINT = '/v1/chat/completions'
+FINISHED_BATCH_STATUSES = {'failed', 'completed', 'expired', 'cancelled'}
 
 # Logging configuration
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -51,7 +53,7 @@ class QueueState:
 class RemoteBatchState:
 	file: openai.types.FileObject  # Uploaded input JSONL file object
 	batch: openai.types.Batch      # Batch status as per the last time the server was checked (this is not updated anymore once the batch status is for the first time in one of the finished states)
-	finished: bool = False         # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked, updated whenever status is updated)
+	finished: bool                 # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked, updated whenever status is updated)
 
 # Batch state class
 @dataclasses.dataclass
@@ -656,15 +658,115 @@ class GPTRequester:
 
 	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
 	def push_batches(self) -> bool:
-		# TODO: Log info about how many batches were pushed (one for each pushed batch with stats, e.g. batch ID and remote ID and file ID and such as well?)
-		# TODO: Need to be totally safe that congested can only be True if not(RF)
-		# TODO: Return whether batch pipeline is congested
-		# TODO: Log info if return value is true (batch_congestion)
-		# TODO: MUST: Update whatever state is necessary so that the output of num_unfinished_batches() is still correct without a call to update_remote_batch_state or whatever (don't really need to do anything actually?)
-		# TODO: MUST: After this function the return value of num_unpushed_batches() must be correct
-		# TODO: See what unpushed batches there are and push them
-		# TODO: Also want to know exactly which push limit is reached when and why (explicit?)
-		return CANNOT_PUSH_ANY_CURRENT_BATCH and self.num_unpushed_batches() >= self.max_unpushed_batches
+		# Returns whether the batch pipeline is (now) congested
+
+		remote_batches = 0
+		remote_requests = 0
+		remote_size = 0
+		remote_tokens = 0
+		for batch in self.S.batches:
+			if batch.remote is not None:
+				remote_batches += 1
+				remote_requests += batch.num_requests
+				remote_size += batch.local_jsonl_size
+				remote_tokens += batch.total_tokens
+
+		try:
+			current_user = getpass.getuser()  # str
+		except OSError:
+			current_user = os.getuid()  # int
+
+		num_pushed = 0
+		for batch in self.S.batches:
+			if batch.remote is None:
+
+				next_remote_batches = remote_batches + 1
+				next_remote_requests = remote_requests + batch.num_requests
+				next_remote_size = remote_size + batch.local_jsonl_size
+				next_remote_tokens = remote_tokens + batch.total_tokens
+
+				if (
+					next_remote_batches <= self.max_remote_batches and
+					next_remote_requests <= self.max_remote_requests and
+					next_remote_size <= self.max_remote_mb * 1000000 and
+					next_remote_tokens <= self.max_remote_tokens
+				):
+
+					log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {batch.local_jsonl_size / 1000000:.3g}MB...")
+
+					with utils.AtomicExitStack() as stack:
+
+						file_object = self.client.files.create(file=open(batch.local_jsonl, 'rb'), purpose='batch')
+						stack.callback(self.delete_remote_file, file_id=file_object.id)
+						if file_object.bytes != batch.local_jsonl_size:
+							log.warning(f"{self.name_prefix}: Uploaded input JSONL file {file_object.id} for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
+
+						batch_object = self.client.batches.create(
+							completion_window='24h',
+							endpoint=CHAT_COMPLETIONS_ENDPOINT,  # TODO: REDO WHOLE ENDPOINT THING TO HAVE A FIXED ONE PER GPT REQUESTER!
+							input_file_id=file_object.id,
+							metadata=dict(
+								host=os.uname().nodename,
+								user=current_user,
+								script=__file__,
+								pid=os.getpid(),
+								name_prefix=self.name_prefix,
+								batch_id=batch.id,
+								local_jsonl=batch.local_jsonl,
+								state_file=self.state.path,
+							),
+						)
+						stack.callback(self.cancel_remote_batch, batch_id=batch_object.id)
+
+						stack.callback(setattr, batch, 'remote', batch.remote)
+						batch.remote = RemoteBatchState(file=file_object, batch=batch_object, finished=batch_object.status in FINISHED_BATCH_STATUSES)
+
+						self.validate_state_queue(clean=False)
+						self.state.save(stack=stack)
+
+						stack.pop_all()
+
+					log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {batch.remote.file.bytes / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens")
+
+					remote_batches = next_remote_batches
+					remote_requests = next_remote_requests
+					remote_size = next_remote_size
+					remote_tokens = next_remote_tokens
+
+					num_pushed += 1
+
+				else:
+					assert self.max_remote_batches <= 0 or remote_batches >= 1  # The remote limits are checked in __init__ to be more lenient than batch limits, so it should not be possible that push limits are reached without there being any remote batch in progress
+
+		num_unpushed_batches = self.num_unpushed_batches()
+		num_unfinished_batches = self.num_unfinished_batches()
+		num_finished_batches = self.num_finished_batches()
+		assert num_unfinished_batches + num_finished_batches == remote_batches
+		batch_congestion = (num_unpushed_batches >= self.max_unpushed_batches)
+
+		if num_pushed > 0:
+			log.info(f"{self.name_prefix}: Pushed {num_pushed} batches resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
+			log.info(f"{self.name_prefix}: There are {remote_batches} remote batches with a total of {remote_requests} requests, {remote_tokens} tokens, and {remote_size / 1000000:.3g}MB")
+
+		return batch_congestion
+
+	# Delete a remote file (only log an error if deletion fails, never raise an exception)
+	def delete_remote_file(self, file_id: str):
+		# file_id = The remote file ID to delete
+		try:
+			deleted_file = self.client.files.delete(file_id=file_id)
+			assert deleted_file.id == file_id, "File ID mismatch during deletion"
+		except Exception as e:  # noqa
+			log.error(f"Failed to delete file {file_id} due to {utils.get_class_str(e)}: {e}")
+
+	# Cancel a remote batch (only log an error if cancellation fails, never raise an exception)
+	def cancel_remote_batch(self, batch_id: str):
+		# batch_id = The remote batch ID to cancel
+		try:
+			cancelled_batch = self.client.batches.cancel(batch_id=batch_id)
+			assert cancelled_batch.id == batch_id, "Batch ID mismatch during cancellation"
+		except Exception as e:  # noqa
+			log.error(f"Failed to cancel batch {batch_id} due to {utils.get_class_str(e)}: {e}")
 
 	# Retrieve the number of unpushed local batches
 	def num_unpushed_batches(self) -> int:
@@ -698,7 +800,7 @@ class GPTRequester:
 							raise ValueError(f"Remote returned incorrect IDs for query: {batch_status.id} != {batch.remote.batch.id} or {batch_status.input_file_id} != {batch.remote.batch.input_file_id}")
 						batch.remote.batch = batch_status
 						status_changed = True
-						if batch.remote.batch.status in ('failed', 'completed', 'expired', 'cancelled'):
+						if batch.remote.batch.status in FINISHED_BATCH_STATUSES:
 							batch.remote.finished = True
 							any_finished = True
 							if only_check_finished:
