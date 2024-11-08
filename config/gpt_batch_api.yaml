@@ -38,7 +38,7 @@ max_batch_mb: 100
 max_batch_ktokens: 2000
 # Maximum number of unpushed local batches at any one time
 max_unpushed_batches: 10
-# Maximum number of remote batches at any one time
+# Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
 max_remote_batches: 100
 # Maximum number of requests across all uploaded remote batches at any one time
 max_remote_requests: 5000000

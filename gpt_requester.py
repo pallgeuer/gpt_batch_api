@@ -49,10 +49,9 @@ class QueueState:
 # Remote batch state class
 @dataclasses.dataclass
 class RemoteBatchState:
-	file_id: str                # Assigned string ID of the uploaded batch input file (OpenAI file storage)
-	batch_id: str               # Assigned string ID of the running batch (OpenAI batches)
-	status: openai.types.Batch  # Batch status as per the last time the server was checked (this is not updated anymore once the batch status is for the first time in one of the finished states)
-	finished: bool = False      # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked, updated whenever status is updated)
+	file: openai.types.FileObject  # Uploaded input JSONL file object
+	batch: openai.types.Batch      # Batch status as per the last time the server was checked (this is not updated anymore once the batch status is for the first time in one of the finished states)
+	finished: bool = False         # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked, updated whenever status is updated)
 
 # Batch state class
 @dataclasses.dataclass
@@ -280,7 +279,7 @@ class GPTRequester:
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
 		max_batch_ktokens: int = 2000,                        # Maximum number of tokens to include in a single batch (in units of 1000)
 		max_unpushed_batches: int = 10,                       # Maximum number of unpushed local batches at any one time
-		max_remote_batches: int = 100,                        # Maximum number of remote batches at any one time
+		max_remote_batches: int = 100,                        # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
 		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
 		max_remote_mb: int = 10000,                           # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
 		max_remote_ktokens: int = 5000,                       # Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
@@ -337,8 +336,8 @@ class GPTRequester:
 		if self.max_unpushed_batches < 1:
 			raise ValueError(f"Maximum number of unpushed batches must be at least 1: {self.max_unpushed_batches}")
 		self.max_remote_batches = max_remote_batches
-		if self.max_remote_batches < 1:
-			raise ValueError(f"Maximum number of remote batches must be at least 1: {self.max_remote_batches}")
+		if self.max_remote_batches < 0:
+			raise ValueError(f"Maximum number of remote batches must be at least 0: {self.max_remote_batches}")
 		self.max_remote_requests = max_remote_requests
 		if self.max_remote_requests < self.max_batch_requests:
 			raise ValueError(f"Maximum number of requests across all remote batches must be at least as great as the maximum number of requests in a batch: {self.max_remote_requests} vs {self.max_batch_requests}")
@@ -420,7 +419,7 @@ class GPTRequester:
 		add_argument(name='max_batch_mb', type=int, unit='MB', help="Maximum allowed batch size in MB (not MiB)")
 		add_argument(name='max_batch_ktokens', type=int, unit=' ktokens', help="Maximum number of tokens to include in a single batch (in units of 1000)")
 		add_argument(name='max_unpushed_batches', type=int, help="Maximum number of unpushed local batches at any one time")
-		add_argument(name='max_remote_batches', type=int, help="Maximum number of remote batches at any one time")
+		add_argument(name='max_remote_batches', type=int, help="Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)")
 		add_argument(name='max_remote_requests', type=int, help="Maximum number of requests across all uploaded remote batches at any one time")
 		add_argument(name='max_remote_mb', type=int, unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
 		add_argument(name='max_remote_ktokens', type=int, unit=' ktokens', help="Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time")
@@ -477,10 +476,8 @@ class GPTRequester:
 			if batch.id > self.S.max_batch_id:
 				raise ValueError(f"Batch ID is greater than the supposed maximum assigned batch ID: {batch.id} > {self.S.max_batch_id}")
 			if batch.remote is not None:
-				if batch.remote.file_id != batch.remote.status.input_file_id:
-					raise ValueError(f"Batch file ID is not consistent: {batch.remote.file_id} vs {batch.remote.status.input_file_id}")
-				if batch.remote.batch_id != batch.remote.status.id:
-					raise ValueError(f"Batch ID is not consistent: {batch.remote.batch_id} vs {batch.remote.status.id}")
+				if batch.remote.batch.input_file_id != batch.remote.file.id:
+					raise ValueError(f"Batch file ID is not consistent: {batch.remote.batch.input_file_id} vs {batch.remote.file.id}")
 		if not utils.is_ascending((batch.id for batch in self.S.batches), strict=True):
 			raise ValueError(f"The batch IDs are not strictly ascending: {list(batch.id for batch in self.S.batches)}")
 
@@ -696,14 +693,17 @@ class GPTRequester:
 				else:
 
 					try:
-						batch.remote.status = self.client.batches.retrieve(batch_id=batch.remote.batch_id)
+						batch_status = self.client.batches.retrieve(batch_id=batch.remote.batch.id)
+						if batch_status.id != batch.remote.batch.id or batch_status.input_file_id != batch.remote.batch.input_file_id:
+							raise ValueError(f"Remote returned incorrect IDs for query: {batch_status.id} != {batch.remote.batch.id} or {batch_status.input_file_id} != {batch.remote.batch.input_file_id}")
+						batch.remote.batch = batch_status
 						status_changed = True
-						if batch.remote.status.status in ('failed', 'completed', 'expired', 'cancelled'):
+						if batch.remote.batch.status in ('failed', 'completed', 'expired', 'cancelled'):
 							batch.remote.finished = True
 							any_finished = True
 							if only_check_finished:
 								break
-					except openai.OpenAIError as e:
+					except (openai.OpenAIError, ValueError) as e:
 						log.error(f"Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
 
 		if status_changed:
@@ -759,6 +759,8 @@ class GPTRequester:
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
 
 	# TODO: Errors that one should not attempt to continue from (e.g. inconsistent state?) so that manual intervention can fix, errors like timeouts that could benefit from a simple retry (but need to back off?), errors like requests/samples that permanently fail and never go through - when to accept? How to retry after accepted? (allow a launch to clear the failed task manager state / gpt requester attempts state?)
+
+	# TODO: Need a command line argument where you can supply batch IDs to forget (e.g. ones that were accidentally deleted from the server, or error out when trying to retrieve/process?) => Would need a mode that 'uncommits' that batch in the task state? Or generally allow on start a flag that says assume no more queue/batches exist and start again? (general hammer against all kinds of problems)
 
 	# TODO: BatchState:
 	# TODO:   Need like num_requests, num_tokens, etc? Whatever is relevant for cutoffs/thresholds/decisions

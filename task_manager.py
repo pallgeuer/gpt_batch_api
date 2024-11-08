@@ -121,6 +121,9 @@ class TaskManager:
 		log.info(f"Running task manager {self.GR.name_prefix}...")
 		with self:
 			while self.step():  # Returns True only if F and not R => There must be at least one remote batch that is unfinished, and no remote batches that are finished yet unprocessed
+				if self.GR.max_remote_batches <= 0:
+					log.warning(f"Stopping task manager {self.GR.name_prefix} without the task actually being complete as no remote batches are currently allowed (max_remote_batches=0)")
+					break
 				self.GR.wait_for_batches()  # Waits until not F or R (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
 		log.info('-' * 80)
 		log.info(f"Finished running task manager {self.GR.name_prefix}")
