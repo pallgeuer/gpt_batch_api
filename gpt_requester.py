@@ -270,9 +270,10 @@ class GPTRequester:
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
 		max_batch_ktokens: int = 2000,                        # Maximum number of tokens to include in a single batch (in units of 1000)
 		max_unpushed_batches: int = 10,                       # Maximum number of unpushed local batches at any one time
-		max_remote_batches: int = 100,                        # TODO: Maximum number of remote batches at any one time
-		max_remote_mb: int = 5000,                            # TODO: Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
-		max_remote_ktokens: int = 5000,                       # TODO: Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
+		max_remote_batches: int = 100,                        # Maximum number of remote batches at any one time
+		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
+		max_remote_mb: int = 10000,                           # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
+		max_remote_ktokens: int = 5000,                       # Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
 		max_token_safety: float = 1.05,                       # Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 	):
 
@@ -327,6 +328,9 @@ class GPTRequester:
 		self.max_remote_batches = max_remote_batches
 		if self.max_remote_batches < 1:
 			raise ValueError(f"Maximum number of remote batches must be at least 1: {self.max_remote_batches}")
+		self.max_remote_requests = max_remote_requests
+		if self.max_remote_requests < self.max_batch_requests:
+			raise ValueError(f"Maximum number of requests across all remote batches must be at least as great as the maximum number of requests in a batch: {self.max_remote_requests} vs {self.max_batch_requests}")
 		self.max_remote_mb = max_remote_mb
 		if self.max_remote_mb < self.max_batch_mb:
 			raise ValueError(f"Maximum total uploaded remote batch size in MB must be at least as great as the maximum batch size in MB: {self.max_remote_mb} vs {self.max_batch_mb}")

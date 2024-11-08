@@ -40,8 +40,10 @@ max_batch_ktokens: 2000
 max_unpushed_batches: 10
 # Maximum number of remote batches at any one time
 max_remote_batches: 100
+# Maximum number of requests across all uploaded remote batches at any one time
+max_remote_requests: 5000000
 # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
-max_remote_mb: 5000
+max_remote_mb: 10000
 # Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
 max_remote_ktokens: 5000
 # Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
