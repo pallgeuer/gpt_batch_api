@@ -376,7 +376,7 @@ class LockFile:
 		while True:
 			try:
 				self.lock.acquire(timeout=max(min(timeout_time, print_time) - now, 0), poll_interval=self.poll_interval)
-				print_clear_line()
+				print_in_place(f"Successfully acquired lock in {format_duration(time.perf_counter() - start_time)}: {self.lock.lock_file}\n")
 				return self
 			except filelock.Timeout:
 				now = time.perf_counter()

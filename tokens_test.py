@@ -10,7 +10,7 @@ from typing import Any
 import PIL.Image
 import openai
 from .logger import log
-from . import tokens
+from . import tokens, utils
 
 #
 # Test chat completions
@@ -26,7 +26,7 @@ def test_chat_completions(client: openai.OpenAI, token_est: tokens.TokenEstimato
 		try:
 			response = client.chat.completions.create(**task_)
 		except openai.OpenAIError as e:
-			log.error(f"\033[31mINPUT TOKENS: Expected {expected_tokens} and got {e.__class__.__module__}.{e.__class__.__qualname__}: {e}\033[0m")
+			log.error(f"\033[31mINPUT TOKENS: Expected {expected_tokens} and got {utils.get_class_str(e)}: {e}\033[0m")
 		else:
 			if expected_tokens.total == response.usage.prompt_tokens:
 				log.info(f"\033[32mINPUT TOKENS: Expected {expected_tokens} and got {response.usage.prompt_tokens}\033[0m")
