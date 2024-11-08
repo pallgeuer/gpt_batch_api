@@ -10,8 +10,6 @@ from typing import Any, Optional, Self
 from .logger import log
 from . import gpt_requester, utils
 
-# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
-
 #
 # Task state file
 #
@@ -265,7 +263,6 @@ class TaskManager:
 			log.info(f"{self.GR.name_prefix}: The total number of unpushed batches is now {num_unpushed_batches}")
 
 		if push:
-			# TODO: Logging before/after call here (or inside method?) Update how many unpushed/remote batches there are now?
 			log.info(f"{self.GR.name_prefix}: Pushing batches to remote server...")
 			batch_congestion = self.GR.push_batches()
 		else:
@@ -292,4 +289,6 @@ class TaskManager:
 		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)
 		# TODO: Log how many samples errored for whatever reasons (be specific), and how many were internally auto-retried by GPT requester
 		pass
+
+	# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 # EOF
