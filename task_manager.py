@@ -71,6 +71,7 @@ class TaskStateFile:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
+		# stack = Exit stack to use for safe reversible creation of the task state file
 		self.state = TaskState(meta=copy.deepcopy(self.init_meta))
 		self.save(stack=stack)
 
@@ -81,6 +82,7 @@ class TaskStateFile:
 		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
+		# stack = Exit stack to use for safe reversible saving of the task state file
 		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 			utils.json_from_dataclass(obj=self.state, file=file)
 			file_size = utils.get_file_size(file)
@@ -269,8 +271,7 @@ class TaskManager:
 		return batch_congestion
 
 	# Extract from a list of CachedGPTRequest's a set of sample keys that is enough to cover all possible changes to the committed_samples task state when supplying these CachedGPTRequest's to commit_cached_request()
-	# noinspection PyMethodMayBeStatic, PyUnusedLocal
-	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:
+	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:  # noqa
 		# cached_reqs = List of CachedGPTRequest's to extract all relevant sample key strings from
 		# Return a set of sample key strings (the set or superset of sample key strings that will be modified by commit_cached_request()), or None (caller must assume all sample keys could be modified)
 		return None
@@ -282,6 +283,7 @@ class TaskManager:
 
 	# TODO: Calls some abstract methods to do the task-specific processing
 	def process_batches(self) -> bool:
+		# TODO: DOC
 		# TODO: RETURN self.GR.num_unfinished_batches() ORRRR the return value of GR.process_batches, which is potentially (rather not??) how many finished batches were processed?
 		# TODO: Return whether there are some ongoing started batches AFTER processing any finished ones now and successfully updating the task state and output file
 		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)

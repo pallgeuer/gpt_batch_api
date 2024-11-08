@@ -104,6 +104,7 @@ class StateFile:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
+		# stack = Exit stack to use for the safe reversible creation of the state file
 		self.state = State()
 		self.save(stack=stack)
 
@@ -114,6 +115,7 @@ class StateFile:
 		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
+		# stack = Exit stack to use for the safe reversible saving of the state file
 		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 			utils.json_from_dataclass(obj=self.state, file=file)
 			file_size = utils.get_file_size(file)
@@ -149,6 +151,9 @@ class CachedGPTRequest:
 
 	@staticmethod
 	def from_item(item: GPTRequestItem, token_estimator: tokens.TokenEstimator) -> CachedGPTRequest:
+		# item = GPT request item to calculate information for and wrap as a cached GPT request
+		# token_estimator = Token estimator to use to estimate the number of tokens in the request
+		# Returns the created cached GPT request
 		full_request = dict(custom_id=f'id-{item.id}', method='POST', url=item.endpoint, body=item.req.payload)
 		compact_json = json.dumps(full_request, ensure_ascii=False, indent=None) + '\n'
 		return CachedGPTRequest(
@@ -169,13 +174,16 @@ class PoolQueue:
 
 	@property
 	def pool_len(self) -> int:
+		# Returns the number of requests in the request pool
 		return len(self.pool)
 
 	@property
 	def queue_len(self) -> int:
+		# Returns the number of requests in the request queue
 		return sum(1 for cached_req in self.queue if cached_req is not None)
 
 	def queue_request_id_meta(self) -> dict[int, Optional[dict[str, Any]]]:
+		# Returns an ID to metadata map for the current state of the request queue
 		request_id_meta = {cached_req.item.id: cached_req.item.req.meta for cached_req in self.queue if cached_req is not None}
 		if len(request_id_meta) != self.queue_len:
 			raise ValueError("Request queue contains duplicate request IDs")
@@ -212,6 +220,7 @@ class QueueFile:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
+		# stack = Exit stack to use for safe reversible creation of the queue file
 		self.pool_queue = PoolQueue()
 		self.save(stack=stack)
 
@@ -225,6 +234,7 @@ class QueueFile:
 		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
+		# stack = Exit stack to use for safe reversible saving of the queue file
 		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 			for cached_req in self.pool_queue.queue:
 				if cached_req is not None:
@@ -354,11 +364,19 @@ class GPTRequester:
 	# Populate a dictionary of __init__ keyword arguments based on an attribute-based config object (e.g. argparse.Namespace, flat omegaconf.DictConfig)
 	@classmethod
 	def get_kwargs(cls, cfg: utils.Config) -> dict[str, Any]:
+		# cfg = Attribute-based config object to extract __init__ keyword arguments from (e.g. an instance of argparse.Namespace, or a flat omegaconf.DictConfig)
+		# Returns a dictionary of the extracted keyword arguments
 		return {key: getattr(cfg, key) for key in cls.__kwargs__.keys() if hasattr(cfg, key)}
 
 	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
 	@classmethod
 	def configure_argparse(cls, parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup], *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, group_kwargs: Optional[dict[str, Any]] = None, **custom_defaults) -> argparse._ArgumentGroup:  # noqa
+		# parser = Argument parser or group
+		# title = If parser is not already an argument group, the title to use for the created argument group
+		# description = If parser is not already an argument group, the description to use for the created argument group
+		# group_kwargs = If parser is not already an argument group, the extra keyword arguments to use for the created argument group
+		# custom_defaults = Keyword arguments that can be used to override individual default argument values
+		# Returns the passed or newly created argument group
 
 		if isinstance(parser, argparse.ArgumentParser):
 			group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {}))
@@ -424,6 +442,7 @@ class GPTRequester:
 
 	# Validate that there are no obvious issues with the current state and queue (clean refers to the expected status right after a commit)
 	def validate_state_queue(self, *, clean: bool):
+		# clean = Whether the pool-queue status is expected to be clean, i.e. like fresh after a commit where the pool is empty and there are no None entries in the queue
 
 		if clean:
 			if self.P:
@@ -468,6 +487,7 @@ class GPTRequester:
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
+		# req = The request to add to the request pool
 		self.max_request_id += 1
 		item = GPTRequestItem(id=self.max_request_id, req=req, endpoint=req.endpoint if req.endpoint is not None else self.default_endpoint)
 		self.P.append(CachedGPTRequest.from_item(item=item, token_estimator=self.token_estimator))
@@ -475,14 +495,17 @@ class GPTRequester:
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
 	# Note that reqs can also for convenience be a generator that executes some loop over source samples and yields instances of GPTRequest
 	def add_requests(self, reqs: Iterable[GPTRequest]):
+		# reqs = The requests to add to the request pool
 		for req in reqs:
 			self.add_request(req)
 
 	# Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
-	# The body of the context manager is executed within an AtomicExitStack (an ExitStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
-	# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far (given by a list[CachedGPTRequest]) do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be immediately keyboard interrupted (or crash)
 	@contextlib.contextmanager
 	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None) -> ContextManager[tuple[list[CachedGPTRequest], contextlib.ExitStack[Optional[bool]]]]:
+		# reqs = Optionally requests to add to the request pool immediately prior to committing
+		# The context manager returns the list of committed cached GPT requests and the currently active exit stack
+		# The body of the context manager is executed within an AtomicExitStack (an ExitStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
+		# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far (given by a list[CachedGPTRequest]) do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be immediately keyboard interrupted (or crash)
 
 		if reqs is not None:
 			if isinstance(reqs, GPTRequest):
@@ -518,6 +541,8 @@ class GPTRequester:
 
 	# Process the request queue and generate full batches as much as possible (also generate a trailing non-full batch with whatever requests are left if force=True)
 	def batch_requests(self, force: bool = False) -> int:
+		# force = Force all requests remaining at the end of forming batches to also be collected into a non-full batch
+		# Returns the new number of unpushed batches
 
 		num_created = 0
 		num_created_requests = 0
@@ -628,10 +653,12 @@ class GPTRequester:
 
 	# Retrieve the number of unpushed local batches
 	def num_unpushed_batches(self) -> int:
+		# Returns the current number of unpushed local batches
 		return sum(1 for batch in self.S.batches if batch.remote is None)
 
 	# Return how many remote batches there are
 	def num_remote_batches(self) -> int:
+		# Returns the current number of remote batches (whether finished or unfinished)
 		return sum(1 for batch in self.S.batches if batch.remote is not None)
 
 	# Update the current state of all pushed remote batches
@@ -671,10 +698,12 @@ class GPTRequester:
 
 	# Return how many unfinished remote batches there are according to the latest local state of information (see update_remote_batch_state())
 	def num_unfinished_batches(self) -> int:
+		# Returns the current number of unfinished remote batches
 		return sum(1 for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)
 
 	# Return how many finished remote batches there are according to the latest local state of information (see update_remote_batch_state())
 	def num_finished_batches(self) -> int:
+		# Returns the current number of finished remote batches
 		return sum(1 for batch in self.S.batches if batch.remote is not None and batch.remote.finished)
 
 	# Wait until there is at least one finished yet unprocessed remote batch or no more unfinished remote batches
@@ -699,8 +728,9 @@ class GPTRequester:
 				utils.print_in_place(print_str)
 				printed_str = print_str
 
-	# TODO: Does this need to be more like "retrieve finished batches"? Does it return a context manager? And iterable?
+	# TODO: DESCRIPTION
 	def process_batches(self):  # TODO: Return value annotation (does this return num_unfinished_batches? Or rather (NOT?) how many it processed?)
+		# TODO: DOC
 		# TODO: MUST Use update_remote_batch_state()
 		# TODO: Log error if a batch is finished by NOT completed => FAIL the associated samples (or retry them once auto-retrying is a thing) if remote_batch.status != 'completed': print(f"ERROR: Remote batch {remote_batch.id} has status '{remote_batch.status}' with errors: {remote_batch.errors}")
 		# TODO: if remote_batch.output_file_id: remote_batch_content = tuple(json.loads(line) for line in client.files.content(file_id=remote_batch.output_file_id).text.splitlines() if line)
