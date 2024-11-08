@@ -4,6 +4,7 @@
 from __future__ import annotations
 import os
 import json
+import time
 import inspect
 import logging
 import argparse
@@ -48,9 +49,10 @@ class QueueState:
 # Remote batch state class
 @dataclasses.dataclass
 class RemoteBatchState:
-	file_id: str            # Assigned string ID of the uploaded batch input file (OpenAI file storage)
-	batch_id: str           # Assigned string ID of the running batch (OpenAI batches)
-	finished: bool = False  # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked)
+	file_id: str                # Assigned string ID of the uploaded batch input file (OpenAI file storage)
+	batch_id: str               # Assigned string ID of the running batch (OpenAI batches)
+	status: openai.types.Batch  # Batch status as per the last time the server was checked (this is not updated anymore once the batch status is for the first time in one of the finished states)
+	finished: bool = False      # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked, updated whenever status is updated)
 
 # Batch state class
 @dataclasses.dataclass
@@ -261,6 +263,7 @@ class GPTRequester:
 		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
 		lock_status_interval: Optional[float] = None,         # Lock file status update interval (see utils.LockFile)
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
+		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
 		# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
 		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
@@ -304,6 +307,10 @@ class GPTRequester:
 			self.default_endpoint = os.environ.get("OPENAI_ENDPOINT")
 		if self.default_endpoint is None:
 			self.default_endpoint = DEFAULT_ENDPOINT
+
+		self.remote_update_interval = remote_update_interval
+		if self.remote_update_interval < 1.0:
+			raise ValueError(f"Remote batch update interval must be at least 1.0s: {self.remote_update_interval}")
 
 		self.max_batch_requests = max_batch_requests
 		if self.max_batch_requests < 1:
@@ -370,6 +377,7 @@ class GPTRequester:
 		add_argument(name='lock_poll_interval', type=float, unit='s', help="Lock file polling interval (see utils.LockFile)")
 		add_argument(name='lock_status_interval', type=float, unit='s', help="Lock file status update interval (see utils.LockFile)")
 		add_argument(name='token_estimator_warn', type=str, help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
+		add_argument(name='remote_update_interval', type=float, unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
 		add_argument(name='max_batch_requests', type=int, help="Maximum number of requests allowed in a batch")
 		add_argument(name='max_batch_mb', type=int, unit='MB', help="Maximum allowed batch size in MB (not MiB)")
@@ -429,6 +437,11 @@ class GPTRequester:
 				raise ValueError(f"Invalid batch ID: {batch.id}")
 			if batch.id > self.S.max_batch_id:
 				raise ValueError(f"Batch ID is greater than the supposed maximum assigned batch ID: {batch.id} > {self.S.max_batch_id}")
+			if batch.remote is not None:
+				if batch.remote.file_id != batch.remote.status.input_file_id:
+					raise ValueError(f"Batch file ID is not consistent: {batch.remote.file_id} vs {batch.remote.status.input_file_id}")
+				if batch.remote.batch_id != batch.remote.status.id:
+					raise ValueError(f"Batch ID is not consistent: {batch.remote.batch_id} vs {batch.remote.status.id}")
 		if not utils.is_ascending((batch.id for batch in self.S.batches), strict=True):
 			raise ValueError(f"The batch IDs are not strictly ascending: {list(batch.id for batch in self.S.batches)}")
 
@@ -603,7 +616,7 @@ class GPTRequester:
 		# TODO: Need to be totally safe that congested can only be True if not(RF)
 		# TODO: Return whether batch pipeline is congested
 		# TODO: Log info if return value is true (batch_congestion)
-		# TODO: MUST: Update whatever state is necessary so that the output of num_unfinished_batches() is still correct without a call to retrieve_remote_batches or whatever (don't really need to do anything actually?)
+		# TODO: MUST: Update whatever state is necessary so that the output of num_unfinished_batches() is still correct without a call to update_remote_batch_state or whatever (don't really need to do anything actually?)
 		# TODO: MUST: After this function the return value of num_unpushed_batches() must be correct
 		# TODO: See what unpushed batches there are and push them
 		# TODO: Also want to know exactly which push limit is reached when and why (explicit?)
@@ -617,26 +630,76 @@ class GPTRequester:
 	def num_remote_batches(self) -> int:
 		return sum(1 for batch in self.S.batches if batch.remote is not None)
 
-	# Retrieve the current state of all pushed remote batches and update the local state of information about them
-	def retrieve_remote_batches(self):
-		pass  # TODO
+	# Update the current state of all pushed remote batches
+	def update_remote_batch_state(self, only_check_finished: bool) -> bool:
+		# only_check_finished = If True, return as soon as a single pushed remote batch is seen to be in the finished state (whether this is new or not)
+		# Returns whether there are any finished remote batches
 
-	# Return how many unfinished remote batches there are according to the latest local state of information (see retrieve_remote_batches())
+		any_finished = False
+		status_changed = False
+		for batch in self.S.batches:
+			if batch.remote is not None:
+
+				if batch.remote.finished:
+					any_finished = True
+					if only_check_finished:
+						break
+				else:
+
+					try:
+						batch.remote.status = self.client.batches.retrieve(batch_id=batch.remote.batch_id)
+						status_changed = True
+						if batch.remote.status.status in ('failed', 'completed', 'expired', 'cancelled'):
+							batch.remote.finished = True
+							any_finished = True
+							if only_check_finished:
+								break
+					except openai.OpenAIError as e:
+						log.error(f"Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
+
+		if status_changed:
+			with utils.AtomicExitStack() as stack:
+				self.validate_state_queue(clean=False)
+				self.state.save(stack=stack)
+				stack.pop_all()
+
+		return any_finished
+
+	# Return how many unfinished remote batches there are according to the latest local state of information (see update_remote_batch_state())
 	def num_unfinished_batches(self) -> int:
 		return sum(1 for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)
 
-	# Return how many finished remote batches there are according to the latest local state of information (see retrieve_remote_batches())
+	# Return how many finished remote batches there are according to the latest local state of information (see update_remote_batch_state())
 	def num_finished_batches(self) -> int:
 		return sum(1 for batch in self.S.batches if batch.remote is not None and batch.remote.finished)
 
-	# Wait until there is at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
-	def wait_for_batches(self) -> bool:
-		# TODO: Uses sleep scheme like utils.LockFile, retrieve_remote_batches(), num_unfinished_batches()
-		pass  # TODO: Return whether remote batches are all finished and processed (i.e. no unfinished and/or unprocessed remote batches at all)
+	# Wait until there is at least one finished yet unprocessed remote batch or no more unfinished remote batches
+	def wait_for_batches(self):
+
+		initial_num_unfinished_batches = self.num_unfinished_batches()
+		if self.num_finished_batches() > 0 or initial_num_unfinished_batches <= 0:
+			return
+
+		start_time = time.perf_counter()
+		printed_str = None
+
+		while True:
+			self.update_remote_batch_state(only_check_finished=True)
+			num_unfinished_batches = self.num_unfinished_batches()
+			if self.num_finished_batches() > 0 or num_unfinished_batches <= 0:
+				utils.print_in_place(f"{self.name_prefix}: Waited {utils.format_duration(time.perf_counter() - start_time)} until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
+				return
+			time.sleep((start_time - time.perf_counter()) % self.remote_update_interval)
+			print_str = f"{self.name_prefix}: Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)}... "
+			if print_str != printed_str:
+				utils.print_in_place(print_str)
+				printed_str = print_str
 
 	# TODO: Does this need to be more like "retrieve finished batches"? Does it return a context manager? And iterable?
 	def process_batches(self):  # TODO: Return value annotation (does this return num_unfinished_batches? Or rather (NOT?) how many it processed?)
-		# TODO: MUST Use retrieve_remote_batches()
+		# TODO: MUST Use update_remote_batch_state()
+		# TODO: Log error if a batch is finished by NOT completed => FAIL the associated samples (or retry them once auto-retrying is a thing) if remote_batch.status != 'completed': print(f"ERROR: Remote batch {remote_batch.id} has status '{remote_batch.status}' with errors: {remote_batch.errors}")
+		# TODO: if remote_batch.output_file_id: remote_batch_content = tuple(json.loads(line) for line in client.files.content(file_id=remote_batch.output_file_id).text.splitlines() if line)
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
@@ -689,5 +752,5 @@ class GPTRequester:
 
 	# TODO: wandb (conditional import to not require install if don't need it!)
 
-	# # TODO: Argparse suboptions (as namespace that can be passed to one of these classes) -> Don't need as hydra (have hydra suboptions?)? But good for others?
+	# TODO: Argparse suboptions (as namespace that can be passed to one of these classes) -> Don't need as hydra (have hydra suboptions?)? But good for others?
 # EOF

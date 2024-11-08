@@ -27,6 +27,8 @@ lock_poll_interval: null
 lock_status_interval: null
 # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 token_estimator_warn: once
+# Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
+remote_update_interval: 10.0
 
  # Maximum number of requests allowed in a batch
 max_batch_requests: 50000
