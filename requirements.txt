@@ -1,6 +1,7 @@
 filelock
 openai
 pillow
+pydantic>=2
 requests
 tiktoken
 wandb

@@ -17,6 +17,7 @@ import typing
 from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol
 from types import FrameType
 import filelock
+import pydantic
 
 # Types
 DataclassInstance = typing.TypeVar('DataclassInstance')
@@ -90,30 +91,55 @@ def get_type_str(typ: type) -> str:
 # Dataclasses
 #
 
-# Convert a dataclass to a dict (recurses into exactly only nested dataclass, dict, list, tuple, namedtuple (or subclasses) instances, just reuses atomic types like int/float (see dataclasses._ATOMIC_TYPES), and uses copy.deepcopy() on everything else)
-def dict_from_dataclass(obj: DataclassInstance) -> dict[str, Any]:
-	return dataclasses.asdict(obj)
+# Convert a dataclass to JSON (supports only JSON-compatible types (or subclasses): dataclass, pydantic model, dict, list, tuple, str, float, int, bool, None)
+def json_from_dataclass(obj: DataclassInstance, file: Optional[TextIO] = None, **kwargs) -> Optional[str]:
+	obj_dict = dict_from_dataclass(obj=obj, json_mode=True)
+	dumps_kwargs = dict(ensure_ascii=False, indent=2)
+	dumps_kwargs.update(kwargs)
+	if file is None:
+		return json.dumps(obj_dict, **dumps_kwargs)
+	else:
+		json.dump(obj_dict, file, **dumps_kwargs)  # noqa
+		return None
 
-# Convert a dict to a dataclass (recurses into exactly only nested dataclass, dict, list, tuple, namedtuple (or subclasses) instances, just reuses atomic types like int/float (see dataclasses._ATOMIC_TYPES), and uses copy.deepcopy() on everything else, can deal with simple cases of Union/Optional/Any/Ellipsis)
+# Convert JSON to a dataclass (supports only JSON-compatible types (or subclasses): dataclass, pydantic model, dict, list, tuple, str, float, int, bool, None)
+def dataclass_from_json(cls: Type[DataclassInstance], json_data: Union[TextIO, str]) -> DataclassInstance:
+	data = json.loads(json_data) if isinstance(json_data, str) else json.load(json_data)
+	return dataclass_from_dict(cls=cls, data=data, json_mode=True)
+
+# Convert a dataclass to a dict (recurses into exactly only nested dataclass, dict, list, tuple, namedtuple (or subclasses) instances, just reuses atomic types like int/float (see dataclasses._ATOMIC_TYPES), dumps pydantic models to dict without explicit recursion, and uses copy.deepcopy() on everything else)
+def dict_from_dataclass(obj: DataclassInstance, json_mode: bool = False) -> dict[str, Any]:
+	if not dataclasses._is_dataclass_instance(obj):  # noqa
+		raise TypeError(f"Object must be a dataclass instance but got an object of type: {type(obj)}")
+	return _dict_from_dataclass_inner(obj=obj, json_mode=json_mode)
+
+# Inner function for converting a dataclass to a dict (implementation adapted from dataclasses.asdict() @ Python 3.12.7)
+def _dict_from_dataclass_inner(obj: Any, json_mode: bool) -> Any:
+	if type(obj) in dataclasses._ATOMIC_TYPES:  # noqa
+		return obj
+	elif dataclasses._is_dataclass_instance(obj):  # noqa
+		return {f.name: _dict_from_dataclass_inner(obj=getattr(obj, f.name), json_mode=json_mode) for f in dataclasses.fields(obj)}
+	elif isinstance(obj, pydantic.BaseModel):
+		return obj.model_dump(mode='json' if json_mode else 'python', warnings='error')
+	elif isinstance(obj, tuple) and hasattr(obj, '_fields'):
+		return type(obj)(*[_dict_from_dataclass_inner(obj=v, json_mode=json_mode) for v in obj])
+	elif isinstance(obj, (list, tuple)):
+		return type(obj)(_dict_from_dataclass_inner(obj=v, json_mode=json_mode) for v in obj)
+	elif isinstance(obj, dict):
+		if hasattr(type(obj), 'default_factory'):
+			result = type(obj)(getattr(obj, 'default_factory'))
+			for k, v in obj.items():
+				result[_dict_from_dataclass_inner(obj=k, json_mode=json_mode)] = _dict_from_dataclass_inner(obj=v, json_mode=json_mode)
+			return result
+		return type(obj)((_dict_from_dataclass_inner(obj=k, json_mode=json_mode), _dict_from_dataclass_inner(obj=v, json_mode=json_mode)) for k, v in obj.items())
+	else:
+		return copy.deepcopy(obj)
+
+# Convert a dict to a dataclass (recurses into exactly only nested dataclass, dict, list, tuple, namedtuple (or subclasses) instances, just reuses atomic types like int/float (see dataclasses._ATOMIC_TYPES), validates pydantic models from dict without explicit recursion, and uses copy.deepcopy() on everything else, can deal with simple cases of Union/Optional/Any/Ellipsis)
 def dataclass_from_dict(cls: Type[DataclassInstance], data: dict[str, Any], json_mode: bool = False) -> DataclassInstance:
 	if not dataclasses.is_dataclass(cls):
 		raise TypeError(f"Class must be a dataclass type: {get_class_str(cls)}")
 	return _dataclass_from_dict_inner(typ=cls, data=data, json_mode=json_mode)
-
-# Convert a dataclass to JSON (supports only JSON-compatible types (or subclasses): dataclass, dict, list, tuple, str, float, int, bool, None)
-def json_from_dataclass(obj: DataclassInstance, file: Optional[TextIO] = None, **kwargs) -> Optional[str]:
-	dumps_kwargs = dict(ensure_ascii=False, indent=2)
-	dumps_kwargs.update(kwargs)
-	if file is None:
-		return json.dumps(dict_from_dataclass(obj), **dumps_kwargs)
-	else:
-		json.dump(dict_from_dataclass(obj), file, **dumps_kwargs)  # noqa
-		return None
-
-# Convert JSON to a dataclass (supports only JSON-compatible types (or subclasses): dataclass, dict, list, tuple, str, float, int, bool, None)
-def dataclass_from_json(cls: Type[DataclassInstance], json_data: Union[TextIO, str]) -> DataclassInstance:
-	data = json.loads(json_data) if isinstance(json_data, str) else json.load(json_data)
-	return dataclass_from_dict(cls=cls, data=data, json_mode=True)
 
 # Inner function for converting nested data structures as appropriate to dataclasses
 def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
@@ -159,6 +185,10 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 				raise ValueError(f"Cannot construct {get_class_str(typ)} from dict that does not include exactly all the fields as keys for safety/correctness reasons => Dict is missing {sorted(field_names - data_keys)} and has {sorted(data_keys - field_names)} extra")
 			field_types = typing.get_type_hints(typ)
 			ret = typ(**{key: _dataclass_from_dict_inner(typ=field_types[key], data=value, json_mode=json_mode) for key, value in data.items()})
+		elif issubclass(typ, pydantic.BaseModel):
+			if not (isinstance(data, dict) and all(isinstance(key, str) for key in data.keys())):
+				raise TypeError(f"Invalid dict data for conversion to pydantic model {get_class_str(typ)}: {data}")
+			ret = typ.model_validate(data, strict=True)
 		elif not isinstance(data, generic_typ):
 			raise TypeError(f"Expected type {get_type_str(typ)} with generic type {get_class_str(generic_typ)} but got class {get_class_str(data)}: {data}")
 		elif typ in dataclasses._ATOMIC_TYPES:  # noqa
