@@ -415,7 +415,15 @@ class GPTRequester:
 		# noinspection PyShadowingBuiltins
 		def add_argument(name: str, type: type, help: str, unit: str = '', metavar: Union[str, tuple[str, ...], None] = None):
 			default_value = custom_defaults.get(name, cls.__kwargs__[name])
-			group.add_argument(f'--{name}', type=type, default=default_value, metavar=metavar, help=help if default_value is None else f'{help} [default: {default_value}{unit}]')
+			if type is bool:
+				if default_value:
+					group.add_argument(f'--no_{name}', action='store_false', help=help)
+				else:
+					group.add_argument(f'--{name}', action='store_true', help=help)
+			else:
+				group.add_argument(f'--{name}', type=type, default=default_value, metavar=metavar, help=help if default_value is None else f'{help} [default: {default_value}{unit}]')
+
+		add_argument(name='dryrun', type=bool, help="Perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)")
 
 		add_argument(name='openai_api_key', type=str, metavar='KEY', help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='openai_organization', type=str, metavar='ID', help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
@@ -424,7 +432,7 @@ class GPTRequester:
 		if include_endpoint:
 			add_argument(name='endpoint', type=str, help="API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)")
 
-		add_argument(name='autocreate_working_dir', type=bool, metavar='BOOL', help="Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)")
+		add_argument(name='autocreate_working_dir', type=bool, help="Do not automatically create the GPT working directory if it does not exist (parent directory must already exist)")
 		add_argument(name='lock_timeout', type=float, metavar='SEC', unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
 		add_argument(name='lock_poll_interval', type=float, metavar='SEC', unit='s', help="Lock file polling interval (see utils.LockFile)")
 		add_argument(name='lock_status_interval', type=float, metavar='SEC', unit='s', help="Lock file status update interval (see utils.LockFile)")
