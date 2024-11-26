@@ -35,11 +35,11 @@ token_estimator_warn: once
 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 remote_update_interval: 10.0
 
- # Maximum number of requests allowed in a batch
+# Maximum number of requests allowed in a batch
 max_batch_requests: 50000
 # Maximum allowed batch size in MB (not MiB)
 max_batch_mb: 100
-# Maximum number of tokens to include in a single batch (in units of 1000)
+# Maximum number of tokens (in units of 1000) to include in a single batch
 max_batch_ktokens: 2000
 # Maximum number of unpushed local batches at any one time
 max_unpushed_batches: 10

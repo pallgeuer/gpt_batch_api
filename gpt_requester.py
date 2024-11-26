@@ -289,7 +289,7 @@ class GPTRequester:
 
 		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
-		max_batch_ktokens: int = 2000,                        # Maximum number of tokens to include in a single batch (in units of 1000)
+		max_batch_ktokens: int = 2000,                        # Maximum number of tokens (in units of 1000) to include in a single batch
 		max_unpushed_batches: int = 10,                       # Maximum number of unpushed local batches at any one time
 		max_remote_batches: int = 100,                        # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
 		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
@@ -457,7 +457,7 @@ class GPTRequester:
 
 		add_argument(name='max_batch_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a batch")
 		add_argument(name='max_batch_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
-		add_argument(name='max_batch_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum number of tokens to include in a single batch (in units of 1000)")
+		add_argument(name='max_batch_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum number of tokens (in units of 1000) to include in a single batch")
 		add_argument(name='max_unpushed_batches', type=int, metavar='NUM', help="Maximum number of unpushed local batches at any one time")
 		add_argument(name='max_remote_batches', type=int, metavar='NUM', help="Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)")
 		add_argument(name='max_remote_requests', type=int, metavar='NUM', help="Maximum number of requests across all uploaded remote batches at any one time")
@@ -911,7 +911,7 @@ class GPTRequester:
 
 	# TODO: Add limitation of how many requests/tokens to allow in THIS one run of the script OR in total across the project
 	# TODO: Add limitation by estimated total cost in THIS one run of the script OR by total expense across project
-	# TODO: Add cost estimation => Can supply percent of max output tokens that will be generated (that can be used in dryrun / max_remote_batches=0 to know what you're getting into)
+	# TODO: Add cost estimation => Can supply percent of max output tokens that will be assumed to be generated (deal with o1 special case!) (that can be used in dryrun / max_remote_batches=0 to know what you're getting into)
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
