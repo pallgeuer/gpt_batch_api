@@ -4,6 +4,9 @@
 ##  General  ##
 ###############
 
+# Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)
+dryrun: False
+
 # OpenAI API key (see openai.OpenAI, ends up in request headers)
 openai_api_key: null
 # OpenAI organization (see openai.OpenAI, ends up in request headers)

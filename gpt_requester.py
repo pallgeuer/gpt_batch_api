@@ -80,11 +80,13 @@ class StateFile:
 
 	state: Optional[State]
 
-	def __init__(self, path: str):
+	def __init__(self, path: str, dryrun: bool):
 		# path = Path to the JSON state file to load/save/manage (nominally *.json extension)
+		# dryrun = Whether to prevent any saving of state (dry run mode)
 		self.path = os.path.abspath(path)
 		log.info(f"GPT requester state file: {self.path}")
 		self.name = os.path.basename(self.path)
+		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
 
@@ -116,10 +118,13 @@ class StateFile:
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for the safe reversible saving of the state file
-		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
-			utils.json_from_dataclass(obj=self.state, file=file)
-			file_size = utils.get_file_size(file)
-		log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
+		if self.dryrun:
+			log.warning(f"[DRYRUN] Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches: {self.name}")
+		else:
+			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
+				utils.json_from_dataclass(obj=self.state, file=file)
+				file_size = utils.get_file_size(file)
+			log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
 
 	def unload(self):
 		self.state = None
@@ -194,13 +199,15 @@ class QueueFile:
 
 	pool_queue: Optional[PoolQueue]
 
-	def __init__(self, path: str, token_estimator: tokens.TokenEstimator):
+	def __init__(self, path: str, token_estimator: tokens.TokenEstimator, dryrun: bool):
 		# path = Path to the JSONL queue file to load/save/manage (nominally *.jsonl extension)
 		# token_estimator = Token estimator instance to use
+		# dryrun = Whether to prevent any saving of the queue file (dry run mode)
 		self.path = os.path.abspath(path)
 		log.info(f"GPT requester queue file: {self.path}")
 		self.name = os.path.basename(self.path)
 		self.token_estimator = token_estimator
+		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
 		self.pool_queue = None
 
@@ -235,13 +242,16 @@ class QueueFile:
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for safe reversible saving of the queue file
-		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
-			for cached_req in self.pool_queue.queue:
-				if cached_req is not None:
-					utils.json_from_dataclass(obj=cached_req.item, file=file)
-					file.write('\n')
-			file_size = utils.get_file_size(file)
-		log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
+		if self.dryrun:
+			log.warning(f"[DRYRUN] Did not save GPT requester queue file with {self.pool_queue.queue_len} requests: {self.name}")
+		else:
+			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
+				for cached_req in self.pool_queue.queue:
+					if cached_req is not None:
+						utils.json_from_dataclass(obj=cached_req.item, file=file)
+						file.write('\n')
+				file_size = utils.get_file_size(file)
+			log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
 
 	def unload(self):
 		self.pool_queue = None
@@ -259,6 +269,8 @@ class GPTRequester:
 		working_dir: str,                                     # Path to the GPT working directory to use (will be used for automatically managed lock, state, requests and batch files)
 		name_prefix: str,                                     # Name prefix to use for all files created in the GPT working directory (e.g. 'my_gpt_requester')
 		*,                                                    # Keyword arguments only beyond here
+
+		dryrun: bool = False,                                 # Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)
 
 		openai_api_key: Optional[str] = None,                 # OpenAI API key (see openai.OpenAI, ends up in request headers)
 		openai_organization: Optional[str] = None,            # OpenAI organization (see openai.OpenAI, ends up in request headers)
@@ -307,10 +319,14 @@ class GPTRequester:
 		if not os.path.isdir(self.working_dir):
 			raise FileNotFoundError(f"GPT working directory does not exist: {self.working_dir}")
 
+		self.dryrun = dryrun
+		if self.dryrun:
+			log.warning(f"[DRYRUN] {self.name_prefix}: GPT requester dry run mode => Not allowing remote batches or writing of state updates")
+
 		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn)
 		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
-		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"))
-		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator)
+		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"), dryrun=self.dryrun)
+		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator, dryrun=self.dryrun)
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.endpoint = endpoint
@@ -657,11 +673,14 @@ class GPTRequester:
 						del self.S.queue.request_id_meta[req_id]
 					self.Q[batch_index:index] = (None,) * (index - batch_index)
 
-					with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
-						file.writelines(batch_reqs)
-						file_size = utils.get_file_size(file)
-					assert file_size == batch.local_jsonl_size
-					log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
+					if self.dryrun:
+						log.warning(f"[DRYRUN] {self.name_prefix}: Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
+					else:
+						with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
+							file.writelines(batch_reqs)
+							file_size = utils.get_file_size(file)
+						assert file_size == batch.local_jsonl_size
+						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
 
 					self.validate_state_queue(clean=False)
 					self.queue.save(stack=stack)
@@ -713,52 +732,56 @@ class GPTRequester:
 					next_remote_tokens <= self.max_remote_tokens
 				):
 
-					log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {batch.local_jsonl_size / 1000000:.3g}MB...")
+					if self.dryrun:
+						log.warning(f"[DRYRUN] {self.name_prefix}: Not pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {batch.local_jsonl_size / 1000000:.3g}MB...")
+					else:
 
-					with utils.AtomicExitStack() as stack:
+						log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {batch.local_jsonl_size / 1000000:.3g}MB...")
 
-						file_object = self.client.files.create(file=open(batch.local_jsonl, 'rb'), purpose='batch')
-						stack.callback(self.delete_remote_file, file_id=file_object.id)
-						if file_object.bytes != batch.local_jsonl_size:
-							log.warning(f"{self.name_prefix}: Uploaded input JSONL file {file_object.id} for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
+						with utils.AtomicExitStack() as stack:
 
-						# noinspection PyTypeChecker
-						batch_object = self.client.batches.create(
-							completion_window='24h',
-							endpoint=self.endpoint,
-							input_file_id=file_object.id,
-							metadata=dict(
-								host=os.uname().nodename,
-								user=current_user,
-								script=__file__,
-								pid=os.getpid(),
-								name_prefix=self.name_prefix,
-								batch_id=batch.id,
-								local_jsonl=batch.local_jsonl,
-								state_file=self.state.path,
-							),
-						)
-						stack.callback(self.cancel_remote_batch, batch_id=batch_object.id)
+							file_object = self.client.files.create(file=open(batch.local_jsonl, 'rb'), purpose='batch')
+							stack.callback(self.delete_remote_file, file_id=file_object.id)
+							if file_object.bytes != batch.local_jsonl_size:
+								log.warning(f"{self.name_prefix}: Uploaded input JSONL file {file_object.id} for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
 
-						stack.callback(setattr, batch, 'remote', batch.remote)
-						batch.remote = RemoteBatchState(file=file_object, batch=batch_object, finished=batch_object.status in FINISHED_BATCH_STATUSES)
+							# noinspection PyTypeChecker
+							batch_object = self.client.batches.create(
+								completion_window='24h',
+								endpoint=self.endpoint,
+								input_file_id=file_object.id,
+								metadata=dict(
+									host=os.uname().nodename,
+									user=current_user,
+									script=__file__,
+									pid=os.getpid(),
+									name_prefix=self.name_prefix,
+									batch_id=batch.id,
+									local_jsonl=batch.local_jsonl,
+									state_file=self.state.path,
+								),
+							)
+							stack.callback(self.cancel_remote_batch, batch_id=batch_object.id)
 
-						self.validate_state_queue(clean=False)
-						self.state.save(stack=stack)
+							stack.callback(setattr, batch, 'remote', batch.remote)
+							batch.remote = RemoteBatchState(file=file_object, batch=batch_object, finished=batch_object.status in FINISHED_BATCH_STATUSES)
 
-						stack.pop_all()
+							self.validate_state_queue(clean=False)
+							self.state.save(stack=stack)
 
-					log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {batch.remote.file.bytes / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens")
+							stack.pop_all()
 
-					remote_batches = next_remote_batches
-					remote_requests = next_remote_requests
-					remote_size = next_remote_size
-					remote_tokens = next_remote_tokens
+						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {batch.remote.file.bytes / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens")
 
-					num_pushed += 1
+						remote_batches = next_remote_batches
+						remote_requests = next_remote_requests
+						remote_size = next_remote_size
+						remote_tokens = next_remote_tokens
+
+						num_pushed += 1
 
 				else:
-					assert self.max_remote_batches <= 0 or remote_batches >= 1  # The remote limits are checked in __init__ to be more lenient than batch limits, so it should not be possible that push limits are reached without there being any remote batch in progress
+					assert self.max_remote_batches <= 0 or remote_batches >= 1  # The remote limits are checked in __init__ to be more lenient than batch limits, so it should NOT be possible that push limits are reached without there being any remote batch in progress
 
 		num_unpushed_batches = self.num_unpushed_batches()
 		num_unfinished_batches = self.num_unfinished_batches()
@@ -775,20 +798,26 @@ class GPTRequester:
 	# Delete a remote file (only log an error if deletion fails, never raise an exception)
 	def delete_remote_file(self, file_id: str):
 		# file_id = The remote file ID to delete
-		try:
-			deleted_file = self.client.files.delete(file_id=file_id)
-			assert deleted_file.id == file_id, "File ID mismatch during deletion"
-		except Exception as e:  # noqa
-			log.error(f"Failed to delete file {file_id} due to {utils.get_class_str(e)}: {e}")
+		if self.dryrun:
+			log.warning(f"[DRYRUN] Not deleting remote file {file_id}")
+		else:
+			try:
+				deleted_file = self.client.files.delete(file_id=file_id)
+				assert deleted_file.id == file_id, "Remote file ID mismatch during deletion"
+			except Exception as e:  # noqa
+				log.error(f"Failed to delete remote file {file_id} due to {utils.get_class_str(e)}: {e}")
 
 	# Cancel a remote batch (only log an error if cancellation fails, never raise an exception)
 	def cancel_remote_batch(self, batch_id: str):
 		# batch_id = The remote batch ID to cancel
-		try:
-			cancelled_batch = self.client.batches.cancel(batch_id=batch_id)
-			assert cancelled_batch.id == batch_id, "Batch ID mismatch during cancellation"
-		except Exception as e:  # noqa
-			log.error(f"Failed to cancel batch {batch_id} due to {utils.get_class_str(e)}: {e}")
+		if self.dryrun:
+			log.warning(f"[DRYRUN] Not canceling remote batch {batch_id}")
+		else:
+			try:
+				cancelled_batch = self.client.batches.cancel(batch_id=batch_id)
+				assert cancelled_batch.id == batch_id, "Remote batch ID mismatch during cancellation"
+			except Exception as e:  # noqa
+				log.error(f"Failed to cancel remote batch {batch_id} due to {utils.get_class_str(e)}: {e}")
 
 	# Retrieve the number of unpushed local batches
 	def num_unpushed_batches(self) -> int:
@@ -814,7 +843,7 @@ class GPTRequester:
 					any_finished = True
 					if only_check_finished:
 						break
-				else:
+				elif not self.dryrun:
 
 					try:
 						batch_status = self.client.batches.retrieve(batch_id=batch.remote.batch.id)
@@ -852,7 +881,7 @@ class GPTRequester:
 	def wait_for_batches(self):
 
 		initial_num_unfinished_batches = self.num_unfinished_batches()
-		if self.num_finished_batches() > 0 or initial_num_unfinished_batches <= 0:
+		if self.num_finished_batches() > 0 or initial_num_unfinished_batches <= 0 or self.dryrun:
 			return
 
 		start_time = time.perf_counter()
@@ -865,7 +894,7 @@ class GPTRequester:
 				utils.print_in_place(f"{self.name_prefix}: Waited {utils.format_duration(time.perf_counter() - start_time)} until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
 				return
 			time.sleep((start_time - time.perf_counter()) % self.remote_update_interval)
-			print_str = f"{self.name_prefix}: Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)}... "
+			print_str = f" {self.name_prefix}: Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)}...\r"
 			if print_str != printed_str:
 				utils.print_in_place(print_str)
 				printed_str = print_str
@@ -880,7 +909,7 @@ class GPTRequester:
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
 
-	# TODO: Have a dryrun mode that can be used to just see the cost of batches that WOULD be launched (NO actual state update - no cost, no file writes)
+	# TODO: Add cost estimation that can be used in dryrun / max_remote_batches=0 to know what you're getting into
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?

@@ -30,15 +30,17 @@ class TaskStateFile:
 
 	state: Optional[TaskState]
 
-	def __init__(self, path: str, reinit_meta: bool, init_meta: Optional[dict[str, Any]]):
+	def __init__(self, path: str, reinit_meta: bool, init_meta: Optional[dict[str, Any]], dryrun: bool):
 		# path = Path to the JSON task state file to load/save/manage (nominally *.json extension)
 		# reinit_meta = Whether to force a reinitialisation of the meta field even if the task state file already exists
 		# init_meta = Value to initialise the meta field with if the task state file is newly created (deep copy on create)
+		# dryrun = Whether to prevent any saving of state (dry run mode)
 		self.path = os.path.abspath(path)
 		log.info(f"Task state file: {self.path}")
 		self.name = os.path.basename(self.path)
 		self.reinit_meta = reinit_meta
 		self.init_meta = init_meta if init_meta is not None else {}
+		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
 
@@ -81,10 +83,13 @@ class TaskStateFile:
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for safe reversible saving of the task state file
-		with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
-			utils.json_from_dataclass(obj=self.state, file=file)
-			file_size = utils.get_file_size(file)
-		log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
+		if self.dryrun:
+			log.warning(f"[DRYRUN] Did not save task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys: {self.name}")
+		else:
+			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
+				utils.json_from_dataclass(obj=self.state, file=file)
+				file_size = utils.get_file_size(file)
+			log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
 
 	def unload(self):
 		self.state = None
@@ -108,7 +113,7 @@ class TaskManager:
 	):
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
-		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta)
+		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta, dryrun=self.GR.dryrun)
 
 		self._enter_stack = contextlib.ExitStack()
 		self.T: Optional[TaskState] = None
@@ -119,8 +124,8 @@ class TaskManager:
 		log.info(f"Running task manager {self.GR.name_prefix}...")
 		with self:
 			while self.step():  # Returns True only if F and not R => There must be at least one remote batch that is unfinished, and no remote batches that are finished yet unprocessed
-				if self.GR.max_remote_batches <= 0:
-					log.warning(f"Stopping task manager {self.GR.name_prefix} without the task actually being complete as no remote batches are currently allowed (max_remote_batches=0)")
+				if self.GR.dryrun or self.GR.max_remote_batches <= 0:
+					log.warning(f"Stopping task manager {self.GR.name_prefix} without the task actually being complete as currently a dry run ({self.GR.dryrun}) or no remote batches are currently allowed (max_remote_batches={self.GR.max_remote_batches})")
 					break
 				self.GR.wait_for_batches()  # Waits until not F or R (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
 		log.info('-' * 80)
