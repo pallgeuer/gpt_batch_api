@@ -7,6 +7,7 @@ import sys
 import enum
 import logging
 import argparse
+import functools
 from typing import Sequence, Optional, Any
 import pydantic
 from . import gpt_requester, task_manager, utils
@@ -144,17 +145,18 @@ def main():
 
 	logging.basicConfig(level=logging.INFO, format="[%(levelname)s][%(asctime)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 
-	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.")
+	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.", add_help=False, formatter_class=functools.partial(argparse.HelpFormatter, max_help_position=33))
+	parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='Show this help message and exit')
 	parser.add_argument('--task', type=str, required=True, help='Which task to run (e.g. char_codes)')
-	parser.add_argument('--task_prefix', type=str, help='Name prefix to use for task-related files (default is same as task)')
-	parser.add_argument('--chat_endpoint', type=str, default='/v1/chat/completions', help='Chat completions endpoint to use')
+	parser.add_argument('--task_prefix', type=str, metavar='PREFIX', help='Name prefix to use for task-related files (default is same as task)')
+	parser.add_argument('--chat_endpoint', type=str, metavar='ENDPOINT', default='/v1/chat/completions', help='Chat completions endpoint to use')
 
 	parser_meta = parser.add_argument_group(title='Task metadata', description='Specifications of the task metadata to be used for new tasks (the default values are defined per-task in the corresponding task implementations).')
 	parser_meta.add_argument('--reinit_meta', action='store_true', help="Force reinitialisation of the task metadata for an existing task (normally the task metadata arguments in this group are only used for initialisation of a new task and remain fixed after that across all future runs)")
 	parser_meta.add_argument('--model', type=str, help="LLM model to use")
-	parser_meta.add_argument('--max_tokens', type=int, help="Maximum number of generated output tokens per request")
-	parser_meta.add_argument('--temperature', type=float, help="What sampling temperature to use")
-	parser_meta.add_argument('--top_p', type=float, help="Nucleus sampling probability mass")
+	parser_meta.add_argument('--max_tokens', type=int, metavar='NUM', help="Maximum number of generated output tokens per request")
+	parser_meta.add_argument('--temperature', type=float, metavar='TEMP', help="What sampling temperature to use")
+	parser_meta.add_argument('--top_p', type=float, metavar='MASS', help="Nucleus sampling probability mass")
 
 	gpt_requester.GPTRequester.configure_argparse(parser=parser)
 

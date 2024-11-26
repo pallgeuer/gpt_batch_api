@@ -283,6 +283,7 @@ class GPTRequester:
 		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
 		max_remote_mb: int = 10000,                           # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
 		max_remote_ktokens: int = 5000,                       # Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
+		max_mb_safety: float = 1.01,                          # Safety factor to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
 		max_token_safety: float = 1.05,                       # Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 	):
 
@@ -347,12 +348,15 @@ class GPTRequester:
 		self.max_remote_ktokens = max_remote_ktokens
 		if self.max_remote_ktokens < self.max_batch_ktokens:
 			raise ValueError(f"Maximum total uploaded remote batch ktokens must be at least as great as the maximum batch ktokens: {self.max_remote_ktokens} vs {self.max_batch_ktokens}")
+		self.max_mb_safety = max_mb_safety
+		if self.max_mb_safety < 1.0:
+			raise ValueError(f"The number of MB safety factor must be at least 1.0: {self.max_mb_safety}")
 		self.max_token_safety = max_token_safety
 		if self.max_token_safety < 1.0:
 			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety}")
 
-		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {self.max_batch_mb}MB, {self.max_batch_tokens} tokens (safety factor {self.max_token_safety:.3g})")
-		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {self.max_remote_mb}MB, {self.max_remote_tokens} tokens (safety factor {self.max_token_safety:.3g})")
+		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {self.max_batch_size / 1000000:.3g}MB (safety factor {self.max_mb_safety:.3g}), {self.max_batch_tokens} tokens (safety factor {self.max_token_safety:.3g})")
+		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {self.max_remote_size / 1000000:.3g}MB (safety factor {self.max_mb_safety:.3g}), {self.max_remote_tokens} tokens (safety factor {self.max_token_safety:.3g})")
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
 
 		self._enter_stack = contextlib.ExitStack()
@@ -361,6 +365,16 @@ class GPTRequester:
 		self.P: Optional[list[CachedGPTRequest]] = None
 		self.Q: Optional[list[Optional[CachedGPTRequest]]] = None
 		self.max_request_id: Optional[int] = None
+
+	@property
+	def max_batch_size(self) -> int:
+		# Returns the maximum number of bytes allowed in a batch (including possible reduction due to the MB safety factor)
+		return max(round(self.max_batch_mb * 1000000 / self.max_mb_safety), 1000000)
+
+	@property
+	def max_remote_size(self) -> int:
+		# Returns the maximum number of bytes allowed across all remote batches (including possible reduction due to the MB safety factor)
+		return max(round(self.max_remote_mb * 1000000 / self.max_mb_safety), 1000000)
 
 	@property
 	def max_batch_tokens(self) -> int:
@@ -399,33 +413,34 @@ class GPTRequester:
 			group = parser
 
 		# noinspection PyShadowingBuiltins
-		def add_argument(name: str, type: type, help: str, unit: str = ''):
+		def add_argument(name: str, type: type, help: str, unit: str = '', metavar: Union[str, tuple[str, ...], None] = None):
 			default_value = custom_defaults.get(name, cls.__kwargs__[name])
-			group.add_argument(f'--{name}', type=type, default=default_value, help=help if default_value is None else f'{help} [default: {default_value}{unit}]')
+			group.add_argument(f'--{name}', type=type, default=default_value, metavar=metavar, help=help if default_value is None else f'{help} [default: {default_value}{unit}]')
 
-		add_argument(name='openai_api_key', type=str, help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
-		add_argument(name='openai_organization', type=str, help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
-		add_argument(name='openai_project', type=str, help="OpenAI project (see openai.OpenAI, ends up in request headers)")
-		add_argument(name='client_base_url', type=str, help="Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)")
+		add_argument(name='openai_api_key', type=str, metavar='KEY', help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='openai_organization', type=str, metavar='ID', help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='openai_project', type=str, metavar='ID', help="OpenAI project (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='client_base_url', type=str, metavar='URL', help="Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)")
 		if include_endpoint:
 			add_argument(name='endpoint', type=str, help="API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)")
 
-		add_argument(name='autocreate_working_dir', type=bool, help="Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)")
-		add_argument(name='lock_timeout', type=float, unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
-		add_argument(name='lock_poll_interval', type=float, unit='s', help="Lock file polling interval (see utils.LockFile)")
-		add_argument(name='lock_status_interval', type=float, unit='s', help="Lock file status update interval (see utils.LockFile)")
-		add_argument(name='token_estimator_warn', type=str, help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
-		add_argument(name='remote_update_interval', type=float, unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
+		add_argument(name='autocreate_working_dir', type=bool, metavar='BOOL', help="Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)")
+		add_argument(name='lock_timeout', type=float, metavar='SEC', unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
+		add_argument(name='lock_poll_interval', type=float, metavar='SEC', unit='s', help="Lock file polling interval (see utils.LockFile)")
+		add_argument(name='lock_status_interval', type=float, metavar='SEC', unit='s', help="Lock file status update interval (see utils.LockFile)")
+		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
+		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
-		add_argument(name='max_batch_requests', type=int, help="Maximum number of requests allowed in a batch")
-		add_argument(name='max_batch_mb', type=int, unit='MB', help="Maximum allowed batch size in MB (not MiB)")
-		add_argument(name='max_batch_ktokens', type=int, unit=' ktokens', help="Maximum number of tokens to include in a single batch (in units of 1000)")
-		add_argument(name='max_unpushed_batches', type=int, help="Maximum number of unpushed local batches at any one time")
-		add_argument(name='max_remote_batches', type=int, help="Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)")
-		add_argument(name='max_remote_requests', type=int, help="Maximum number of requests across all uploaded remote batches at any one time")
-		add_argument(name='max_remote_mb', type=int, unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
-		add_argument(name='max_remote_ktokens', type=int, unit=' ktokens', help="Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time")
-		add_argument(name='max_token_safety', type=int, help="Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
+		add_argument(name='max_batch_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a batch")
+		add_argument(name='max_batch_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
+		add_argument(name='max_batch_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum number of tokens to include in a single batch (in units of 1000)")
+		add_argument(name='max_unpushed_batches', type=int, metavar='NUM', help="Maximum number of unpushed local batches at any one time")
+		add_argument(name='max_remote_batches', type=int, metavar='NUM', help="Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)")
+		add_argument(name='max_remote_requests', type=int, metavar='NUM', help="Maximum number of requests across all uploaded remote batches at any one time")
+		add_argument(name='max_remote_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
+		add_argument(name='max_remote_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time")
+		add_argument(name='max_mb_safety', type=float, metavar='FACTOR', help="Safety factor to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
+		add_argument(name='max_token_safety', type=float, metavar='FACTOR', help="Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
 
 		return group
 
@@ -586,11 +601,11 @@ class GPTRequester:
 
 					if (
 						next_num_requests > self.max_batch_requests or
-						next_local_jsonl_size > self.max_batch_mb * 1000000 or
+						next_local_jsonl_size > self.max_batch_size or
 						next_total_tokens > self.max_batch_tokens
 					):
 						if batch.num_requests <= 0:
-							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_mb * 1000000} OR Batch tokens {next_total_tokens} > {self.max_batch_tokens}")
+							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_size} OR Batch tokens {next_total_tokens} > {self.max_batch_tokens}")
 						batch.full_batch = True
 						break
 
@@ -686,7 +701,7 @@ class GPTRequester:
 				if (
 					next_remote_batches <= self.max_remote_batches and
 					next_remote_requests <= self.max_remote_requests and
-					next_remote_size <= self.max_remote_mb * 1000000 and
+					next_remote_size <= self.max_remote_size and
 					next_remote_tokens <= self.max_remote_tokens
 				):
 
@@ -857,58 +872,29 @@ class GPTRequester:
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
 
+	# TODO: Have a dryrun mode that can be used to just see the cost of batches that WOULD be launched (NO actual state update - no cost, no file writes)
+
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
+	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
+
 	# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
+	# TODO: Have a batch size threshold below which direct requests are used instead of Batch API (minimum batch size?)
+	# TODO: Allow threshold below which a forced batch/push automatically uses single API requests instead
 
+	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
-
 	# TODO: Errors that one should not attempt to continue from (e.g. inconsistent state?) so that manual intervention can fix, errors like timeouts that could benefit from a simple retry (but need to back off?), errors like requests/samples that permanently fail and never go through - when to accept? How to retry after accepted? (allow a launch to clear the failed task manager state / gpt requester attempts state?)
 
 	# TODO: Need a command line argument where you can supply batch IDs to forget (e.g. ones that were accidentally deleted from the server, or error out when trying to retrieve/process?) => Would need a mode that 'uncommits' that batch in the task state? Or generally allow on start a flag that says assume no more queue/batches exist and start again? (general hammer against all kinds of problems)
 
-	# TODO: BatchState:
-	# TODO:   Need like num_requests, num_tokens, etc? Whatever is relevant for cutoffs/thresholds/decisions
-	# TODO:   Always assert sizes when creating request_id_meta dicts (BatchState) to make sure no key overlap
-
-	# TODO: Have a batch size threshold below which direct requests are used instead of Batch API (minimum batch size?)
-
-	# TODO: User test case is one that attempts to get character codes and descriptions of unicode characters (tests that UTF-8 and everything is working correctly and the characters arrive properly on OpenAI servers)
-	# TODO: Options like 'model' should be in the user state file (to remain consistent)
-
-	# TODO: Methods to wait for batches (including timeout, maybe print how long waiting etc), and process their results and return it to user code
-	# TODO: Safety margin that adds safety margin to all thresholds/limits (e.g. makes the limits 90% of the values actually passed)
-	# TODO: 100MB or 100MiB limit?
-
-	# TODO: OPENAI_BASE_URL is used in the client with a fallback of f"https://api.openai.com/v1" as the base URL -> When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
-
-	# TODO: Count tokens etc from single requests in a separate counter, and add them to a combined total elsewhere
-	# TODO: When creating a batch, add metadata about the GPT requester prefix, batch ID (monotonic int), local machine, local batch path, PID, etc... so that it can be uniquely identified where/why the batch comes from (e.g. dict(host=os.uname().nodename, script=__file__, action='annotate_batch', batch_local=local_json_file, batch_remote=remote_json_file.id))
-
-	# TODO: Auto-compute stats about the request (monotonic ID must be assigned, state file with next monotonic ID is only updated when request is committed!), convert it to string, etc -> But autocomputed stats don't necessarily need to be saved to file, e.g. the string conversion makes no sense to save => GPTRequestInfo(frozen)?
-	# TODO: Explicit UTF-8 encoding EVERYWHERE anything is saved! ALSO newline='' => BATCH API requires no-BOM UTF-8 with Unix endings (and no empty lines of course)
-
-	# TODO: If there is a standalone action with no synchronicity required with any other action, then being atomic is enough
-	# TODO: Otherwise, everything that requires state synchronicity should be linked inside an exitstack that undoes EVERYTHING perfectly if anything fails (this could mean keeping a backup copy of a state file before it was successfully changed, in case a later synchronised action errors)
-	# TODO: For convenience, such exit stacks should delay KeyboardInterrupt to avoid completely unnecessary reversions based on a badly timed user Ctrl+C
-	# TODO: Summary: Either single atomic operation or multiple perfectly reversible ones in utils.DelayKeyboardInterruptStack
+	# TODO: Metrics (tokens in/out (what happens about thought tokens), per batch, num requests, divided by successful/unsuccessful)
+	# TODO: Count token usage from single/direct requests in a separate counter, and add them to a combined total elsewhere
 
 	# TODO: How to gracefully deal with an entire batch erroring out? Raise a runtime exception as no clue whether data is the problem or wrong limits configured, but not auto-recoverable in any case? Or maybe after 2-3 failed batches raise? Failed push? Failed result?
-	# TODO: Make direct (non-batched) immediate/sync request (sync_request(GPTRequest) -> GPTResponse)
-
-	# TODO: Debug mode that does everything (including uploading files?) except ACTUALLY start batches (everything that doesn't cost money)
-	# TODO: Maybe have two bools for no_upload / no_cost
-	# TODO: Function to direct evaluate a single request without using the Batch API (single_request() -> Response)
-	# TODO: Metrics (tokens in/out (what happens about thought tokens), per batch, num requests, divided by successful/unsuccessful)
-	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
-	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)
 
-	# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
-	# TODO: Have a dryrun mode that can be used to just see the cost of batches that WOULD be launched (NO actual state update - no cost, no file writes)
-
-	# TODO: Allow threshold below which a forced batch/push automatically uses single API requests instead
-
 	# TODO: wandb (conditional import to not require install if don't need it!)
+	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 
-	# TODO: Argparse suboptions (as namespace that can be passed to one of these classes) -> Don't need as hydra (have hydra suboptions?)? But good for others?
+	# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
 # EOF
