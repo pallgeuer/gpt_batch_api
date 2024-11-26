@@ -909,10 +909,15 @@ class GPTRequester:
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
 
-	# TODO: Add cost estimation that can be used in dryrun / max_remote_batches=0 to know what you're getting into
+	# TODO: Add limitation of how many requests/tokens to allow in THIS one run of the script OR in total across the project
+	# TODO: Add limitation by estimated total cost in THIS one run of the script OR by total expense across project
+	# TODO: Add cost estimation => Can supply percent of max output tokens that will be generated (that can be used in dryrun / max_remote_batches=0 to know what you're getting into)
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
+
+	# TODO: Add FORCE DIRECT mode that can be used to test how the LLM reacts to requests (e.g. approx how many tokens come out on average)
+	# TODO: In FORCE DIRECT mode, an option to make it print very verbosely what was sent/received with exact token stats and everything for the initial/trial/debugging stage
 
 	# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
 	# TODO: Have a batch size threshold below which direct requests are used instead of Batch API (minimum batch size?)
