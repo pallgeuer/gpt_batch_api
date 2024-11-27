@@ -61,7 +61,7 @@ class CharCodesTask(task_manager.TaskManager):
 			reinit_meta=cfg.reinit_meta,
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
-				max_tokens=resolve(cfg.max_tokens, default=384),
+				max_completion_tokens=resolve(cfg.max_completion_tokens, default=384),
 				temperature=resolve(cfg.temperature, default=0.2),
 				top_p=resolve(cfg.top_p, default=0.6),
 			),
@@ -82,7 +82,7 @@ class CharCodesTask(task_manager.TaskManager):
 						self.GR.add_request(gpt_requester.GPTRequest(
 							payload=dict(
 								model=self.T.meta['model'],
-								max_tokens=self.T.meta['max_tokens'],
+								max_completion_tokens=self.T.meta['max_completion_tokens'],
 								temperature=self.T.meta['temperature'],
 								top_p=self.T.meta['top_p'],
 								messages=[
@@ -154,7 +154,7 @@ def main():
 	parser_meta = parser.add_argument_group(title='Task metadata', description='Specifications of the task metadata to be used for new tasks (the default values are defined per-task in the corresponding task implementations).')
 	parser_meta.add_argument('--reinit_meta', action='store_true', help="Force reinitialisation of the task metadata for an existing task (normally the task metadata arguments in this group are only used for initialisation of a new task and remain fixed after that across all future runs)")
 	parser_meta.add_argument('--model', type=str, help="LLM model to use")
-	parser_meta.add_argument('--max_tokens', type=int, metavar='NUM', help="Maximum number of generated output tokens per request")
+	parser_meta.add_argument('--max_completion_tokens', type=int, metavar='NUM', help="Maximum number of generated output tokens per request (including both reasoning and visible tokens)")
 	parser_meta.add_argument('--temperature', type=float, metavar='TEMP', help="What sampling temperature to use")
 	parser_meta.add_argument('--top_p', type=float, metavar='MASS', help="Nucleus sampling probability mass")
 

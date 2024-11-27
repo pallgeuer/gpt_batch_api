@@ -1007,9 +1007,8 @@ class GPTRequester:
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
 
-	# TODO: Add COST
+	# TODO: Add COST = Everywhere there is a tokens or format_size you want a cost as well
 
-	# TODO: Add limitation of how many requests/tokens to allow in THIS one run of the script OR in total across the project
 	# TODO: Add limitation by estimated total cost in THIS one run of the script OR by total expense across project
 	# TODO: Add cost estimation => Can supply percent of max output tokens that will be assumed to be generated (deal with o1 special case!) (that can be used in dryrun / max_remote_batches=0 to know what you're getting into)
 

@@ -109,7 +109,7 @@ def test_chat_completions(client: openai.OpenAI, token_est: tokens.TokenEstimato
 					'content': 'Can you provide more details about this place and its significance?',
 				},
 			],
-			max_tokens=1,
+			max_completion_tokens=1,
 		)
 
 		for task in (
