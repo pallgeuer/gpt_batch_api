@@ -79,7 +79,7 @@ class TaskStateFile:
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=TaskState, json_data=file)
-		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
+		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for safe reversible saving of the task state file
@@ -89,7 +89,7 @@ class TaskStateFile:
 			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
-			log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size(file_size)}): {self.name}")
+			log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)}): {self.name}")
 
 	def unload(self):
 		self.state = None
@@ -123,11 +123,15 @@ class TaskManager:
 	def run(self):
 		log.info(f"Running task manager {self.GR.name_prefix}...")
 		with self:
-			while self.step():  # Returns True only if F and not R => There must be at least one remote batch that is unfinished, and no remote batches that are finished yet unprocessed
-				if self.GR.dryrun or self.GR.max_remote_batches <= 0:
-					log.warning(f"Stopping task manager {self.GR.name_prefix} without the task actually being complete as currently a dry run ({self.GR.dryrun}) or no remote batches are currently allowed (max_remote_batches={self.GR.max_remote_batches})")
+			while self.step():  # Returns True exactly if condition E*not[D] = PBMF(GQ + C)(not[L] + not[R]), i.e. only if condition F is satisfied => There are no pushed remote batches that are finished yet unprocessed
+				if self.GR.dryrun:
+					log.warning(f"[DRYRUN] Stopping incomplete task manager {self.GR.name_prefix} as it is a dry run")
 					break
-				self.GR.wait_for_batches()  # Waits until not F or R (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
+				elif self.GR.num_unfinished_batches() <= 0:  # If condition RF...
+					log.warning(f"Stopping incomplete task manager {self.GR.name_prefix} as a step did not result in unfinished pushed remote batches")
+					break
+				else:  # Else if condition not[R]F...
+					self.GR.wait_for_batches()  # Waits (if not a dry run) until condition R + not[F] (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
 		log.info('-' * 80)
 		log.info(f"Finished running task manager {self.GR.name_prefix}")
 
@@ -164,9 +168,10 @@ class TaskManager:
 	def step(self) -> bool:
 		# Returns whether the task manager has work left to do
 		#
-		# Assumption: The available samples (on the basis of which generate_requests() generates requests) are fixed for the entire duration that a task manager is entered, e.g. for an entire call to run()
-		# Assumption: When finished remote batches are processed, they do not have any influence on the push limits anymore, and thus on whether the batch pipeline is congested or not
-		# Conditions are boolean variables that are true if the condition is definitely true, and false if something occurs (nullification) that could possibly make the condition untrue and rechecking is needed to have it set to true again (all conditions start as untrue as they are unchecked)
+		# Assumption: The available samples, on the basis of which generate_requests() generates requests, are fixed for the entire duration that a task manager is entered, e.g. for an entire call to run()
+		# Assumption: When finished remote batches are processed, they do not have any direct influence on the push limits anymore, and thus on whether the batch pipeline is congested or not
+		#
+		# Conditions are boolean variables that are true if the condition is definitely true, and false if something occurs (nullification) that could POSSIBLY make the condition untrue, and rechecking is needed to have it set to true again (all conditions start as untrue as they are unchecked)
 		#
 		# Condition G = No more requests can be generated at this time based on the available samples and task state (nullified whenever the task state is modified other than to commit generated requests)
 		# Condition P = The request pool is empty (nullified if requests are added to the pool)
@@ -175,12 +180,12 @@ class TaskManager:
 		# Condition L = There are no unpushed local batches (nullified whenever a local batch is created)
 		# Condition M = No local batch can currently be pushed, either because there are no local batches or because push limits have been reached (nullified whenever a local batch is created or a finished remote batch is processed)
 		# Condition R = There are no pushed remote batches that are unfinished (nullified whenever a local batch is pushed)
-		# Condition F = There are no pushed remote batches that are finished and unprocessed (nullified and must be rechecked whenever a non-insignificant amount of time passes)
-		# Condition C = [Batch pipeline congestion] No local batches can currently be pushed due to push limits having been reached, but there are at least some configured threshold of local batches waiting to be pushed (nullified whenever a local batch is created or a finished remote batch is processed)
+		# Condition F = There are no pushed remote batches that are finished yet unprocessed (nullified if self.GR.update_remote_batch_state() is internally called)
+		# Condition C = [Batch pipeline congestion] No local batches can currently be pushed due to push limits having been reached, but there are at least some configured threshold (>=1) of local batches waiting to be pushed (nullified whenever a local batch is created or a finished remote batch is processed)
 		#
-		# Condition relations: Q implies B, C implies not L, C implies M, C implies not RF = not R or not F
+		# Condition relations: Q implies B, C implies not[L], C implies M
 		# Condition to end a step = E = PBMF(GQ + C)
-		# Condition to be completely done = GPQBLMRF = ELR (as C implies not L and not RF, C must be false in order to potentially be completely done)
+		# Condition to be completely done = D = GPQBLMRF = ELR (as C implies not[L], note that C must be false in order to potentially be completely done)
 
 		self.step_num += 1
 		log.info('-' * 80)
@@ -188,28 +193,29 @@ class TaskManager:
 
 		while True:
 
-			# Process all finished remote batches (ensures condition F, nullifies conditions M and C), and update the task state (nullifies condition G)
+			# Process all finished remote batches (nullifies then ensures condition F, nullifies conditions M and C), and update the task state (nullifies condition G)
 			# Requests may internally be auto-retried (if it occurs, temporarily nullifies condition P then re-ensures it and nullifies conditions Q and B)
 			self.process_batches()
 
 			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
-			batch_congestion = self.GR.push_batches()  # C = Returns whether no further local batches can be pushed due to push limits having been reached, despite there being at least a certain threshold of local batches waiting to be pushed
+			batch_congestion = self.GR.push_batches()  # C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
 
 			# Generate requests based on the available samples and task state (sets condition G if generation_done is True) and add them to the request pool (nullifies condition P)
 			if batch_congestion:
-				generation_done = False  # G = Batch congestion is preventing further requests from being generated, so there may be more once the congestion is over
+				generation_done = False  # Condition G = Batch congestion is preventing further requests from being generated, so there may be more once the congestion is over
 			else:
 				log.info(f"{self.GR.name_prefix}: Generating requests...")
-				generation_done = self.generate_requests()  # G = Returns whether there are no more requests that can be generated right now
+				generation_done = self.generate_requests()  # Condition G = Returns whether there are no more requests that can be generated right now
 
 			# Commit all pooled requests to the request queue (may also happen intermittently inside generate_requests() call above, ensures condition P, nullifies conditions Q and B)
-			# Create local batches out of the requests in the request queue, including a non-full trailing batch if G, otherwise some requests may remain in the queue (ensures condition B, ensures condition Q if G, nullifies conditions L, M and C)
-			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
-			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # C = Returns whether no further local batches can be pushed due to push limits having been reached, despite there being at least a certain threshold of local batches waiting to be pushed
+			# Create local batches out of the requests in the request queue, including a non-full trailing batch if condition G, otherwise some requests may remain in the queue (ensures condition B, ensures condition Q if G, nullifies conditions L, M and C)
+			# Push any local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
+			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
 
+			# Check whether the step and/or entire task is completed (nothing more to do)
 			assert self.GR.PQ.pool_len <= 0 and self.GR.num_finished_batches() <= 0  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
-			if (generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion:  # E = PBMF(GQ + C) = GQ + C as conditions P, B, M and F are all guaranteed due to the commands above and just reaching this line
-				all_done = (self.GR.num_unpushed_batches() <= 0 and self.GR.num_unfinished_batches() <= 0)  # LR = There are no unpushed local batches and no unfinished remote batches
+			if (generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion:  # Condition E = PBMF(GQ + C) = GQ + C as conditions P, B, M and F are all guaranteed due to the commands above by just reaching this line
+				all_done = (self.GR.num_unpushed_batches() <= 0 and self.GR.num_unfinished_batches() <= 0)  # Condition D = ELR = There are no unpushed local batches and no unfinished remote batches (condition E must be met simply by reaching this line)
 				break
 
 		log.info(f"{self.GR.name_prefix}: Finished step {self.step_num}")

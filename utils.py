@@ -56,8 +56,8 @@ def format_duration(seconds: float) -> str:
 				round_duration_unit = 'd'
 	return f"{'-' if seconds < 0 else ''}{round_duration}{round_duration_unit}"
 
-# Format a size in bytes using the most appropriate unit (e.g. 24B, 16.8KiB, 5.74MiB)
-def format_size(size: int, fmt: str = '.3g') -> str:
+# Format a size in bytes using the most appropriate IEC unit (e.g. 24B, 16.8KiB, 5.74MiB)
+def format_size_iec(size: int, fmt: str = '.3g') -> str:
 	if size < 0:
 		raise ValueError(f"Size cannot be negative: {size}")
 	base = 1
@@ -68,6 +68,19 @@ def format_size(size: int, fmt: str = '.3g') -> str:
 		base <<= 10
 		thres <<= 10
 	return f'{size / base:{fmt}}YiB'
+
+# Format a size in bytes using the most appropriate SI unit (e.g. 24B, 16.8KB, 5.74MB)
+def format_size_si(size: int, fmt: str = '.3g') -> str:
+	if size < 0:
+		raise ValueError(f"Size cannot be negative: {size}")
+	base = 1
+	thres = 1000
+	for unit in ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB'):
+		if size < thres:
+			return f'{size / base:{fmt}}{unit}'
+		base *= 1000
+		thres *= 1000
+	return f'{size / base:{fmt}}YB'
 
 # Get the full class spec of a class (can also provide an instance of that class)
 def get_class_str(obj: Any) -> str:

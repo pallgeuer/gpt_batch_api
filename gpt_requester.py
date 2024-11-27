@@ -12,6 +12,7 @@ import argparse
 import datetime
 import itertools
 import contextlib
+import collections
 import dataclasses
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
 import httpx
@@ -65,15 +66,23 @@ class BatchState:
 	total_tokens: int = 0                                                                           # An approximation of the total number of input tokens in all of the request payloads together
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the batch (order is the same as in the local JSONL batch input file, which is by ascending request ID)
 	full_batch: bool = False                                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
+	reasons: list[str] = dataclasses.field(default_factory=list)                                    # String reasons of what triggered the formation of the batch
 	remote: Optional[RemoteBatchState] = None                                                       # Remote state of the batch once it has been pushed
+
+# Push stats class
+@dataclasses.dataclass
+class PushStats:
+	total_requests: int = 0  # Total number of requests pushed
+	total_tokens: int = 0    # Total number of input tokens pushed
 
 # State class
 @dataclasses.dataclass
 class State:
-	version: int = 1                                                     # Data format version number
-	queue: QueueState = dataclasses.field(default_factory=QueueState)    # State of the request queue
-	max_batch_id: int = 0                                                # Maximum batch ID used thus far (0 = No batch ID used so far)
-	batches: list[BatchState] = dataclasses.field(default_factory=list)  # States of all batches that are currently pending or in progress (in ascending batch ID order)
+	version: int = 1                                                           # Data format version number
+	queue: QueueState = dataclasses.field(default_factory=QueueState)          # State of the request queue
+	max_batch_id: int = 0                                                      # Maximum batch ID used thus far (0 = No batch ID used so far)
+	batches: list[BatchState] = dataclasses.field(default_factory=list)        # States of all batches that are currently pending or in progress (in ascending batch ID order)
+	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)  # Task push statistics
 
 # State file class
 class StateFile:
@@ -114,7 +123,7 @@ class StateFile:
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
-		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
+		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for the safe reversible saving of the state file
@@ -124,7 +133,7 @@ class StateFile:
 			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
-			log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size(file_size)}): {self.name}")
+			log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)}): {self.name}")
 
 	def unload(self):
 		self.state = None
@@ -238,7 +247,7 @@ class QueueFile:
 				item=utils.dataclass_from_json(cls=GPTRequestItem, json_data=line),
 				token_estimator=self.token_estimator,
 			) for line in file.readlines()])
-		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
+		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)}): {self.name}")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for safe reversible saving of the queue file
@@ -251,7 +260,7 @@ class QueueFile:
 						utils.json_from_dataclass(obj=cached_req.item, file=file)
 						file.write('\n')
 				file_size = utils.get_file_size(file)
-			log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size(file_size)}): {self.name}")
+			log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)}): {self.name}")
 
 	def unload(self):
 		self.pool_queue = None
@@ -287,6 +296,10 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
+		max_task_requests: int = 10000000,                    # Maximum number of requests allowed for an entire task
+		max_task_ktokens: int = 2000000,                      # Maximum allowed total number of tokens (in units of 1000) for an entire task
+		max_session_requests: int = 5000000,                  # Maximum number of requests allowed in a session
+		max_session_ktokens: int = 1000000,                   # Maximum allowed total number of tokens (in units of 1000) in a session
 		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
 		max_batch_ktokens: int = 2000,                        # Maximum number of tokens (in units of 1000) to include in a single batch
@@ -295,8 +308,8 @@ class GPTRequester:
 		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
 		max_remote_mb: int = 10000,                           # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
 		max_remote_ktokens: int = 5000,                       # Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
-		max_mb_safety: float = 1.01,                          # Safety factor to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
-		max_token_safety: float = 1.05,                       # Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
+		max_mb_safety: float = 1.01,                          # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
+		max_token_safety: float = 1.05,                       # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 	):
 
 		self.working_dir = os.path.abspath(working_dir)
@@ -321,7 +334,7 @@ class GPTRequester:
 
 		self.dryrun = dryrun
 		if self.dryrun:
-			log.warning(f"[DRYRUN] {self.name_prefix}: GPT requester dry run mode => Not allowing remote batches or writing of state updates")
+			log.warning(f"[DRYRUN] {self.name_prefix}: GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
 		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn)
 		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
@@ -340,6 +353,18 @@ class GPTRequester:
 		if self.remote_update_interval < 1.0:
 			raise ValueError(f"Remote batch update interval must be at least 1.0s: {self.remote_update_interval}")
 
+		self.max_task_requests = max_task_requests
+		if self.max_task_requests < 0:
+			raise ValueError(f"Maximum number of requests in a task must be at least 0: {self.max_task_requests}")
+		self.max_task_ktokens = max_task_ktokens
+		if self.max_task_ktokens < 0:
+			raise ValueError(f"Maximum task ktokens must be at least 0: {self.max_task_ktokens}")
+		self.max_session_requests = max_session_requests
+		if self.max_session_requests < 0:
+			raise ValueError(f"Maximum number of requests in a session must be at least 0: {self.max_session_requests}")
+		self.max_session_ktokens = max_session_ktokens
+		if self.max_session_ktokens < 0:
+			raise ValueError(f"Maximum session ktokens must be at least 0: {self.max_session_ktokens}")
 		self.max_batch_requests = max_batch_requests
 		if self.max_batch_requests < 1:
 			raise ValueError(f"Maximum number of requests in a batch must be at least 1: {self.max_batch_requests}")
@@ -371,9 +396,12 @@ class GPTRequester:
 		if self.max_token_safety < 1.0:
 			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety}")
 
-		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {self.max_batch_size / 1000000:.3g}MB (safety factor {self.max_mb_safety:.3g}), {self.max_batch_tokens} tokens (safety factor {self.max_token_safety:.3g})")
-		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {self.max_remote_size / 1000000:.3g}MB (safety factor {self.max_mb_safety:.3g}), {self.max_remote_tokens} tokens (safety factor {self.max_token_safety:.3g})")
+		log.info(f"{self.name_prefix}: Using safety factors (SF) of {self.max_mb_safety:.3g} for MB size, {self.max_token_safety:.3g} for tokens")
+		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens")
+		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens")
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
+		log.info(f"{self.name_prefix}: Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens per session")
+		log.info(f"{self.name_prefix}: Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens per task")
 
 		self._enter_stack = contextlib.ExitStack()
 		self.S: Optional[State] = None
@@ -381,6 +409,17 @@ class GPTRequester:
 		self.P: Optional[list[CachedGPTRequest]] = None
 		self.Q: Optional[list[Optional[CachedGPTRequest]]] = None
 		self.max_request_id: Optional[int] = None
+		self.session_push_stats: Optional[PushStats] = None
+
+	@property
+	def max_task_tokens(self) -> int:
+		# Returns the maximum number of tokens allowed in a task (including possible reduction due to the token safety factor)
+		return max(round(self.max_task_ktokens * 1000 / self.max_token_safety), 0)
+
+	@property
+	def max_session_tokens(self) -> int:
+		# Returns the maximum number of tokens allowed in a session (including possible reduction due to the token safety factor)
+		return max(round(self.max_session_ktokens * 1000 / self.max_token_safety), 0)
 
 	@property
 	def max_batch_size(self) -> int:
@@ -388,14 +427,14 @@ class GPTRequester:
 		return max(round(self.max_batch_mb * 1000000 / self.max_mb_safety), 1000000)
 
 	@property
-	def max_remote_size(self) -> int:
-		# Returns the maximum number of bytes allowed across all remote batches (including possible reduction due to the MB safety factor)
-		return max(round(self.max_remote_mb * 1000000 / self.max_mb_safety), 1000000)
-
-	@property
 	def max_batch_tokens(self) -> int:
 		# Returns the maximum number of tokens allowed in a batch (including possible reduction due to the token safety factor)
 		return max(round(self.max_batch_ktokens * 1000 / self.max_token_safety), 1000)
+
+	@property
+	def max_remote_size(self) -> int:
+		# Returns the maximum number of bytes allowed across all remote batches (including possible reduction due to the MB safety factor)
+		return max(round(self.max_remote_mb * 1000000 / self.max_mb_safety), 1000000)
 
 	@property
 	def max_remote_tokens(self) -> int:
@@ -455,6 +494,10 @@ class GPTRequester:
 		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
+		add_argument(name='max_task_requests', type=int, metavar='NUM', help="Maximum number of requests allowed for an entire task")
+		add_argument(name='max_task_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of tokens (in units of 1000) for an entire task")
+		add_argument(name='max_session_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a session")
+		add_argument(name='max_session_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of tokens (in units of 1000) in a session")
 		add_argument(name='max_batch_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a batch")
 		add_argument(name='max_batch_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
 		add_argument(name='max_batch_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum number of tokens (in units of 1000) to include in a single batch")
@@ -463,8 +506,8 @@ class GPTRequester:
 		add_argument(name='max_remote_requests', type=int, metavar='NUM', help="Maximum number of requests across all uploaded remote batches at any one time")
 		add_argument(name='max_remote_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
 		add_argument(name='max_remote_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time")
-		add_argument(name='max_mb_safety', type=float, metavar='FACTOR', help="Safety factor to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
-		add_argument(name='max_token_safety', type=float, metavar='FACTOR', help="Safety factor to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
+		add_argument(name='max_mb_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
+		add_argument(name='max_token_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
 
 		return group
 
@@ -480,6 +523,7 @@ class GPTRequester:
 			self.PQ = self.queue.pool_queue
 			self.P = self.PQ.pool
 			self.Q = self.PQ.queue
+			self.session_push_stats = PushStats()
 			self.validate_state_queue(clean=True)
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
@@ -495,6 +539,7 @@ class GPTRequester:
 	def on_exit(self):
 		self.S = self.PQ = self.P = self.Q = None
 		self.max_request_id = None
+		self.session_push_stats = None
 
 	# Validate that there are no obvious issues with the current state and queue (clean refers to the expected status right after a commit)
 	def validate_state_queue(self, *, clean: bool):
@@ -536,6 +581,13 @@ class GPTRequester:
 			raise ValueError(f"The request ID intervals overlap between the batches, request queue and request pool: {req_id_intervals}")
 		if any(req_id > self.S.queue.max_request_id for req_id in flat_req_id_bounds):
 			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.S.queue.max_request_id}: {req_id_intervals}")
+
+		batch_state_requests = sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)
+		batch_state_tokens = sum(batch.total_tokens for batch in self.S.batches if batch.remote is not None)
+		if not self.S.task_push_stats.total_requests >= self.session_push_stats.total_requests >= batch_state_requests:
+			raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of requests: {self.S.task_push_stats.total_requests} vs {self.session_push_stats.total_requests} vs {batch_state_requests}")
+		if not self.S.task_push_stats.total_tokens >= self.session_push_stats.total_tokens >= batch_state_tokens:
+			raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of tokens: {self.S.task_push_stats.total_tokens} vs {self.session_push_stats.total_tokens} vs {batch_state_tokens}")
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
@@ -623,11 +675,14 @@ class GPTRequester:
 					next_num_requests = batch.num_requests + 1
 					next_total_tokens = batch.total_tokens + cached_req.info.num_tokens
 
-					if (
-						next_num_requests > self.max_batch_requests or
-						next_local_jsonl_size > self.max_batch_size or
-						next_total_tokens > self.max_batch_tokens
-					):
+					assert not batch.reasons
+					if next_num_requests > self.max_batch_requests:
+						batch.reasons.append('Max batch requests')
+					if next_local_jsonl_size > self.max_batch_size:
+						batch.reasons.append('Max batch size')
+					if next_total_tokens > self.max_batch_tokens:
+						batch.reasons.append('Max batch tokens')
+					if batch.reasons:
 						if batch.num_requests <= 0:
 							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_size} OR Batch tokens {next_total_tokens} > {self.max_batch_tokens}")
 						batch.full_batch = True
@@ -652,6 +707,9 @@ class GPTRequester:
 
 			if (batch.full_batch or force) and batch.num_requests >= 1:
 
+				if force:
+					batch.reasons.append('Forced')
+
 				def revert_state(max_batch_id: int, request_id_meta: dict[int, Optional[dict[str, Any]]], queue: list[Optional[CachedGPTRequest]]):
 					self.Q[batch_index:index] = queue
 					self.S.queue.request_id_meta = request_id_meta
@@ -674,13 +732,13 @@ class GPTRequester:
 					self.Q[batch_index:index] = (None,) * (index - batch_index)
 
 					if self.dryrun:
-						log.warning(f"[DRYRUN] {self.name_prefix}: Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
+						log.warning(f"[DRYRUN] {self.name_prefix}: Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 					else:
 						with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
 							file.writelines(batch_reqs)
 							file_size = utils.get_file_size(file)
 						assert file_size == batch.local_jsonl_size
-						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {batch.local_jsonl_size / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}]")
+						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 
 					self.validate_state_queue(clean=False)
 					self.queue.save(stack=stack)
@@ -717,26 +775,53 @@ class GPTRequester:
 			current_user = os.getuid()  # int
 
 		num_pushed = 0
+		reasons_nopush = set()
 		for batch in self.S.batches:
 			if batch.remote is None:
+
+				next_task_requests = self.S.task_push_stats.total_requests + batch.num_requests
+				next_task_tokens = self.S.task_push_stats.total_tokens + batch.total_tokens
+				next_session_requests = self.session_push_stats.total_requests + batch.num_requests
+				next_session_tokens = self.session_push_stats.total_tokens + batch.total_tokens
 
 				next_remote_batches = remote_batches + 1
 				next_remote_requests = remote_requests + batch.num_requests
 				next_remote_size = remote_size + batch.local_jsonl_size
 				next_remote_tokens = remote_tokens + batch.total_tokens
 
-				if (
-					next_remote_batches <= self.max_remote_batches and
-					next_remote_requests <= self.max_remote_requests and
-					next_remote_size <= self.max_remote_size and
-					next_remote_tokens <= self.max_remote_tokens
-				):
+				reasons = set()
+				if next_task_requests > self.max_task_requests:
+					reasons.add('Max task requests')
+				if next_task_tokens > self.max_task_tokens:
+					reasons.add('Max task tokens')
+				if next_session_requests > self.max_session_requests:
+					reasons.add('Max session requests')
+				if next_session_tokens > self.max_session_tokens:
+					reasons.add('Max session tokens')
+				if next_remote_batches > self.max_remote_batches:
+					reasons.add('Max remote batches')
+				if next_remote_requests > self.max_remote_requests:
+					reasons.add('Max remote requests')
+				if next_remote_size > self.max_remote_size:
+					reasons.add('Max remote size')
+				if next_remote_tokens > self.max_remote_tokens:
+					reasons.add('Max remote tokens')
+				reasons_nopush.update(reasons)
+
+				if not reasons:
 
 					if self.dryrun:
-						log.warning(f"[DRYRUN] {self.name_prefix}: Not pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {batch.local_jsonl_size / 1000000:.3g}MB...")
+						log.warning(f"[DRYRUN] {self.name_prefix}: Not pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}")
+						reasons_nopush.add('DRYRUN')
 					else:
 
-						log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {batch.local_jsonl_size / 1000000:.3g}MB...")
+						log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}...")
+
+						def revert_push_stats(task_requests: int, task_tokens: int, session_requests: int, session_tokens: int):
+							self.S.task_push_stats.total_requests = task_requests
+							self.S.task_push_stats.total_tokens = task_tokens
+							self.session_push_stats.total_requests = session_requests
+							self.session_push_stats.total_tokens = session_tokens
 
 						with utils.AtomicExitStack() as stack:
 
@@ -766,12 +851,18 @@ class GPTRequester:
 							stack.callback(setattr, batch, 'remote', batch.remote)
 							batch.remote = RemoteBatchState(file=file_object, batch=batch_object, finished=batch_object.status in FINISHED_BATCH_STATUSES)
 
+							stack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, task_tokens=self.S.task_push_stats.total_tokens, session_requests=self.session_push_stats.total_requests, session_tokens=self.session_push_stats.total_tokens)
+							self.S.task_push_stats.total_requests = next_task_requests
+							self.S.task_push_stats.total_tokens = next_task_tokens
+							self.session_push_stats.total_requests = next_session_requests
+							self.session_push_stats.total_tokens = next_session_tokens
+
 							self.validate_state_queue(clean=False)
 							self.state.save(stack=stack)
 
 							stack.pop_all()
 
-						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {batch.remote.file.bytes / 1000000:.3g}MB with {batch.num_requests} requests and {batch.total_tokens} tokens")
+						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests and {batch.total_tokens} tokens (remote batch status: {batch.remote.batch.status})")
 
 						remote_batches = next_remote_batches
 						remote_requests = next_remote_requests
@@ -780,18 +871,19 @@ class GPTRequester:
 
 						num_pushed += 1
 
-				else:
-					assert self.max_remote_batches <= 0 or remote_batches >= 1  # The remote limits are checked in __init__ to be more lenient than batch limits, so it should NOT be possible that push limits are reached without there being any remote batch in progress
-
 		num_unpushed_batches = self.num_unpushed_batches()
 		num_unfinished_batches = self.num_unfinished_batches()
 		num_finished_batches = self.num_finished_batches()
 		assert num_unfinished_batches + num_finished_batches == remote_batches
 		batch_congestion = (num_unpushed_batches >= self.max_unpushed_batches)
 
+		if reasons_nopush:
+			log.info(f"{self.name_prefix}: Reasons encountered not to push certain batches right now: {', '.join(sorted(reasons_nopush))}")
 		if num_pushed > 0:
 			log.info(f"{self.name_prefix}: Pushed {num_pushed} batches resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
-			log.info(f"{self.name_prefix}: There are {remote_batches} remote batches with a total of {remote_requests} requests, {remote_tokens} tokens, and {remote_size / 1000000:.3g}MB")
+			log.info(f"{self.name_prefix}: There are {remote_batches} remote batches with a total of {remote_requests} requests, {remote_tokens} tokens, and {utils.format_size_si(remote_size)}")
+			log.info(f"{self.name_prefix}: Session push statistics are now {self.session_push_stats.total_requests} requests, and {self.session_push_stats.total_tokens} tokens")
+			log.info(f"{self.name_prefix}: Task push statistics are now {self.S.task_push_stats.total_requests} requests, and {self.S.task_push_stats.total_tokens} tokens")
 
 		return batch_congestion
 
@@ -799,25 +891,25 @@ class GPTRequester:
 	def delete_remote_file(self, file_id: str):
 		# file_id = The remote file ID to delete
 		if self.dryrun:
-			log.warning(f"[DRYRUN] Not deleting remote file {file_id}")
+			log.warning(f"[DRYRUN] {self.name_prefix}: Not deleting remote file {file_id}")
 		else:
 			try:
 				deleted_file = self.client.files.delete(file_id=file_id)
 				assert deleted_file.id == file_id, "Remote file ID mismatch during deletion"
 			except Exception as e:  # noqa
-				log.error(f"Failed to delete remote file {file_id} due to {utils.get_class_str(e)}: {e}")
+				log.error(f"{self.name_prefix}: Failed to delete remote file {file_id} due to {utils.get_class_str(e)}: {e}")
 
 	# Cancel a remote batch (only log an error if cancellation fails, never raise an exception)
 	def cancel_remote_batch(self, batch_id: str):
 		# batch_id = The remote batch ID to cancel
 		if self.dryrun:
-			log.warning(f"[DRYRUN] Not canceling remote batch {batch_id}")
+			log.warning(f"[DRYRUN] {self.name_prefix}: Not canceling remote batch {batch_id}")
 		else:
 			try:
 				cancelled_batch = self.client.batches.cancel(batch_id=batch_id)
 				assert cancelled_batch.id == batch_id, "Remote batch ID mismatch during cancellation"
 			except Exception as e:  # noqa
-				log.error(f"Failed to cancel remote batch {batch_id} due to {utils.get_class_str(e)}: {e}")
+				log.error(f"{self.name_prefix}: Failed to cancel remote batch {batch_id} due to {utils.get_class_str(e)}: {e}")
 
 	# Retrieve the number of unpushed local batches
 	def num_unpushed_batches(self) -> int:
@@ -829,13 +921,14 @@ class GPTRequester:
 		# Returns the current number of remote batches (whether finished or unfinished)
 		return sum(1 for batch in self.S.batches if batch.remote is not None)
 
-	# Update the current state of all pushed remote batches
+	# Update the current state of all pushed remote batches (unless dry run)
 	def update_remote_batch_state(self, only_check_finished: bool) -> bool:
 		# only_check_finished = If True, return as soon as a single pushed remote batch is seen to be in the finished state (whether this is new or not)
 		# Returns whether there are any finished remote batches
 
 		any_finished = False
-		status_changed = False
+		status_updated = False
+		status_changed = collections.defaultdict(list)
 		for batch in self.S.batches:
 			if batch.remote is not None:
 
@@ -849,17 +942,21 @@ class GPTRequester:
 						batch_status = self.client.batches.retrieve(batch_id=batch.remote.batch.id)
 						if batch_status.id != batch.remote.batch.id or batch_status.input_file_id != batch.remote.batch.input_file_id:
 							raise ValueError(f"Remote returned incorrect IDs for query: {batch_status.id} != {batch.remote.batch.id} or {batch_status.input_file_id} != {batch.remote.batch.input_file_id}")
+						if batch_status.status != batch.remote.batch.status:
+							status_changed[batch_status.status].append(batch.id)
 						batch.remote.batch = batch_status
-						status_changed = True
+						status_updated = True
 						if batch.remote.batch.status in FINISHED_BATCH_STATUSES:
 							batch.remote.finished = True
 							any_finished = True
 							if only_check_finished:
 								break
 					except (openai.OpenAIError, ValueError) as e:
-						log.error(f"Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
+						log.error(f"{self.name_prefix}: Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
 
-		if status_changed:
+		if status_updated:
+			if status_changed:
+				log.info(f"{self.name_prefix}: Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
 			with utils.AtomicExitStack() as stack:
 				self.validate_state_queue(clean=False)
 				self.state.save(stack=stack)
@@ -877,7 +974,7 @@ class GPTRequester:
 		# Returns the current number of finished remote batches
 		return sum(1 for batch in self.S.batches if batch.remote is not None and batch.remote.finished)
 
-	# Wait until there is at least one finished yet unprocessed remote batch or no more unfinished remote batches
+	# Wait until there is at least one finished yet unprocessed remote batch or no more unfinished remote batches (unless dry run)
 	def wait_for_batches(self):
 
 		initial_num_unfinished_batches = self.num_unfinished_batches()
@@ -902,12 +999,15 @@ class GPTRequester:
 	# TODO: DESCRIPTION
 	def process_batches(self):  # TODO: Return value annotation (does this return num_unfinished_batches? Or rather (NOT?) how many it processed?)
 		# TODO: DOC
-		# TODO: MUST Use update_remote_batch_state()
+		# TODO: Do not do any actual processing if DRYRUN (no client calls allowed, no updating of state allowed, just don't do anything?)
+		# TODO: MUST Use update_remote_batch_state() (don't need to comment about this doing nothing really for dry run if this line never executes in dry run mode due to a prior IF)
 		# TODO: Log error if a batch is finished by NOT completed => FAIL the associated samples (or retry them once auto-retrying is a thing) if remote_batch.status != 'completed': print(f"ERROR: Remote batch {remote_batch.id} has status '{remote_batch.status}' with errors: {remote_batch.errors}")
 		# TODO: if remote_batch.output_file_id: remote_batch_content = tuple(json.loads(line) for line in client.files.content(file_id=remote_batch.output_file_id).text.splitlines() if line)
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		pass
+
+	# TODO: Add COST
 
 	# TODO: Add limitation of how many requests/tokens to allow in THIS one run of the script OR in total across the project
 	# TODO: Add limitation by estimated total cost in THIS one run of the script OR by total expense across project
@@ -926,6 +1026,7 @@ class GPTRequester:
 	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
 	# TODO: Errors that one should not attempt to continue from (e.g. inconsistent state?) so that manual intervention can fix, errors like timeouts that could benefit from a simple retry (but need to back off?), errors like requests/samples that permanently fail and never go through - when to accept? How to retry after accepted? (allow a launch to clear the failed task manager state / gpt requester attempts state?)
+	# TODO: Deal with possibly aborting if log.error()'s happen too often (search where I've used them)? Or exponentially relax (e.g. temporary internet/server outage) and then eventually abort?
 
 	# TODO: Need a command line argument where you can supply batch IDs to forget (e.g. ones that were accidentally deleted from the server, or error out when trying to retrieve/process?) => Would need a mode that 'uncommits' that batch in the task state? Or generally allow on start a flag that says assume no more queue/batches exist and start again? (general hammer against all kinds of problems)
 
