@@ -132,7 +132,7 @@ class TaskManager:
 					break
 				else:  # Else if condition not[R]F...
 					self.GR.wait_for_batches()  # Waits (if not a dry run) until condition R + not[F] (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
-		log.info('-' * 80)
+			log.info('-' * 80)
 		log.info(f"Finished running task manager {self.GR.name_prefix}")
 
 	# Enter method for the required use of TaskManager as a context manager

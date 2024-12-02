@@ -133,7 +133,7 @@ def main():
 
 	logging.basicConfig(level=logging.INFO, format="[%(levelname)s][%(asctime)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 	client = openai.OpenAI()
-	token_est = tokens.TokenEstimator(warn='always')
+	token_est = tokens.TokenEstimator(warn='always', assumed_completion_ratio=0.5)
 
 	test_chat_completions(client=client, token_est=token_est)
 

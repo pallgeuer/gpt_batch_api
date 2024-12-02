@@ -87,7 +87,7 @@ class CharCodesTask(task_manager.TaskManager):
 								top_p=self.T.meta['top_p'],
 								messages=[
 									dict(role='system', content="Given a unicode character, provide information about it."),
-									dict(role='user', content=f"Character: {char}"),
+									dict(role='user', content=f"Character: \"{char}\"" if char.isspace() else f"Character: {char}"),
 								],
 								response_format=CharCodesTask.UnicodeCharacterInfo,
 							),

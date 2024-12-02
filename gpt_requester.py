@@ -38,6 +38,74 @@ class GPTRequest:
 	payload: dict[str, Any]                # Request payload (JSON-compatible OpenAI request) => Is batched into JSONL files and uploaded to OpenAI for processing
 	meta: Optional[dict[str, Any]] = None  # Optional custom metadata to associate with this request (JSON-compatible) => Is batched and stored in the state file while OpenAI is processing the payloads, and is returned alongside the response
 
+# Tokens and cost class
+@dataclasses.dataclass
+class TokensCost:
+
+	input_tokens: int = 0            # An approximation of how many input tokens the request payload(s) have
+	output_tokens: int = 0           # A very rough approximation of how many output tokens are expected for the request(s)
+	cost_input_direct: float = 0.0   # An approximation of the cost of the input tokens of the request payload(s) in direct mode (assuming no cached input tokens)
+	cost_input_batch: float = 0.0    # An approximation of the cost of the input tokens of the request payload(s) in batch mode
+	cost_output_direct: float = 0.0  # A very rough approximation of the cost of the expected number of output tokens for the request(s) in direct mode
+	cost_output_batch: float = 0.0   # A very rough approximation of the cost of the expected number of output tokens for the request(s) in batch mode
+
+	def equals(self, other: TokensCost, cost_tol: float = 1e-7) -> bool:
+		# other = TokensCost instance to compare equality to (while avoiding exact floating point comparison)
+		# cost_tol = Absolute tolerance to permit in cost comparisons
+		# Returns whether the TokensCost instance is essentially equal to the other one
+		return (
+			self.input_tokens == other.input_tokens and
+			self.output_tokens == other.output_tokens and
+			abs(self.cost_input_direct - other.cost_input_direct) < cost_tol and
+			abs(self.cost_input_batch - other.cost_input_batch) < cost_tol and
+			abs(self.cost_output_direct - other.cost_output_direct) < cost_tol and
+			abs(self.cost_output_batch - other.cost_output_batch) < cost_tol
+		)
+
+	def __add__(self, other: TokensCost) -> TokensCost:
+		# other = TokensCost instance to add to the current one
+		# Returns the sum as a new TokensCost instance
+		if not isinstance(other, TokensCost):
+			return NotImplemented
+		return TokensCost(
+			input_tokens=self.input_tokens + other.input_tokens,
+			output_tokens=self.output_tokens + other.output_tokens,
+			cost_input_direct=self.cost_input_direct + other.cost_input_direct,
+			cost_input_batch=self.cost_input_batch + other.cost_input_batch,
+			cost_output_direct=self.cost_output_direct + other.cost_output_direct,
+			cost_output_batch=self.cost_output_batch + other.cost_output_batch,
+		)
+
+	def __iadd__(self, other: TokensCost) -> TokensCost:
+		# other = TokensCost instance to add in-place to the current one
+		# Returns the updated (self) TokensCost instance
+		if not isinstance(other, TokensCost):
+			return NotImplemented
+		self.input_tokens += other.input_tokens
+		self.output_tokens += other.output_tokens
+		self.cost_input_direct += other.cost_input_direct
+		self.cost_input_batch += other.cost_input_batch
+		self.cost_output_direct += other.cost_output_direct
+		self.cost_output_batch += other.cost_output_batch
+		return self
+
+	def add(self, *others: Union[TokensCost, Iterable[TokensCost]]) -> TokensCost:
+		# others = TokensCost instances or iterables thereof to add in-place to the current one
+		# Returns the updated (self) TokensCost instance
+		for other in others:
+			if isinstance(other, TokensCost):
+				self.__iadd__(other)
+			elif isinstance(other, Iterable):
+				for oth in other:
+					self.__iadd__(oth)
+			else:
+				raise TypeError(f"Unexpected type: {utils.get_class_str(other)}")
+		return self
+
+	def is_valid(self) -> bool:
+		# Returns whether all fields are non-negative
+		return self.input_tokens >= 0 and self.output_tokens >= 0 and self.cost_input_direct >= 0 and self.cost_input_batch >= 0 and self.cost_output_direct >= 0 and self.cost_output_batch >= 0
+
 #
 # State file
 #
@@ -62,8 +130,8 @@ class BatchState:
 	local_jsonl: str = ''                                                                           # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
 	local_jsonl_size: int = 0                                                                       # Number of bytes in the local JSONL batch input file
 	num_requests: int = 0                                                                           # Number of requests in the batch
-	num_tokens: dict[int, int] = dataclasses.field(default_factory=dict)                            # An approximation of the number of input tokens in each request payload
-	total_tokens: int = 0                                                                           # An approximation of the total number of input tokens in all of the request payloads together
+	tokens_cost_map: dict[int, TokensCost] = dataclasses.field(default_factory=dict)                # The approximate token counts and costs of each request
+	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)                   # The total approximate token count and cost across all requests in the batch
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the batch (order is the same as in the local JSONL batch input file, which is by ascending request ID)
 	full_batch: bool = False                                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
 	reasons: list[str] = dataclasses.field(default_factory=list)                                    # String reasons of what triggered the formation of the batch
@@ -72,8 +140,8 @@ class BatchState:
 # Push stats class
 @dataclasses.dataclass
 class PushStats:
-	total_requests: int = 0  # Total number of requests pushed
-	total_tokens: int = 0    # Total number of input tokens pushed
+	total_requests: int = 0                                                        # Total number of requests pushed
+	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)  # Total token count and cost pushed
 
 # State class
 @dataclasses.dataclass
@@ -152,9 +220,9 @@ class GPTRequestItem:
 # GPT request information class
 @dataclasses.dataclass(frozen=True)
 class GPTRequestInfo:
-	json: str        # Full batch-style request in compact JSON string form (includes the payload, always ends with a single trailing newline)
-	json_size: int   # Number of bytes in the compact JSON string form when encoded with UTF-8
-	num_tokens: int  # An approximation of how many input tokens the request payload has
+	json: str                # Full batch-style request in compact JSON string form (includes the payload, always ends with a single trailing newline)
+	json_size: int           # Number of bytes in the compact JSON string form when encoded with UTF-8
+	tokens_cost: TokensCost  # The approximate token count and cost of the request payload
 
 # Cached GPT request class
 @dataclasses.dataclass(frozen=True)
@@ -164,18 +232,28 @@ class CachedGPTRequest:
 	info: GPTRequestInfo  # GPT request information (automatically calculated from the GPT request item, and cached in memory)
 
 	@staticmethod
-	def from_item(item: GPTRequestItem, token_estimator: tokens.TokenEstimator) -> CachedGPTRequest:
+	def from_item(item: GPTRequestItem, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster) -> CachedGPTRequest:
 		# item = GPT request item to calculate information for and wrap as a cached GPT request
 		# token_estimator = Token estimator to use to estimate the number of tokens in the request
+		# token_coster = Token coster to use to estimate the cost of the request
 		# Returns the created cached GPT request
 		full_request = dict(custom_id=f'id-{item.id}', method='POST', url=item.endpoint, body=item.req.payload)
 		compact_json = json.dumps(full_request, ensure_ascii=False, indent=None) + '\n'
+		input_tokens = token_estimator.payload_input_tokens(payload=item.req.payload, endpoint=item.endpoint).total
+		output_tokens = token_estimator.payload_output_tokens(payload=item.req.payload, endpoint=item.endpoint)
 		return CachedGPTRequest(
 			item=item,
 			info=GPTRequestInfo(
 				json=compact_json,
 				json_size=len(compact_json.encode('utf-8')),
-				num_tokens=token_estimator.payload_input_tokens(payload=item.req.payload, endpoint=item.endpoint).total,
+				tokens_cost=TokensCost(
+					input_tokens=input_tokens,
+					output_tokens=output_tokens,
+					cost_input_direct=token_coster.input_cost(direct=input_tokens),
+					cost_input_batch=token_coster.input_cost(batch=input_tokens),
+					cost_output_direct=token_coster.output_cost(direct=output_tokens),
+					cost_output_batch=token_coster.output_cost(batch=output_tokens),
+				),
 			),
 		)
 
@@ -208,14 +286,16 @@ class QueueFile:
 
 	pool_queue: Optional[PoolQueue]
 
-	def __init__(self, path: str, token_estimator: tokens.TokenEstimator, dryrun: bool):
+	def __init__(self, path: str, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster, dryrun: bool):
 		# path = Path to the JSONL queue file to load/save/manage (nominally *.jsonl extension)
 		# token_estimator = Token estimator instance to use
+		# token_coster = Token coster instance to use
 		# dryrun = Whether to prevent any saving of the queue file (dry run mode)
 		self.path = os.path.abspath(path)
 		log.info(f"GPT requester queue file: {self.path}")
 		self.name = os.path.basename(self.path)
 		self.token_estimator = token_estimator
+		self.token_coster = token_coster
 		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
 		self.pool_queue = None
@@ -246,6 +326,7 @@ class QueueFile:
 			self.pool_queue = PoolQueue(pool=[], queue=[CachedGPTRequest.from_item(
 				item=utils.dataclass_from_json(cls=GPTRequestItem, json_data=line),
 				token_estimator=self.token_estimator,
+				token_coster=self.token_coster,
 			) for line in file.readlines()])
 		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)}): {self.name}")
 
@@ -296,18 +377,29 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
+		cost_input_direct_mtoken: float = 2.50,               # The cost per million direct input tokens (1M tokens ~ 750K words)
+		cost_input_cached_mtoken: float = 1.25,               # The cost per million cached input tokens
+		cost_input_batch_mtoken: float = 1.25,                # The cost per million input tokens with Batch API
+		cost_output_direct_mtoken: float = 10.00,             # The cost per million direct output tokens (1M tokens ~ 750K words)
+		cost_output_batch_mtoken: float = 5.00,               # The cost per million output tokens with Batch API
+		assumed_completion_ratio: float = 0.5,                # How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)
+
 		max_task_requests: int = 10000000,                    # Maximum number of requests allowed for an entire task
-		max_task_ktokens: int = 2000000,                      # Maximum allowed total number of tokens (in units of 1000) for an entire task
+		max_task_ktokens: int = 2000000,                      # Maximum allowed total number of input tokens (in units of 1000) for an entire task
+		max_task_cost: float = 1000.0,                        # Maximum allowed total cost (input + assumed output tokens) of an entire task
 		max_session_requests: int = 5000000,                  # Maximum number of requests allowed in a session
-		max_session_ktokens: int = 1000000,                   # Maximum allowed total number of tokens (in units of 1000) in a session
+		max_session_ktokens: int = 1000000,                   # Maximum allowed total number of input tokens (in units of 1000) in a session
+		max_session_cost: float = 500.0,                      # Maximum allowed total cost (input + assumed output tokens) in a session
 		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
-		max_batch_ktokens: int = 2000,                        # Maximum number of tokens (in units of 1000) to include in a single batch
+		max_batch_ktokens: int = 2000,                        # Maximum number of input tokens (in units of 1000) to include in a single batch
+		max_batch_cost: float = 50.0,                         # Maximum allowed cost (input + assumed output tokens) of a batch
 		max_unpushed_batches: int = 10,                       # Maximum number of unpushed local batches at any one time
 		max_remote_batches: int = 100,                        # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
 		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
 		max_remote_mb: int = 10000,                           # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
-		max_remote_ktokens: int = 5000,                       # Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time
+		max_remote_ktokens: int = 5000,                       # Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time
+		max_remote_cost: float = 150.0,                       # Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time
 		max_mb_safety: float = 1.01,                          # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
 		max_token_safety: float = 1.05,                       # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 	):
@@ -336,10 +428,22 @@ class GPTRequester:
 		if self.dryrun:
 			log.warning(f"[DRYRUN] {self.name_prefix}: GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
-		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn)
+		self.cost_input_direct_mtoken = cost_input_direct_mtoken
+		self.cost_input_cached_mtoken = cost_input_cached_mtoken
+		self.cost_input_batch_mtoken = cost_input_batch_mtoken
+		self.cost_output_direct_mtoken = cost_output_direct_mtoken
+		self.cost_output_batch_mtoken = cost_output_batch_mtoken
+		if self.cost_input_direct_mtoken < 0 or self.cost_input_cached_mtoken < 0 or self.cost_input_batch_mtoken < 0 or self.cost_output_direct_mtoken < 0 or self.cost_output_batch_mtoken < 0:
+			raise ValueError(f"Costs cannot be negative: {self.cost_input_direct_mtoken:.3f}, {self.cost_input_cached_mtoken:.3f}, {self.cost_input_batch_mtoken:.3f}, {self.cost_output_direct_mtoken:.3f}, {self.cost_output_batch_mtoken:.3f}")
+		self.assumed_completion_ratio = assumed_completion_ratio
+		if not 0 <= self.assumed_completion_ratio <= 1:
+			raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
+
+		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn, assumed_completion_ratio=self.assumed_completion_ratio)
+		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
 		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
 		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"), dryrun=self.dryrun)
-		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator, dryrun=self.dryrun)
+		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator, token_coster=self.token_coster, dryrun=self.dryrun)
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.endpoint = endpoint
@@ -351,7 +455,7 @@ class GPTRequester:
 
 		self.remote_update_interval = remote_update_interval
 		if self.remote_update_interval < 1.0:
-			raise ValueError(f"Remote batch update interval must be at least 1.0s: {self.remote_update_interval}")
+			raise ValueError(f"Remote batch update interval must be at least 1.0s: {self.remote_update_interval:.3g}")
 
 		self.max_task_requests = max_task_requests
 		if self.max_task_requests < 0:
@@ -359,12 +463,18 @@ class GPTRequester:
 		self.max_task_ktokens = max_task_ktokens
 		if self.max_task_ktokens < 0:
 			raise ValueError(f"Maximum task ktokens must be at least 0: {self.max_task_ktokens}")
+		self.max_task_cost = max_task_cost
+		if self.max_task_cost < 0:
+			raise ValueError(f"Maximum task cost must be at least 0: {self.max_task_cost:.3f}")
 		self.max_session_requests = max_session_requests
 		if self.max_session_requests < 0:
 			raise ValueError(f"Maximum number of requests in a session must be at least 0: {self.max_session_requests}")
 		self.max_session_ktokens = max_session_ktokens
 		if self.max_session_ktokens < 0:
 			raise ValueError(f"Maximum session ktokens must be at least 0: {self.max_session_ktokens}")
+		self.max_session_cost = max_session_cost
+		if self.max_session_cost < 0:
+			raise ValueError(f"Maximum session cost must be at least 0: {self.max_session_cost:.3f}")
 		self.max_batch_requests = max_batch_requests
 		if self.max_batch_requests < 1:
 			raise ValueError(f"Maximum number of requests in a batch must be at least 1: {self.max_batch_requests}")
@@ -374,6 +484,9 @@ class GPTRequester:
 		self.max_batch_ktokens = max_batch_ktokens
 		if self.max_batch_ktokens < 1:
 			raise ValueError(f"Maximum batch ktokens must be at least 1: {self.max_batch_ktokens}")
+		self.max_batch_cost = max_batch_cost
+		if self.max_batch_cost < 0.01:
+			raise ValueError(f"Maximum batch cost must be at least 0.01: {self.max_batch_cost:.3f}")
 		self.max_unpushed_batches = max_unpushed_batches
 		if self.max_unpushed_batches < 1:
 			raise ValueError(f"Maximum number of unpushed batches must be at least 1: {self.max_unpushed_batches}")
@@ -389,19 +502,22 @@ class GPTRequester:
 		self.max_remote_ktokens = max_remote_ktokens
 		if self.max_remote_ktokens < self.max_batch_ktokens:
 			raise ValueError(f"Maximum total uploaded remote batch ktokens must be at least as great as the maximum batch ktokens: {self.max_remote_ktokens} vs {self.max_batch_ktokens}")
+		self.max_remote_cost = max_remote_cost
+		if self.max_remote_cost < self.max_batch_cost:
+			raise ValueError(f"Maximum total uploaded remote batch cost must be at least as great as the maximum batch cost: {self.max_remote_cost:.3f} vs {self.max_batch_cost:.3f}")
 		self.max_mb_safety = max_mb_safety
 		if self.max_mb_safety < 1.0:
-			raise ValueError(f"The number of MB safety factor must be at least 1.0: {self.max_mb_safety}")
+			raise ValueError(f"The number of MB safety factor must be at least 1.0: {self.max_mb_safety:.3g}")
 		self.max_token_safety = max_token_safety
 		if self.max_token_safety < 1.0:
-			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety}")
+			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety:.3g}")
 
 		log.info(f"{self.name_prefix}: Using safety factors (SF) of {self.max_mb_safety:.3g} for MB size, {self.max_token_safety:.3g} for tokens")
-		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens")
-		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens")
+		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens, {self.max_batch_cost:.3f} cost")
+		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} cost")
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
-		log.info(f"{self.name_prefix}: Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens per session")
-		log.info(f"{self.name_prefix}: Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens per task")
+		log.info(f"{self.name_prefix}: Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens, {self.max_session_cost:.3f} cost per session")
+		log.info(f"{self.name_prefix}: Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} cost per task")
 
 		self._enter_stack = contextlib.ExitStack()
 		self.S: Optional[State] = None
@@ -494,18 +610,29 @@ class GPTRequester:
 		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
+		add_argument(name='cost_input_direct_mtoken', type=float, metavar='COST', help="The cost per million direct input tokens (1M tokens ~ 750K words)")
+		add_argument(name='cost_input_cached_mtoken', type=float, metavar='COST', help="The cost per million cached input tokens")
+		add_argument(name='cost_input_batch_mtoken', type=float, metavar='COST', help="The cost per million input tokens with Batch API")
+		add_argument(name='cost_output_direct_mtoken', type=float, metavar='COST', help="The cost per million direct output tokens (1M tokens ~ 750K words)")
+		add_argument(name='cost_output_batch_mtoken', type=float, metavar='COST', help="The cost per million output tokens with Batch API")
+		add_argument(name='assumed_completion_ratio', type=float, metavar='RATIO', help="How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)")
+
 		add_argument(name='max_task_requests', type=int, metavar='NUM', help="Maximum number of requests allowed for an entire task")
-		add_argument(name='max_task_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of tokens (in units of 1000) for an entire task")
+		add_argument(name='max_task_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) for an entire task")
+		add_argument(name='max_task_cost', type=float, metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) of an entire task")
 		add_argument(name='max_session_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a session")
-		add_argument(name='max_session_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of tokens (in units of 1000) in a session")
+		add_argument(name='max_session_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) in a session")
+		add_argument(name='max_session_cost', type=float, metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) in a session")
 		add_argument(name='max_batch_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a batch")
 		add_argument(name='max_batch_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
-		add_argument(name='max_batch_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum number of tokens (in units of 1000) to include in a single batch")
+		add_argument(name='max_batch_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum number of input tokens (in units of 1000) to include in a single batch")
+		add_argument(name='max_batch_cost', type=float, metavar='COST', help="Maximum allowed cost (input + assumed output tokens) of a batch")
 		add_argument(name='max_unpushed_batches', type=int, metavar='NUM', help="Maximum number of unpushed local batches at any one time")
 		add_argument(name='max_remote_batches', type=int, metavar='NUM', help="Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)")
 		add_argument(name='max_remote_requests', type=int, metavar='NUM', help="Maximum number of requests across all uploaded remote batches at any one time")
 		add_argument(name='max_remote_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
-		add_argument(name='max_remote_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of tokens (in units of 1000) across all uploaded remote batches at any one time")
+		add_argument(name='max_remote_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time")
+		add_argument(name='max_remote_cost', type=float, metavar='COST', help="Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time")
 		add_argument(name='max_mb_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
 		add_argument(name='max_token_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
 
@@ -583,18 +710,24 @@ class GPTRequester:
 			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.S.queue.max_request_id}: {req_id_intervals}")
 
 		batch_state_requests = sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)
-		batch_state_tokens = sum(batch.total_tokens for batch in self.S.batches if batch.remote is not None)
 		if not self.S.task_push_stats.total_requests >= self.session_push_stats.total_requests >= batch_state_requests:
 			raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of requests: {self.S.task_push_stats.total_requests} vs {self.session_push_stats.total_requests} vs {batch_state_requests}")
-		if not self.S.task_push_stats.total_tokens >= self.session_push_stats.total_tokens >= batch_state_tokens:
-			raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of tokens: {self.S.task_push_stats.total_tokens} vs {self.session_push_stats.total_tokens} vs {batch_state_tokens}")
+		batch_state_tokens_cost = TokensCost().add(batch.total_tokens_cost for batch in self.S.batches if batch.remote is not None)
+		for field in dataclasses.fields(TokensCost):  # noqa
+			if not getattr(self.S.task_push_stats.total_tokens_cost, field.name) >= getattr(self.session_push_stats.total_tokens_cost, field.name) >= getattr(batch_state_tokens_cost, field.name):
+				raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of {field.name}: {getattr(self.S.task_push_stats.total_tokens_cost, field.name)} vs {getattr(self.session_push_stats.total_tokens_cost, field.name)} vs {getattr(batch_state_tokens_cost, field.name)}")
+
+		for batch in self.S.batches:
+			total_tokens_cost = TokensCost().add(batch.tokens_cost_map.values())
+			if not batch.total_tokens_cost.equals(total_tokens_cost):
+				raise ValueError(f"Total tokens cost mismatch: {batch.total_tokens_cost} vs {total_tokens_cost}")
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
 		# req = The request to add to the request pool
 		self.max_request_id += 1
 		item = GPTRequestItem(id=self.max_request_id, req=req, endpoint=self.endpoint)
-		self.P.append(CachedGPTRequest.from_item(item=item, token_estimator=self.token_estimator))
+		self.P.append(CachedGPTRequest.from_item(item=item, token_estimator=self.token_estimator, token_coster=self.token_coster))
 
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
 	# Note that reqs can also for convenience be a generator that executes some loop over source samples and yields instances of GPTRequest
@@ -673,18 +806,20 @@ class GPTRequester:
 
 					next_local_jsonl_size = batch.local_jsonl_size + cached_req.info.json_size
 					next_num_requests = batch.num_requests + 1
-					next_total_tokens = batch.total_tokens + cached_req.info.num_tokens
+					next_total_tokens_cost = batch.total_tokens_cost + cached_req.info.tokens_cost
 
 					assert not batch.reasons
 					if next_num_requests > self.max_batch_requests:
 						batch.reasons.append('Max batch requests')
 					if next_local_jsonl_size > self.max_batch_size:
 						batch.reasons.append('Max batch size')
-					if next_total_tokens > self.max_batch_tokens:
+					if next_total_tokens_cost.input_tokens > self.max_batch_tokens:
 						batch.reasons.append('Max batch tokens')
+					if next_total_tokens_cost.cost_input_batch + next_total_tokens_cost.cost_output_batch > self.max_batch_cost:
+						batch.reasons.append('Max batch cost')
 					if batch.reasons:
 						if batch.num_requests <= 0:
-							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_size} OR Batch tokens {next_total_tokens} > {self.max_batch_tokens}")
+							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_size} OR Batch tokens {next_total_tokens_cost.input_tokens} > {self.max_batch_tokens} OR Batch cost {next_total_tokens_cost.cost_input_batch + next_total_tokens_cost.cost_output_batch} > {self.max_batch_cost}")
 						batch.full_batch = True
 						break
 
@@ -692,18 +827,18 @@ class GPTRequester:
 					batch_reqs.append(cached_req.info.json)
 					batch.local_jsonl_size = next_local_jsonl_size
 					batch.num_requests = next_num_requests
-					assert req_id not in batch.num_tokens and cached_req.info.num_tokens >= 0
-					batch.num_tokens[req_id] = cached_req.info.num_tokens
-					batch.total_tokens = next_total_tokens
+					assert req_id not in batch.tokens_cost_map and cached_req.info.tokens_cost.is_valid()
+					batch.tokens_cost_map[req_id] = cached_req.info.tokens_cost
+					batch.total_tokens_cost = next_total_tokens_cost
 					assert req_id not in batch.request_id_meta
 					batch.request_id_meta[req_id] = cached_req.item.req.meta
 
 				index += 1
 
 			assert index - batch_index == batch.num_requests + num_nones
-			assert batch.num_requests == len(batch.num_tokens) == len(batch.request_id_meta)
-			assert batch.total_tokens == sum(batch.num_tokens)
-			assert batch.num_tokens.keys() == batch.request_id_meta.keys()
+			assert batch.num_requests == len(batch.tokens_cost_map) == len(batch.request_id_meta)
+			assert batch.total_tokens_cost.equals(TokensCost().add(batch.tokens_cost_map.values()))
+			assert batch.tokens_cost_map.keys() == batch.request_id_meta.keys()
 
 			if (batch.full_batch or force) and batch.num_requests >= 1:
 
@@ -732,13 +867,13 @@ class GPTRequester:
 					self.Q[batch_index:index] = (None,) * (index - batch_index)
 
 					if self.dryrun:
-						log.warning(f"[DRYRUN] {self.name_prefix}: Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
+						log.warning(f"[DRYRUN] {self.name_prefix}: Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests and {batch.total_tokens_cost.input_tokens} tokens [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 					else:
 						with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
 							file.writelines(batch_reqs)
 							file_size = utils.get_file_size(file)
 						assert file_size == batch.local_jsonl_size
-						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests and {batch.total_tokens} tokens [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
+						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests and {batch.total_tokens_cost.input_tokens} tokens [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 
 					self.validate_state_queue(clean=False)
 					self.queue.save(stack=stack)
@@ -761,13 +896,13 @@ class GPTRequester:
 		remote_batches = 0
 		remote_requests = 0
 		remote_size = 0
-		remote_tokens = 0
+		remote_tokens_cost = TokensCost()
 		for batch in self.S.batches:
 			if batch.remote is not None:
 				remote_batches += 1
 				remote_requests += batch.num_requests
 				remote_size += batch.local_jsonl_size
-				remote_tokens += batch.total_tokens
+				remote_tokens_cost += batch.total_tokens_cost
 
 		try:
 			current_user = getpass.getuser()  # str
@@ -780,32 +915,38 @@ class GPTRequester:
 			if batch.remote is None:
 
 				next_task_requests = self.S.task_push_stats.total_requests + batch.num_requests
-				next_task_tokens = self.S.task_push_stats.total_tokens + batch.total_tokens
+				next_task_tokens_cost = self.S.task_push_stats.total_tokens_cost + batch.total_tokens_cost
 				next_session_requests = self.session_push_stats.total_requests + batch.num_requests
-				next_session_tokens = self.session_push_stats.total_tokens + batch.total_tokens
+				next_session_tokens_cost = self.session_push_stats.total_tokens_cost + batch.total_tokens_cost
 
 				next_remote_batches = remote_batches + 1
 				next_remote_requests = remote_requests + batch.num_requests
 				next_remote_size = remote_size + batch.local_jsonl_size
-				next_remote_tokens = remote_tokens + batch.total_tokens
+				next_remote_tokens_cost = remote_tokens_cost + batch.total_tokens_cost
 
 				reasons = set()
 				if next_task_requests > self.max_task_requests:
 					reasons.add('Max task requests')
-				if next_task_tokens > self.max_task_tokens:
+				if next_task_tokens_cost.input_tokens > self.max_task_tokens:
 					reasons.add('Max task tokens')
+				if next_task_tokens_cost.cost_input_batch + next_task_tokens_cost.cost_output_batch > self.max_task_cost:
+					reasons.add('Max task cost')
 				if next_session_requests > self.max_session_requests:
 					reasons.add('Max session requests')
-				if next_session_tokens > self.max_session_tokens:
+				if next_session_tokens_cost.input_tokens > self.max_session_tokens:
 					reasons.add('Max session tokens')
+				if next_session_tokens_cost.cost_input_batch + next_session_tokens_cost.cost_output_batch > self.max_session_cost:
+					reasons.add('Max session cost')
 				if next_remote_batches > self.max_remote_batches:
 					reasons.add('Max remote batches')
 				if next_remote_requests > self.max_remote_requests:
 					reasons.add('Max remote requests')
 				if next_remote_size > self.max_remote_size:
 					reasons.add('Max remote size')
-				if next_remote_tokens > self.max_remote_tokens:
+				if next_remote_tokens_cost.input_tokens > self.max_remote_tokens:
 					reasons.add('Max remote tokens')
+				if next_remote_tokens_cost.cost_input_batch + next_remote_tokens_cost.cost_output_batch > self.max_remote_cost:
+					reasons.add('Max remote cost')
 				reasons_nopush.update(reasons)
 
 				if not reasons:
@@ -817,11 +958,11 @@ class GPTRequester:
 
 						log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}...")
 
-						def revert_push_stats(task_requests: int, task_tokens: int, session_requests: int, session_tokens: int):
+						def revert_push_stats(task_requests: int, task_tokens_cost: TokensCost, session_requests: int, session_tokens_cost: TokensCost):
 							self.S.task_push_stats.total_requests = task_requests
-							self.S.task_push_stats.total_tokens = task_tokens
+							self.S.task_push_stats.total_tokens_cost = task_tokens_cost
 							self.session_push_stats.total_requests = session_requests
-							self.session_push_stats.total_tokens = session_tokens
+							self.session_push_stats.total_tokens_cost = session_tokens_cost
 
 						with utils.AtomicExitStack() as stack:
 
@@ -851,23 +992,23 @@ class GPTRequester:
 							stack.callback(setattr, batch, 'remote', batch.remote)
 							batch.remote = RemoteBatchState(file=file_object, batch=batch_object, finished=batch_object.status in FINISHED_BATCH_STATUSES)
 
-							stack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, task_tokens=self.S.task_push_stats.total_tokens, session_requests=self.session_push_stats.total_requests, session_tokens=self.session_push_stats.total_tokens)
+							stack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_requests=self.session_push_stats.total_requests, session_tokens_cost=self.session_push_stats.total_tokens_cost)
 							self.S.task_push_stats.total_requests = next_task_requests
-							self.S.task_push_stats.total_tokens = next_task_tokens
+							self.S.task_push_stats.total_tokens_cost = next_task_tokens_cost
 							self.session_push_stats.total_requests = next_session_requests
-							self.session_push_stats.total_tokens = next_session_tokens
+							self.session_push_stats.total_tokens_cost = next_session_tokens_cost
 
 							self.validate_state_queue(clean=False)
 							self.state.save(stack=stack)
 
 							stack.pop_all()
 
-						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests and {batch.total_tokens} tokens (remote batch status: {batch.remote.batch.status})")
+						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests and {batch.total_tokens_cost.input_tokens} tokens (remote batch status: {batch.remote.batch.status})")
 
 						remote_batches = next_remote_batches
 						remote_requests = next_remote_requests
 						remote_size = next_remote_size
-						remote_tokens = next_remote_tokens
+						remote_tokens_cost = next_remote_tokens_cost
 
 						num_pushed += 1
 
@@ -880,10 +1021,10 @@ class GPTRequester:
 		if reasons_nopush:
 			log.info(f"{self.name_prefix}: Reasons encountered not to push certain batches right now: {', '.join(sorted(reasons_nopush))}")
 		if num_pushed > 0:
-			log.info(f"{self.name_prefix}: Pushed {num_pushed} batches resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
-			log.info(f"{self.name_prefix}: There are {remote_batches} remote batches with a total of {remote_requests} requests, {remote_tokens} tokens, and {utils.format_size_si(remote_size)}")
-			log.info(f"{self.name_prefix}: Session push statistics are now {self.session_push_stats.total_requests} requests, and {self.session_push_stats.total_tokens} tokens")
-			log.info(f"{self.name_prefix}: Task push statistics are now {self.S.task_push_stats.total_requests} requests, and {self.S.task_push_stats.total_tokens} tokens")
+			log.info(f"{self.name_prefix}: Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
+			log.info(f"{self.name_prefix}: There are {remote_batches} remote batches with a total of {remote_requests} requests, {remote_tokens_cost.input_tokens} tokens, and {utils.format_size_si(remote_size)}")
+			log.info(f"{self.name_prefix}: Session push statistics are now {self.session_push_stats.total_requests} requests, and {self.session_push_stats.total_tokens_cost.input_tokens} tokens")
+			log.info(f"{self.name_prefix}: Task push statistics are now {self.S.task_push_stats.total_requests} requests, and {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens")
 
 		return batch_congestion
 

@@ -74,7 +74,10 @@ class CCFuncTokensConfig:
 # Token estimator class
 class TokenEstimator:
 
-	def __init__(self, warn: str = 'once'):
+	def __init__(self, assumed_completion_ratio: float, warn: str = 'once'):
+		self.assumed_completion_ratio = assumed_completion_ratio
+		if not 0 <= self.assumed_completion_ratio <= 1:
+			raise ValueError(f"Invalid assumed completion ratio: {self.assumed_completion_ratio}")
 		self.warn = warn
 		if self.warn not in ('never', 'once', 'always'):
 			raise ValueError(f"Invalid warn mode: {self.warn}")
@@ -466,4 +469,34 @@ class TokenEstimator:
 			if desc:
 				return prop_desc + len(encoding.encode(re.sub(rf'\.{{0,{func_cfg.desc_strip_dot}}}$', r'', desc)))
 		return 0
+
+	# Roughly approximate the number of output tokens a request payload will have based on the maximum number of tokens allowed
+	def payload_output_tokens(self, payload: dict[str, Any], endpoint: str) -> int:
+		if endpoint == '/v1/chat/completions':  # Chat completions endpoint
+			max_tokens = payload.get('max_completion_tokens', payload.get('max_tokens', 2048))
+			output_tokens = round(max_tokens * self.assumed_completion_ratio)
+		else:
+			raise ValueError(f"Cannot estimate output tokens for unrecognised endpoint: {endpoint}")
+		return max(output_tokens, 0)
+
+# Token coster class
+class TokenCoster:
+
+	def __init__(self, cost_input_direct_mtoken: float, cost_input_cached_mtoken: float, cost_input_batch_mtoken: float, cost_output_direct_mtoken: float, cost_output_batch_mtoken: float):
+		if cost_input_direct_mtoken < 0 or cost_input_cached_mtoken < 0 or cost_input_batch_mtoken < 0 or cost_output_direct_mtoken < 0 or cost_output_batch_mtoken < 0:
+			raise ValueError(f"Costs cannot be negative: {cost_input_direct_mtoken:.3f}, {cost_input_cached_mtoken:.3f}, {cost_input_batch_mtoken:.3f}, {cost_output_direct_mtoken:.3f}, {cost_output_batch_mtoken:.3f}")
+		self.cost_input_direct = cost_input_direct_mtoken / 1e6
+		self.cost_input_cached = cost_input_cached_mtoken / 1e6
+		self.cost_input_batch = cost_input_batch_mtoken / 1e6
+		self.cost_output_direct = cost_output_direct_mtoken / 1e6
+		self.cost_output_batch = cost_output_batch_mtoken / 1e6
+
+	def input_cost(self, direct: int = 0, cached: int = 0, batch: int = 0) -> float:
+		return direct * self.cost_input_direct + cached * self.cost_input_cached + batch * self.cost_input_batch
+
+	def output_cost(self, direct: int = 0, batch: int = 0) -> float:
+		return direct * self.cost_output_direct + batch * self.cost_output_batch
+
+	def cost(self, input_direct: int = 0, input_cached: int = 0, input_batch: int = 0, output_direct: int = 0, output_batch: int = 0) -> float:
+		return self.input_cost(direct=input_direct, cached=input_cached, batch=input_batch) + self.output_cost(direct=output_direct, batch=output_batch)
 # EOF
