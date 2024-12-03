@@ -36,8 +36,8 @@ class TaskStateFile:
 		# init_meta = Value to initialise the meta field with if the task state file is newly created (deep copy on create)
 		# dryrun = Whether to prevent any saving of state (dry run mode)
 		self.path = os.path.abspath(path)
-		log.info(f"Task state file: {self.path}")
 		self.name = os.path.basename(self.path)
+		log.info(f"{self.name}: Task state file: {self.path}")
 		self.reinit_meta = reinit_meta
 		self.init_meta = init_meta if init_meta is not None else {}
 		self.dryrun = dryrun
@@ -62,7 +62,7 @@ class TaskStateFile:
 				self.create(stack=atomic_stack)
 			atomic_stack.push(self.clear_reinit_meta)
 			assert self.state is not None
-			log.info(f"Task metadata:\n{'\n'.join(f'    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.state.meta.items())}")
+			log.info(f"{self.name}: Task metadata:\n{'\n'.join(f'    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.state.meta.items())}")
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
 		return self
@@ -79,17 +79,17 @@ class TaskStateFile:
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=TaskState, json_data=file)
-		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)}): {self.name}")
+		log.info(f"{self.name}: Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)})")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for safe reversible saving of the task state file
 		if self.dryrun:
-			log.warning(f"[DRYRUN] Did not save task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys: {self.name}")
+			log.warning(f"{self.name}: {gpt_requester.DRYRUN}Did not save task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys")
 		else:
 			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
-			log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)}): {self.name}")
+			log.info(f"{self.name}: Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)})")
 
 	def unload(self):
 		self.state = None
@@ -118,22 +118,34 @@ class TaskManager:
 		self._enter_stack = contextlib.ExitStack()
 		self.T: Optional[TaskState] = None
 		self.step_num: Optional[int] = None
+		self.generating = False
 
 	# Run the task manager to completion
 	def run(self):
-		log.info(f"Running task manager {self.GR.name_prefix}...")
+
+		log.info('-' * 80)
+		log.info(f"{self.GR.name_prefix}: Running task manager...")
+
 		with self:
+
+			self.log_status()
+			self.GR.log_status()
+
 			while self.step():  # Returns True exactly if condition E*not[D] = PBMF(GQ + C)(not[L] + not[R]), i.e. only if condition F is satisfied => There are no pushed remote batches that are finished yet unprocessed
 				if self.GR.dryrun:
-					log.warning(f"[DRYRUN] Stopping incomplete task manager {self.GR.name_prefix} as it is a dry run")
+					log.warning(f"{self.GR.name_prefix}: {gpt_requester.DRYRUN}Stopping incomplete task manager as it is a dry run")
 					break
 				elif self.GR.num_unfinished_batches() <= 0:  # If condition RF...
-					log.warning(f"Stopping incomplete task manager {self.GR.name_prefix} as a step did not result in unfinished pushed remote batches")
+					log.warning(f"{self.GR.name_prefix}: Stopping incomplete task manager as a step did not result in unfinished pushed remote batches")
 					break
 				else:  # Else if condition not[R]F...
 					self.GR.wait_for_batches()  # Waits (if not a dry run) until condition R + not[F] (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
+
 			log.info('-' * 80)
-		log.info(f"Finished running task manager {self.GR.name_prefix}")
+			self.log_status()
+			self.GR.log_status()
+
+		log.info(f"{self.GR.name_prefix}: Finished running task manager")
 
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
@@ -141,6 +153,7 @@ class TaskManager:
 			stack.enter_context(self.GR)
 			stack.callback(self.on_exit)
 			self.step_num = 0
+			self.generating = False
 			stack.enter_context(self.task)
 			self.T = self.task.state
 			self.validate_state()
@@ -155,6 +168,7 @@ class TaskManager:
 	# Local actions to perform on exit
 	def on_exit(self):
 		self.T = self.step_num = None
+		self.generating = False
 
 	# Validate that there are no obvious issues with the current state
 	def validate_state(self):
@@ -163,6 +177,13 @@ class TaskManager:
 			raise ValueError(f"Unexpected failed yet not committed samples: {sorted(self.T.failed_samples.keys() - self.T.committed_samples.keys())}")
 		if not self.T.committed_samples.keys() >= self.T.succeeded_samples.keys():
 			raise ValueError(f"Unexpected succeeded yet not committed samples: {sorted(self.T.succeeded_samples.keys() - self.T.committed_samples.keys())}")
+
+	# Log the current task manager status
+	def log_status(self):
+		num_ongoing = len(self.T.committed_samples.keys() - self.T.failed_samples.keys() - self.T.succeeded_samples.keys())
+		num_done = len(self.T.committed_samples) - num_ongoing
+		log.info(f"{self.GR.name_prefix}: There are {len(self.T.committed_samples)} committed ({num_ongoing} ongoing and {num_done} done), {len(self.T.failed_samples)} failed, {len(self.T.succeeded_samples)} succeeded samples")
+		assert num_done == len(self.T.failed_samples) + len(self.T.succeeded_samples)
 
 	# Execute a single non-blocking step of the task manager (generates and processes as much as is currently possible without waiting)
 	def step(self) -> bool:
@@ -198,14 +219,17 @@ class TaskManager:
 			self.process_batches()
 
 			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
-			batch_congestion = self.GR.push_batches()  # C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
+			if self.GR.num_unpushed_batches() > 0:
+				log.info(f"{self.GR.name_prefix}: Checking whether any local batches can be pushed to the remote server...")
+				batch_congestion = self.GR.push_batches()  # C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
+			else:
+				batch_congestion = False
 
 			# Generate requests based on the available samples and task state (sets condition G if generation_done is True) and add them to the request pool (nullifies condition P)
 			if batch_congestion:
 				generation_done = False  # Condition G = Batch congestion is preventing further requests from being generated, so there may be more once the congestion is over
 			else:
-				log.info(f"{self.GR.name_prefix}: Generating requests...")
-				generation_done = self.generate_requests()  # Condition G = Returns whether there are no more requests that can be generated right now
+				generation_done = self.call_generate_requests()  # Condition G = Returns whether there are no more requests that can be generated right now
 
 			# Commit all pooled requests to the request queue (may also happen intermittently inside generate_requests() call above, ensures condition P, nullifies conditions Q and B)
 			# Create local batches out of the requests in the request queue, including a non-full trailing batch if condition G, otherwise some requests may remain in the queue (ensures condition B, ensures condition Q if G, nullifies conditions L, M and C)
@@ -220,6 +244,17 @@ class TaskManager:
 
 		log.info(f"{self.GR.name_prefix}: Finished step {self.step_num}")
 		return not all_done
+
+	# Call the generate requests implementation
+	def call_generate_requests(self) -> bool:
+		# Passes on the return value of generate_requests()
+		log.info(f"{self.GR.name_prefix}: Generating requests...")
+		assert not self.generating
+		self.generating = True
+		generation_done = self.generate_requests()
+		self.generating = False
+		log.info(f"{self.GR.name_prefix}: Finished generating requests for now => Generation {'DONE' if generation_done else 'ONGOING'}")
+		return generation_done
 
 	# Generate requests based on the current task state and add the requests to the GPT requester
 	def generate_requests(self) -> bool:
@@ -239,42 +274,48 @@ class TaskManager:
 		# push = Whether to push batches (if possible) after creating them
 		# Returns whether the batch pipeline is currently congested (always False if push=False)
 
-		log.info(f"{self.GR.name_prefix}: Committing generated requests...")
+		if self.generating:
+			log.info(f"{self.GR.name_prefix}: Generated a chunk of {len(self.GR.P)} requests")
 
-		with self.GR.commit_requests() as (cached_reqs, stack):
-			if cached_reqs:
+		if self.GR.P or any(cached_req is None for cached_req in self.GR.Q):
 
-				def revert_committed_state(meta: dict[str, Any], samples_all: bool, samples: dict[str, Any]):
-					self.T.committed_meta = meta
-					if samples_all:
-						self.T.committed_samples = samples
+			log.info(f"{self.GR.name_prefix}: Committing generated requests...")
+
+			with self.GR.commit_requests() as (cached_reqs, stack):
+				if cached_reqs:
+
+					def revert_committed_state(meta: dict[str, Any], samples_all: bool, samples: dict[str, Any]):
+						self.T.committed_meta = meta
+						if samples_all:
+							self.T.committed_samples = samples
+						else:
+							for sample_key, data in samples.items():
+								if data is DELETE:
+									self.T.committed_samples.pop(sample_key, None)
+								else:
+									self.T.committed_samples[sample_key] = data
+
+					DELETE = object()
+					if (sample_keys := self.cached_request_keys(cached_reqs)) is None:
+						stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=True, samples=copy.deepcopy(self.T.committed_samples))
 					else:
-						for sample_key, data in samples.items():
-							if data is DELETE:
-								self.T.committed_samples.pop(sample_key, None)
-							else:
-								self.T.committed_samples[sample_key] = data
+						stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=False, samples={sample_key: (copy.deepcopy(self.T.committed_samples[sample_key]) if sample_key in self.T.committed_samples else DELETE) for sample_key in sample_keys})
 
-				DELETE = object()
-				if (sample_keys := self.cached_request_keys(cached_reqs)) is None:
-					stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=True, samples=copy.deepcopy(self.T.committed_samples))
-				else:
-					stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=False, samples={sample_key: (copy.deepcopy(self.T.committed_samples[sample_key]) if sample_key in self.T.committed_samples else DELETE) for sample_key in sample_keys})
+					for cached_req in cached_reqs:
+						self.commit_cached_request(cached_req)
+					self.validate_state()
+					self.task.save(stack=stack)
 
-				for cached_req in cached_reqs:
-					self.commit_cached_request(cached_req)
-				self.validate_state()
-				self.task.save(stack=stack)
+			log.info(f"{self.GR.name_prefix}: Committed {len(cached_reqs)} generated requests")
 
-		log.info(f"{self.GR.name_prefix}: Committed {len(cached_reqs)} generated requests")
-
-		if batch:
-			log.info(f"{self.GR.name_prefix}: Creating unpushed batches from committed requests...")
+		if batch and self.GR.Q:
+			log.info(f"{self.GR.name_prefix}: Attempting to create local batches from {len(self.GR.Q)} available committed requests...")
 			num_unpushed_batches = self.GR.batch_requests(force=force_batch)
-			log.info(f"{self.GR.name_prefix}: The total number of unpushed batches is now {num_unpushed_batches}")
+			if num_unpushed_batches > 0:
+				log.info(f"{self.GR.name_prefix}: The total number of unpushed local batches is now {num_unpushed_batches}")
 
-		if push:
-			log.info(f"{self.GR.name_prefix}: Pushing batches to remote server...")
+		if push and self.GR.num_unpushed_batches() > 0:
+			log.info(f"{self.GR.name_prefix}: Checking whether any local batches can be pushed to the remote server...")
 			batch_congestion = self.GR.push_batches()
 		else:
 			batch_congestion = False

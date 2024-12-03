@@ -23,6 +23,7 @@ from . import tokens, utils
 # Constants
 DEFAULT_ENDPOINT = '/v1/chat/completions'
 FINISHED_BATCH_STATUSES = {'failed', 'completed', 'expired', 'cancelled'}
+DRYRUN = '\x1b[38;5;226m[DRYRUN]\x1b[0m '
 
 # Logging configuration
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -171,8 +172,8 @@ class StateFile:
 		# path = Path to the JSON state file to load/save/manage (nominally *.json extension)
 		# dryrun = Whether to prevent any saving of state (dry run mode)
 		self.path = os.path.abspath(path)
-		log.info(f"GPT requester state file: {self.path}")
 		self.name = os.path.basename(self.path)
+		log.info(f"{self.name}: GPT requester state file: {self.path}")
 		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
@@ -201,17 +202,17 @@ class StateFile:
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
-		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)}): {self.name}")
+		log.info(f"{self.name}: Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for the safe reversible saving of the state file
 		if self.dryrun:
-			log.warning(f"[DRYRUN] Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches: {self.name}")
+			log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches")
 		else:
 			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
-			log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)}): {self.name}")
+			log.info(f"{self.name}: Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
 
 	def unload(self):
 		self.state = None
@@ -302,8 +303,8 @@ class QueueFile:
 		# token_coster = Token coster instance to use
 		# dryrun = Whether to prevent any saving of the queue file (dry run mode)
 		self.path = os.path.abspath(path)
-		log.info(f"GPT requester queue file: {self.path}")
 		self.name = os.path.basename(self.path)
+		log.info(f"{self.name}: GPT requester queue file: {self.path}")
 		self.token_estimator = token_estimator
 		self.token_coster = token_coster
 		self.dryrun = dryrun
@@ -338,12 +339,12 @@ class QueueFile:
 				token_estimator=self.token_estimator,
 				token_coster=self.token_coster,
 			) for line in file.readlines()])
-		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)}): {self.name}")
+		log.info(f"{self.name}: Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
 
 	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for safe reversible saving of the queue file
 		if self.dryrun:
-			log.warning(f"[DRYRUN] Did not save GPT requester queue file with {self.pool_queue.queue_len} requests: {self.name}")
+			log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester queue file with {self.pool_queue.queue_len} requests")
 		else:
 			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
 				for cached_req in self.pool_queue.queue:
@@ -351,7 +352,7 @@ class QueueFile:
 						utils.json_from_dataclass(obj=cached_req.item, file=file)
 						file.write('\n')
 				file_size = utils.get_file_size(file)
-			log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)}): {self.name}")
+			log.info(f"{self.name}: Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
 
 	def unload(self):
 		self.pool_queue = None
@@ -430,13 +431,13 @@ class GPTRequester:
 				os.mkdir(self.working_dir)
 				created_working_dir = True
 
-		log.info(f"Using GPT requester of prefix '{self.name_prefix}' in dir: {self.working_dir}{' [CREATED]' if created_working_dir else ''}")
+		log.info(f"{self.name_prefix}: Using GPT requester in dir: {self.working_dir}{' [CREATED]' if created_working_dir else ''}")
 		if not os.path.isdir(self.working_dir):
 			raise FileNotFoundError(f"GPT working directory does not exist: {self.working_dir}")
 
 		self.dryrun = dryrun
 		if self.dryrun:
-			log.warning(f"[DRYRUN] {self.name_prefix}: GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
+			log.warning(f"{self.name_prefix}: {DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
 		self.cost_input_direct_mtoken = cost_input_direct_mtoken
 		self.cost_input_cached_mtoken = cost_input_cached_mtoken
@@ -732,6 +733,18 @@ class GPTRequester:
 			if not batch.total_tokens_cost.equals(total_tokens_cost):
 				raise ValueError(f"Total tokens cost mismatch: {batch.total_tokens_cost} vs {total_tokens_cost}")
 
+	# Log the current GPT requester status
+	def log_status(self):
+		pool_queue_tokens_cost = TokensCost().add((cached_req.info.tokens_cost for cached_req in self.P), (cached_req.info.tokens_cost for cached_req in self.Q if cached_req is not None))
+		local_tokens_cost = TokensCost().add(batch.total_tokens_cost for batch in self.S.batches if batch.remote is None)
+		remote_tokens_cost = TokensCost().add(batch.total_tokens_cost for batch in self.S.batches if batch.remote is not None)
+		log.info(f"{self.name_prefix}: There are {self.PQ.pool_len} pooled requests and {self.PQ.queue_len} queued requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: There are {self.num_unpushed_batches()} unpushed local batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished remote batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
+		# TODO: Log statement about metrics, i.e. how many requests, token, cost etc has totally finished/completed (split by batch/direct and session/task?)
+		log.info(f"{self.name_prefix}: Session push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: Task push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
 		# req = The request to add to the request pool
@@ -790,11 +803,13 @@ class GPTRequester:
 	def batch_requests(self, force: bool = False) -> int:
 		# force = Force all requests remaining at the end of forming batches to also be collected into a non-full batch
 		# Returns the new number of unpushed batches
+		# Note: Call can be skipped if not self.Q
 
 		num_created = 0
 		num_created_requests = 0
 
 		index = 0
+		batch = BatchState()
 		while index < len(self.Q):
 
 			num_unpushed_batches = self.num_unpushed_batches()
@@ -877,7 +892,7 @@ class GPTRequester:
 					self.Q[batch_index:index] = (None,) * (index - batch_index)
 
 					if self.dryrun:
-						log.warning(f"[DRYRUN] {self.name_prefix}: Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.total_tokens_cost.input_tokens} tokens, {batch.total_tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
+						log.warning(f"{self.name_prefix}: {DRYRUN}Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.total_tokens_cost.input_tokens} tokens, {batch.total_tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 					else:
 						with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
 							file.writelines(batch_reqs)
@@ -895,13 +910,16 @@ class GPTRequester:
 				num_created_requests += batch.num_requests
 
 		if num_created > 0:
-			log.info(f"{self.name_prefix}: Created {num_created} batches from {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
+			log.info(f"{self.name_prefix}: Created {num_created} batches out of {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
+		else:
+			log.info(f"{self.name_prefix}: The {batch.num_requests} available requests with {utils.format_size_si(batch.local_jsonl_size)}, {batch.total_tokens_cost.input_tokens} tokens, {batch.total_tokens_cost.cost_batch:.3f} assumed cost are currently not enough to trigger a batch")
 
 		return self.num_unpushed_batches()
 
 	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
 	def push_batches(self) -> bool:
 		# Returns whether the batch pipeline is (now) congested
+		# Note: Call can be skipped if self.num_unpushed_batches() <= 0
 
 		remote_batches = 0
 		remote_requests = 0
@@ -962,8 +980,8 @@ class GPTRequester:
 				if not reasons:
 
 					if self.dryrun:
-						log.warning(f"[DRYRUN] {self.name_prefix}: Not pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}")
-						reasons_nopush.add('DRYRUN')
+						log.warning(f"{self.name_prefix}: {DRYRUN}Not pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}")
+						reasons_nopush.add(DRYRUN)
 					else:
 
 						log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}...")
@@ -1030,8 +1048,8 @@ class GPTRequester:
 
 		if reasons_nopush:
 			log.info(f"{self.name_prefix}: Reasons encountered not to push certain batches right now: {', '.join(sorted(reasons_nopush))}")
+		log.info(f"{self.name_prefix}: Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
 		if num_pushed > 0:
-			log.info(f"{self.name_prefix}: Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
 			log.info(f"{self.name_prefix}: There are {remote_batches} remote batches with a total of {remote_requests} requests, {utils.format_size_si(remote_size)}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
 			log.info(f"{self.name_prefix}: Session push statistics are now {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 			log.info(f"{self.name_prefix}: Task push statistics are now {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
@@ -1042,7 +1060,7 @@ class GPTRequester:
 	def delete_remote_file(self, file_id: str):
 		# file_id = The remote file ID to delete
 		if self.dryrun:
-			log.warning(f"[DRYRUN] {self.name_prefix}: Not deleting remote file {file_id}")
+			log.warning(f"{self.name_prefix}: {DRYRUN}Not deleting remote file {file_id}")
 		else:
 			try:
 				deleted_file = self.client.files.delete(file_id=file_id)
@@ -1054,7 +1072,7 @@ class GPTRequester:
 	def cancel_remote_batch(self, batch_id: str):
 		# batch_id = The remote batch ID to cancel
 		if self.dryrun:
-			log.warning(f"[DRYRUN] {self.name_prefix}: Not canceling remote batch {batch_id}")
+			log.warning(f"{self.name_prefix}: {DRYRUN}Not canceling remote batch {batch_id}")
 		else:
 			try:
 				cancelled_batch = self.client.batches.cancel(batch_id=batch_id)

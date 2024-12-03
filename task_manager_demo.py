@@ -140,10 +140,30 @@ def resolve(value: Any, default: Any) -> Any:
 # Run
 #
 
+# Custom color formatter for the logger
+class ColorFormatter(logging.Formatter):
+
+	FMT = "[%(levelname)s][%(asctime)s] %(message)s"
+	DATEFMT = "%d-%b-%y %H:%M:%S"
+	LEVEL_REMAP = {
+		'DEBUG': '\x1b[38;21mDEBUG\x1b[0m',
+		'INFO': '\x1b[38;5;39m INFO\x1b[0m',
+		'WARNING': '\x1b[38;5;226m WARN\x1b[0m',
+		'ERROR': '\x1b[38;5;196mERROR\x1b[0m',
+		'CRITICAL': '\x1b[31;1mFATAL\x1b[0m',
+	}
+
+	def format(self, record: logging.LogRecord) -> str:
+		record.levelname = self.LEVEL_REMAP.get(record.levelname, record.levelname)
+		return super().format(record)
+
 # Main function
 def main():
 
-	logging.basicConfig(level=logging.INFO, format="[%(levelname)s][%(asctime)s] %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
+	stream_handler = logging.StreamHandler(sys.stdout)
+	stream_handler.set_name('console')
+	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
+	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
 
 	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.", add_help=False, formatter_class=functools.partial(argparse.HelpFormatter, max_help_position=33))
 	parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='Show this help message and exit')
