@@ -158,6 +158,7 @@ class PushStats:
 @dataclasses.dataclass
 class State:
 	version: int = 1                                                           # Data format version number
+	endpoint: str = ''                                                         # API endpoint to use (empty string is invalid)
 	queue: QueueState = dataclasses.field(default_factory=QueueState)          # State of the request queue
 	max_batch_id: int = 0                                                      # Maximum batch ID used thus far (0 = No batch ID used so far)
 	batches: list[BatchState] = dataclasses.field(default_factory=list)        # States of all batches that are currently pending or in progress (in ascending batch ID order)
@@ -168,12 +169,14 @@ class StateFile:
 
 	state: Optional[State]
 
-	def __init__(self, path: str, dryrun: bool):
+	def __init__(self, path: str, endpoint: str, dryrun: bool):
 		# path = Path to the JSON state file to load/save/manage (nominally *.json extension)
+		# endpoint = API endpoint to use
 		# dryrun = Whether to prevent any saving of state (dry run mode)
 		self.path = os.path.abspath(path)
 		self.name = os.path.basename(self.path)
 		log.info(f"{self.name}: GPT requester state file: {self.path}")
+		self.endpoint = endpoint
 		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
@@ -186,6 +189,10 @@ class StateFile:
 			except FileNotFoundError:
 				self.create(stack=atomic_stack)
 			assert self.state is not None
+			if not self.state.endpoint:
+				raise ValueError("State API endpoint must be non-empty")
+			if self.state.endpoint != self.endpoint:
+				raise ValueError(f"State API endpoint mismatch: {self.state.endpoint} vs {self.endpoint}")
 			self._enter_stack = stack.pop_all()
 		assert self._enter_stack is not stack
 		return self
@@ -195,7 +202,7 @@ class StateFile:
 
 	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
 		# stack = Exit stack to use for the safe reversible creation of the state file
-		self.state = State()
+		self.state = State(endpoint=self.endpoint)
 		self.save(stack=stack)
 
 	def load(self):
@@ -226,7 +233,6 @@ class StateFile:
 class GPTRequestItem:
 	id: int          # Unique monotonic ID corresponding to the GPT request
 	req: GPTRequest  # The actual GPT request
-	endpoint: str    # API endpoint to use for the request
 
 # GPT request information class
 @dataclasses.dataclass(frozen=True)
@@ -243,15 +249,16 @@ class CachedGPTRequest:
 	info: GPTRequestInfo  # GPT request information (automatically calculated from the GPT request item, and cached in memory)
 
 	@staticmethod
-	def from_item(item: GPTRequestItem, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster) -> CachedGPTRequest:
+	def from_item(item: GPTRequestItem, endpoint: str, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster) -> CachedGPTRequest:
 		# item = GPT request item to calculate information for and wrap as a cached GPT request
+		# endpoint = API endpoint to use
 		# token_estimator = Token estimator to use to estimate the number of tokens in the request
 		# token_coster = Token coster to use to estimate the cost of the request
 		# Returns the created cached GPT request
-		full_request = dict(custom_id=f'id-{item.id}', method='POST', url=item.endpoint, body=item.req.payload)
+		full_request = dict(custom_id=f'id-{item.id}', method='POST', url=endpoint, body=item.req.payload)
 		compact_json = json.dumps(full_request, ensure_ascii=False, indent=None) + '\n'
-		input_tokens = token_estimator.payload_input_tokens(payload=item.req.payload, endpoint=item.endpoint).total
-		output_tokens = token_estimator.payload_output_tokens(payload=item.req.payload, endpoint=item.endpoint)
+		input_tokens = token_estimator.payload_input_tokens(payload=item.req.payload, endpoint=endpoint).total
+		output_tokens = token_estimator.payload_output_tokens(payload=item.req.payload, endpoint=endpoint)
 		return CachedGPTRequest(
 			item=item,
 			info=GPTRequestInfo(
@@ -297,14 +304,16 @@ class QueueFile:
 
 	pool_queue: Optional[PoolQueue]
 
-	def __init__(self, path: str, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster, dryrun: bool):
+	def __init__(self, path: str, endpoint: str, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster, dryrun: bool):
 		# path = Path to the JSONL queue file to load/save/manage (nominally *.jsonl extension)
+		# endpoint = API endpoint to use
 		# token_estimator = Token estimator instance to use
 		# token_coster = Token coster instance to use
 		# dryrun = Whether to prevent any saving of the queue file (dry run mode)
 		self.path = os.path.abspath(path)
 		self.name = os.path.basename(self.path)
 		log.info(f"{self.name}: GPT requester queue file: {self.path}")
+		self.endpoint = endpoint
 		self.token_estimator = token_estimator
 		self.token_coster = token_coster
 		self.dryrun = dryrun
@@ -336,6 +345,7 @@ class QueueFile:
 			file_size = utils.get_file_size(file)
 			self.pool_queue = PoolQueue(pool=[], queue=[CachedGPTRequest.from_item(
 				item=utils.dataclass_from_json(cls=GPTRequestItem, json_data=line),
+				endpoint=self.endpoint,
 				token_estimator=self.token_estimator,
 				token_coster=self.token_coster,
 			) for line in file.readlines()])
@@ -450,12 +460,6 @@ class GPTRequester:
 		if not 0 <= self.assumed_completion_ratio <= 1:
 			raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
 
-		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn, assumed_completion_ratio=self.assumed_completion_ratio)
-		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
-		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
-		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"), dryrun=self.dryrun)
-		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), token_estimator=self.token_estimator, token_coster=self.token_coster, dryrun=self.dryrun)
-
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.endpoint = endpoint
 		if self.endpoint is None:
@@ -463,6 +467,12 @@ class GPTRequester:
 		if self.endpoint is None:
 			self.endpoint = DEFAULT_ENDPOINT
 		log.info(f"{self.name_prefix}: Using client base URL '{self.client.base_url}' with endpoint '{self.endpoint}'")
+
+		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn, assumed_completion_ratio=self.assumed_completion_ratio)
+		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
+		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
+		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"), endpoint=self.endpoint, dryrun=self.dryrun)
+		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster, dryrun=self.dryrun)
 
 		self.remote_update_interval = remote_update_interval
 		if self.remote_update_interval < 1.0:
@@ -749,8 +759,8 @@ class GPTRequester:
 	def add_request(self, req: GPTRequest):
 		# req = The request to add to the request pool
 		self.max_request_id += 1
-		item = GPTRequestItem(id=self.max_request_id, req=req, endpoint=self.endpoint)
-		self.P.append(CachedGPTRequest.from_item(item=item, token_estimator=self.token_estimator, token_coster=self.token_coster))
+		item = GPTRequestItem(id=self.max_request_id, req=req)
+		self.P.append(CachedGPTRequest.from_item(item=item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster))
 
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
 	# Note that reqs can also for convenience be a generator that executes some loop over source samples and yields instances of GPTRequest
