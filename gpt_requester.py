@@ -129,6 +129,13 @@ class QueueState:
 	max_request_id: int = 0                                                                         # Maximum request ID used thus far (0 = No request ID used so far)
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the request queue (NOT including the request pool, ordered by ascending request ID)
 
+# Batch request information class
+@dataclasses.dataclass(frozen=True)
+class BatchRequestInfo:
+	meta: Optional[dict[str, Any]]        # Optional custom metadata that is associated with this request (JSON-compatible)
+	tokens_cost: TokensCost               # The approximate token count and cost of the request payload
+	parse_info: Optional[dict[str, Any]]  # Data required for or associated with auto-parsing of the request
+
 # Remote batch state class
 @dataclasses.dataclass
 class RemoteBatchState:
@@ -139,16 +146,15 @@ class RemoteBatchState:
 # Batch state class
 @dataclasses.dataclass
 class BatchState:
-	id: int = 0                                                                                     # Unique monotonic ID corresponding to the batch
-	local_jsonl: str = ''                                                                           # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
-	local_jsonl_size: int = 0                                                                       # Number of bytes in the local JSONL batch input file
-	num_requests: int = 0                                                                           # Number of requests in the batch
-	tokens_cost_map: dict[int, TokensCost] = dataclasses.field(default_factory=dict)                # The approximate token counts and costs of each request
-	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)                   # The total approximate token count and cost across all requests in the batch
-	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the batch (order is the same as in the local JSONL batch input file, which is by ascending request ID)
-	full_batch: bool = False                                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
-	reasons: list[str] = dataclasses.field(default_factory=list)                                    # String reasons of what triggered the formation of the batch
-	remote: Optional[RemoteBatchState] = None                                                       # Remote state of the batch once it has been pushed
+	id: int = 0                                                                          # Unique monotonic ID corresponding to the batch
+	local_jsonl: str = ''                                                                # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
+	local_jsonl_size: int = 0                                                            # Number of bytes in the local JSONL batch input file
+	num_requests: int = 0                                                                # Number of requests in the batch
+	request_info: dict[int, BatchRequestInfo] = dataclasses.field(default_factory=dict)  # The approximate token counts and costs of each request
+	tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)              # The total approximate token count and cost across all requests in the batch
+	full_batch: bool = False                                                             # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
+	reasons: list[str] = dataclasses.field(default_factory=list)                         # String reasons of what triggered the formation of the batch
+	remote: Optional[RemoteBatchState] = None                                            # Remote state of the batch once it has been pushed
 
 # Push stats class
 @dataclasses.dataclass
@@ -233,8 +239,9 @@ class StateFile:
 # GPT request item class (each line of the JSONL queue file corresponds to one of these items)
 @dataclasses.dataclass(frozen=True)
 class GPTRequestItem:
-	id: int          # Unique monotonic ID corresponding to the GPT request
-	req: GPTRequest  # The actual GPT request
+	id: int                               # Unique monotonic ID corresponding to the GPT request
+	req: GPTRequest                       # The actual GPT request
+	parse_info: Optional[dict[str, Any]]  # Data required for or associated with auto-parsing of the request
 
 # GPT request information class
 @dataclasses.dataclass(frozen=True)
@@ -552,6 +559,7 @@ class GPTRequester:
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} assumed cost per task")
 
 		self._enter_stack = contextlib.ExitStack()
+		self.type_cache: Optional[utils.SerialTypeCache] = None
 		self.S: Optional[State] = None
 		self.PQ: Optional[PoolQueue] = None
 		self.P: Optional[list[CachedGPTRequest]] = None
@@ -681,6 +689,7 @@ class GPTRequester:
 		with self._enter_stack as stack:
 			stack.enter_context(self.lock)
 			stack.callback(self.on_exit)
+			self.type_cache = utils.SerialTypeCache()
 			stack.enter_context(self.state)
 			self.S = self.state.state
 			self.max_request_id = self.S.queue.max_request_id
@@ -702,6 +711,7 @@ class GPTRequester:
 
 	# Local actions to perform on exit
 	def on_exit(self):
+		self.type_cache = None
 		self.S = self.PQ = self.P = self.Q = None
 		self.max_request_id = None
 		self.session_push_stats = None
@@ -733,14 +743,14 @@ class GPTRequester:
 			raise ValueError(f"The batch IDs are not strictly ascending: {list(batch.id for batch in self.S.batches)}")
 
 		for batch in self.S.batches:
-			if not utils.is_ascending(batch.request_id_meta.keys(), strict=True):
-				raise ValueError(f"The request IDs in a batch are not strictly ascending: {list(batch.request_id_meta.keys())}")
+			if not utils.is_ascending(batch.request_info.keys(), strict=True):
+				raise ValueError(f"The request IDs in a batch are not strictly ascending: {list(batch.request_info.keys())}")
 		if not utils.is_ascending(self.S.queue.request_id_meta.keys(), strict=True):
 			raise ValueError(f"The request IDs in the request queue are not strictly ascending: {list(self.S.queue.request_id_meta.keys())}")
 		if not utils.is_ascending((pool_request_ids := [cached_req.item.id for cached_req in self.P]), strict=True):
 			raise ValueError(f"The request IDs in the request pool are not strictly ascending: {pool_request_ids}")
 
-		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in (*(batch.request_id_meta.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
+		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in (*(batch.request_info.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
 		flat_req_id_bounds = [req_id for req_id_interval in req_id_intervals for req_id in req_id_interval if req_id is not None]
 		if not utils.is_ascending(flat_req_id_bounds, strict=True):
 			raise ValueError(f"The request ID intervals overlap between the batches, request queue and request pool: {req_id_intervals}")
@@ -750,21 +760,21 @@ class GPTRequester:
 		batch_state_requests = sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)
 		if not self.S.task_push_stats.total_requests >= self.session_push_stats.total_requests >= batch_state_requests:
 			raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of requests: {self.S.task_push_stats.total_requests} vs {self.session_push_stats.total_requests} vs {batch_state_requests}")
-		batch_state_tokens_cost = TokensCost().add(batch.total_tokens_cost for batch in self.S.batches if batch.remote is not None)
+		batch_state_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is not None)
 		for field in dataclasses.fields(TokensCost):  # noqa
 			if not getattr(self.S.task_push_stats.total_tokens_cost, field.name) >= getattr(self.session_push_stats.total_tokens_cost, field.name) >= getattr(batch_state_tokens_cost, field.name):
 				raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of {field.name}: {getattr(self.S.task_push_stats.total_tokens_cost, field.name)} vs {getattr(self.session_push_stats.total_tokens_cost, field.name)} vs {getattr(batch_state_tokens_cost, field.name)}")
 
 		for batch in self.S.batches:
-			total_tokens_cost = TokensCost().add(batch.tokens_cost_map.values())
-			if not batch.total_tokens_cost.equals(total_tokens_cost):
-				raise ValueError(f"Total tokens cost mismatch: {batch.total_tokens_cost} vs {total_tokens_cost}")
+			batch_tokens_cost = TokensCost().add(req_info.tokens_cost for req_info in batch.request_info.values())
+			if not batch.tokens_cost.equals(batch_tokens_cost):
+				raise ValueError(f"Total tokens cost mismatch for batch: {batch.tokens_cost} vs {batch_tokens_cost}")
 
 	# Log the current GPT requester status
 	def log_status(self):
 		pool_queue_tokens_cost = TokensCost().add((cached_req.info.tokens_cost for cached_req in self.P), (cached_req.info.tokens_cost for cached_req in self.Q if cached_req is not None))
-		local_tokens_cost = TokensCost().add(batch.total_tokens_cost for batch in self.S.batches if batch.remote is None)
-		remote_tokens_cost = TokensCost().add(batch.total_tokens_cost for batch in self.S.batches if batch.remote is not None)
+		local_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is None)
+		remote_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is not None)
 		log.info(f"{self.name_prefix}: There are {self.PQ.pool_len} pooled requests and {self.PQ.queue_len} queued requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"{self.name_prefix}: There are {self.num_unpushed_batches()} unpushed local batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"{self.name_prefix}: There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished remote batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
@@ -772,12 +782,49 @@ class GPTRequester:
 		log.info(f"{self.name_prefix}: Session push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"{self.name_prefix}: Task push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 
+	# Create a GPT request item
+	def create_request_item(self, req: GPTRequest) -> GPTRequestItem:
+		# req = The request to wrap as a request item (req is copied if it needs to be modified)
+
+		if self.auto_parse:
+
+			parse_info = {}
+			if self.endpoint == '/v1/chat/completions':  # Chat completions endpoint
+
+				if req.payload.get('stream', False):
+					raise ValueError("Streaming GPT requests are not supported")
+
+				tools = req.payload.get('tools', openai.NOT_GIVEN)
+				openai_parsing.validate_input_tools(tools=tools)
+
+				response_format = req.payload.get('response_format', openai.NOT_GIVEN)
+				resolved_response_format = openai_parsing.type_to_response_format_param(response_format=response_format)
+
+				payload = req.payload.copy()
+				if openai_utils.is_given(resolved_response_format):
+					payload['response_format'] = resolved_response_format
+				else:
+					del payload['response_format']
+				req = dataclasses.replace(req, payload=payload)
+
+				if isinstance(response_format, type):
+					parse_info['response_format_type'] = self.type_cache.cache_type(typ=response_format, verify=True)
+				elif response_format is not resolved_response_format and (openai_utils.is_given(response_format) or openai_utils.is_given(resolved_response_format)):
+					raise ValueError(f"Auto-parse unexpectedly changed the value of response_format: {response_format} vs {resolved_response_format}")
+
+		else:
+			parse_info = None
+
+		self.max_request_id += 1
+		return GPTRequestItem(id=self.max_request_id, req=req, parse_info=parse_info)
+
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest):
 		# req = The request to add to the request pool
-		self.max_request_id += 1
-		item = GPTRequestItem(id=self.max_request_id, req=req)
-		self.P.append(CachedGPTRequest.from_item(item=item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster))
+		# Be careful not to inadvertently modify any part of req after adding the request (e.g. the meta/payload or any part of it)
+		item = self.create_request_item(req=req)
+		cached_req = CachedGPTRequest.from_item(item=item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
+		self.P.append(cached_req)
 
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
 	# Note that reqs can also for convenience be a generator that executes some loop over source samples and yields instances of GPTRequest
@@ -858,20 +905,20 @@ class GPTRequester:
 
 					next_local_jsonl_size = batch.local_jsonl_size + cached_req.info.json_size
 					next_num_requests = batch.num_requests + 1
-					next_total_tokens_cost = batch.total_tokens_cost + cached_req.info.tokens_cost
+					next_tokens_cost = batch.tokens_cost + cached_req.info.tokens_cost
 
 					assert not batch.reasons
 					if next_num_requests > self.max_batch_requests:
 						batch.reasons.append('Max batch requests')
 					if next_local_jsonl_size > self.max_batch_size:
 						batch.reasons.append('Max batch size')
-					if next_total_tokens_cost.input_tokens > self.max_batch_tokens:
+					if next_tokens_cost.input_tokens > self.max_batch_tokens:
 						batch.reasons.append('Max batch tokens')
-					if next_total_tokens_cost.cost_batch > self.max_batch_cost:
+					if next_tokens_cost.cost_batch > self.max_batch_cost:
 						batch.reasons.append('Max batch cost')
 					if batch.reasons:
 						if batch.num_requests <= 0:
-							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_size} OR Batch tokens {next_total_tokens_cost.input_tokens} > {self.max_batch_tokens} OR Batch cost {next_total_tokens_cost.cost_batch:.3f} > {self.max_batch_cost:.3f}")
+							raise ValueError(f"The batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_batch_requests} OR Batch file size {next_local_jsonl_size} > {self.max_batch_size} OR Batch tokens {next_tokens_cost.input_tokens} > {self.max_batch_tokens} OR Batch cost {next_tokens_cost.cost_batch:.3f} > {self.max_batch_cost:.3f}")
 						batch.full_batch = True
 						break
 
@@ -879,18 +926,15 @@ class GPTRequester:
 					batch_reqs.append(cached_req.info.json)
 					batch.local_jsonl_size = next_local_jsonl_size
 					batch.num_requests = next_num_requests
-					assert req_id not in batch.tokens_cost_map and cached_req.info.tokens_cost.is_valid()
-					batch.tokens_cost_map[req_id] = cached_req.info.tokens_cost
-					batch.total_tokens_cost = next_total_tokens_cost
-					assert req_id not in batch.request_id_meta
-					batch.request_id_meta[req_id] = cached_req.item.req.meta
+					assert req_id not in batch.request_info and cached_req.info.tokens_cost.is_valid()
+					batch.request_info[req_id] = BatchRequestInfo(meta=cached_req.item.req.meta, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
+					batch.tokens_cost = next_tokens_cost
 
 				index += 1
 
 			assert index - batch_index == batch.num_requests + num_nones
-			assert batch.num_requests == len(batch.tokens_cost_map) == len(batch.request_id_meta)
-			assert batch.total_tokens_cost.equals(TokensCost().add(batch.tokens_cost_map.values()))
-			assert batch.tokens_cost_map.keys() == batch.request_id_meta.keys()
+			assert batch.num_requests == len(batch.request_info)
+			assert batch.tokens_cost.equals(TokensCost().add(req_info.tokens_cost for req_info in batch.request_info.values()))
 
 			if (batch.full_batch or force) and batch.num_requests >= 1:
 
@@ -913,19 +957,19 @@ class GPTRequester:
 					batch.local_jsonl = os.path.join(self.working_dir, f"{self.name_prefix}_batch{batch.id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jsonl")
 
 					self.S.batches.append(batch)
-					for req_id, req_meta in batch.request_id_meta.items():
-						assert self.S.queue.request_id_meta[req_id] == req_meta
+					for req_id, req_info in batch.request_info.items():
+						assert self.S.queue.request_id_meta[req_id] == req_info.meta
 						del self.S.queue.request_id_meta[req_id]
 					self.Q[batch_index:index] = (None,) * (index - batch_index)
 
 					if self.dryrun:
-						log.warning(f"{self.name_prefix}: {DRYRUN}Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.total_tokens_cost.input_tokens} tokens, {batch.total_tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
+						log.warning(f"{self.name_prefix}: {DRYRUN}Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 					else:
 						with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
 							file.writelines(batch_reqs)
 							file_size = utils.get_file_size(file)
 						assert file_size == batch.local_jsonl_size
-						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.total_tokens_cost.input_tokens} tokens, {batch.total_tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
+						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 
 					self.validate_state_queue(clean=False)
 					self.queue.save(stack=stack)
@@ -939,7 +983,7 @@ class GPTRequester:
 		if num_created > 0:
 			log.info(f"{self.name_prefix}: Created {num_created} batches out of {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
 		else:
-			log.info(f"{self.name_prefix}: The {batch.num_requests} available requests with {utils.format_size_si(batch.local_jsonl_size)}, {batch.total_tokens_cost.input_tokens} tokens, {batch.total_tokens_cost.cost_batch:.3f} assumed cost are currently not enough to trigger a batch")
+			log.info(f"{self.name_prefix}: The {batch.num_requests} available requests with {utils.format_size_si(batch.local_jsonl_size)}, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost are currently not enough to trigger a batch")
 
 		return self.num_unpushed_batches()
 
@@ -957,7 +1001,7 @@ class GPTRequester:
 				remote_batches += 1
 				remote_requests += batch.num_requests
 				remote_size += batch.local_jsonl_size
-				remote_tokens_cost += batch.total_tokens_cost
+				remote_tokens_cost += batch.tokens_cost
 
 		try:
 			current_user = getpass.getuser()  # str
@@ -970,14 +1014,14 @@ class GPTRequester:
 			if batch.remote is None:
 
 				next_task_requests = self.S.task_push_stats.total_requests + batch.num_requests
-				next_task_tokens_cost = self.S.task_push_stats.total_tokens_cost + batch.total_tokens_cost
+				next_task_tokens_cost = self.S.task_push_stats.total_tokens_cost + batch.tokens_cost
 				next_session_requests = self.session_push_stats.total_requests + batch.num_requests
-				next_session_tokens_cost = self.session_push_stats.total_tokens_cost + batch.total_tokens_cost
+				next_session_tokens_cost = self.session_push_stats.total_tokens_cost + batch.tokens_cost
 
 				next_remote_batches = remote_batches + 1
 				next_remote_requests = remote_requests + batch.num_requests
 				next_remote_size = remote_size + batch.local_jsonl_size
-				next_remote_tokens_cost = remote_tokens_cost + batch.total_tokens_cost
+				next_remote_tokens_cost = remote_tokens_cost + batch.tokens_cost
 
 				reasons = set()
 				if next_task_requests > self.max_task_requests:
@@ -1058,7 +1102,7 @@ class GPTRequester:
 
 							stack.pop_all()
 
-						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.total_tokens_cost.input_tokens} tokens, {batch.total_tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
+						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
 
 						remote_batches = next_remote_batches
 						remote_requests = next_remote_requests
@@ -1201,12 +1245,8 @@ class GPTRequester:
 		# TODO: if remote_batch.output_file_id: remote_batch_content = tuple(json.loads(line) for line in client.files.content(file_id=remote_batch.output_file_id).text.splitlines() if line)
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
+		# TODO: IF item.parse_info is not None THEN (converts ChatCompletion -> ParsedChatCompletion in terms of tools and response_format) openai_parsing.parse_chat_completion(response_format=self.type_cache.retrieve_type(serial=item.parse_info['response_format_type']) if 'response_format_type' in item.parse_info else item.req.payload.get('response_format', openai.NOT_GIVEN), input_tools=item.req.payload.get('tools', openai.NOT_GIVEN), chat_completion=COMPLETION)
 		pass
-
-	# TODO: Add COST = Everywhere there is a tokens or format_size you want a cost as well
-
-	# TODO: Add limitation by estimated total cost in THIS one run of the script OR by total expense across project
-	# TODO: Add cost estimation => Can supply percent of max output tokens that will be assumed to be generated (deal with o1 special case!) (that can be used in dryrun / max_remote_batches=0 to know what you're getting into)
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?

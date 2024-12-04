@@ -47,10 +47,10 @@ class CharCodesTask(task_manager.TaskManager):
 		OTHER = "other"              # Any other type not covered by the above categories
 
 	class UnicodeCharacterInfo(pydantic.BaseModel):
-		character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (string containing only a single literal character).")
+		character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (a string containing only the single literal character).")
 		type: CharCodesTask.UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.")
 		description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
-		sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words).")
+		sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words in the sentence).")
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
 		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)

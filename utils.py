@@ -10,6 +10,7 @@ import signal
 import shutil
 import inspect
 import logging
+import importlib
 import itertools
 import contextlib
 import dataclasses
@@ -413,6 +414,62 @@ def get_file_size(file: Union[TextIO, BinaryIO]) -> int:
 	return os.fstat(file.fileno()).st_size
 
 #
+# Types
+#
+
+# Protocol-based type annotation for configuration parameters represented as an object of attributes (e.g. argparse.Namespace, flat omegaconf.DictConfig)
+class Config(Protocol):
+
+	def __getattribute__(self, name: str) -> Any:
+		...
+
+# Serialized type cache
+class SerialTypeCache:
+
+	def __init__(self):
+		self.type_map = {}
+
+	def reset(self):
+		self.type_map.clear()
+
+	def cache_type(self, typ: type, verify: bool = False) -> str:
+		# typ = The type to cache
+		# verify = Whether to sanity check that type retrieval returns the exact original type
+		# Returns the serialized string corresponding to the type
+
+		assert '|' not in typ.__module__ and '|' not in typ.__qualname__
+		serial = f'{typ.__module__}|{typ.__qualname__}'
+
+		cached_typ = self.type_map.get(serial, None)
+		if cached_typ is None:
+			self.type_map[serial] = typ
+		else:
+			assert cached_typ is typ
+
+		if verify:
+			retrieved_typ = importlib.import_module(typ.__module__)
+			for attr in typ.__qualname__.split('.'):
+				retrieved_typ = getattr(retrieved_typ, attr)
+			assert retrieved_typ is typ
+
+		return serial
+
+	def retrieve_type(self, serial: str) -> type:
+		# serial = Serialized type string to retrieve the type for (must contain exactly one pipe separator)
+		# Returns the retrieved/deserialized type
+
+		typ = self.type_map.get(serial, None)
+
+		if typ is None:
+			typ_module, typ_qualname = serial.split('|')  # Errors if there is not exactly one pipe separator
+			typ = importlib.import_module(typ_module)
+			for attr in typ_qualname.split('.'):
+				typ = getattr(typ, attr)
+			self.type_map[serial] = typ
+
+		return typ
+
+#
 # Miscellaneous
 #
 
@@ -429,10 +486,4 @@ def is_descending(iterable: Iterable[Any], *, strict: bool) -> bool:
 		return all(a > b for a, b in itertools.pairwise(iterable))
 	else:
 		return all(a >= b for a, b in itertools.pairwise(iterable))
-
-# Protocol-based type annotation for configuration parameters represented as an object of attributes (e.g. argparse.Namespace, flat omegaconf.DictConfig)
-class Config(Protocol):
-
-	def __getattribute__(self, name: str) -> Any:
-		...
 # EOF
