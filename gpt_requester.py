@@ -17,6 +17,8 @@ import dataclasses
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
 import httpx
 import openai
+import openai.lib._parsing as openai_parsing  # noqa
+import openai._utils as openai_utils  # noqa
 from .logger import log
 from . import tokens, utils
 
@@ -36,7 +38,7 @@ logging.getLogger('openai').setLevel(logging.WARNING)
 # GPT request class
 @dataclasses.dataclass(frozen=True)
 class GPTRequest:
-	payload: dict[str, Any]                # Request payload (JSON-compatible OpenAI request) => Is batched into JSONL files and uploaded to OpenAI for processing
+	payload: dict[str, Any]                # Request payload (JSON-compatible OpenAI request after auto-parsing) => Is batched into JSONL files and uploaded to OpenAI for processing
 	meta: Optional[dict[str, Any]] = None  # Optional custom metadata to associate with this request (JSON-compatible) => Is batched and stored in the state file while OpenAI is processing the payloads, and is returned alongside the response
 
 # Tokens and cost class
@@ -398,6 +400,8 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
+		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
+
 		cost_input_direct_mtoken: float = 2.50,               # The cost per million direct input tokens (1M tokens ~ 750K words)
 		cost_input_cached_mtoken: float = 1.25,               # The cost per million cached input tokens
 		cost_input_batch_mtoken: float = 1.25,                # The cost per million input tokens with Batch API
@@ -449,17 +453,6 @@ class GPTRequester:
 		if self.dryrun:
 			log.warning(f"{self.name_prefix}: {DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
-		self.cost_input_direct_mtoken = cost_input_direct_mtoken
-		self.cost_input_cached_mtoken = cost_input_cached_mtoken
-		self.cost_input_batch_mtoken = cost_input_batch_mtoken
-		self.cost_output_direct_mtoken = cost_output_direct_mtoken
-		self.cost_output_batch_mtoken = cost_output_batch_mtoken
-		if self.cost_input_direct_mtoken < 0 or self.cost_input_cached_mtoken < 0 or self.cost_input_batch_mtoken < 0 or self.cost_output_direct_mtoken < 0 or self.cost_output_batch_mtoken < 0:
-			raise ValueError(f"Costs cannot be negative: {self.cost_input_direct_mtoken:.3f}, {self.cost_input_cached_mtoken:.3f}, {self.cost_input_batch_mtoken:.3f}, {self.cost_output_direct_mtoken:.3f}, {self.cost_output_batch_mtoken:.3f}")
-		self.assumed_completion_ratio = assumed_completion_ratio
-		if not 0 <= self.assumed_completion_ratio <= 1:
-			raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
-
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.endpoint = endpoint
 		if self.endpoint is None:
@@ -467,6 +460,24 @@ class GPTRequester:
 		if self.endpoint is None:
 			self.endpoint = DEFAULT_ENDPOINT
 		log.info(f"{self.name_prefix}: Using client base URL '{self.client.base_url}' with endpoint '{self.endpoint}'")
+
+		self.auto_parse = auto_parse
+		log.info(f"{self.name_prefix}: Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
+
+		self.cost_input_direct_mtoken = cost_input_direct_mtoken
+		self.cost_input_cached_mtoken = cost_input_cached_mtoken
+		self.cost_input_batch_mtoken = cost_input_batch_mtoken
+		self.cost_output_direct_mtoken = cost_output_direct_mtoken
+		self.cost_output_batch_mtoken = cost_output_batch_mtoken
+		if self.cost_input_direct_mtoken < 0 or self.cost_input_cached_mtoken < 0 or self.cost_input_batch_mtoken < 0 or self.cost_output_direct_mtoken < 0 or self.cost_output_batch_mtoken < 0:
+			raise ValueError(f"Costs cannot be negative: {self.cost_input_direct_mtoken:.3f}, {self.cost_input_cached_mtoken:.3f}, {self.cost_input_batch_mtoken:.3f}, {self.cost_output_direct_mtoken:.3f}, {self.cost_output_batch_mtoken:.3f}")
+		log.info(f"{self.name_prefix}: Costs per input mtoken: Direct {self.cost_input_direct_mtoken:.3f}, Cached {self.cost_input_cached_mtoken:.3f}, Batch {self.cost_input_batch_mtoken:.3f}")
+		log.info(f"{self.name_prefix}: Costs per output mtoken: Direct {self.cost_output_direct_mtoken:.3f}, Batch {self.cost_output_batch_mtoken:.3f}")
+
+		self.assumed_completion_ratio = assumed_completion_ratio
+		if not 0 <= self.assumed_completion_ratio <= 1:
+			raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
+		log.info(f"{self.name_prefix}: Assuming an output token completion ratio of {self.assumed_completion_ratio:.3g}")
 
 		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn, assumed_completion_ratio=self.assumed_completion_ratio)
 		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
@@ -590,14 +601,17 @@ class GPTRequester:
 
 	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
 	@classmethod
-	def configure_argparse(cls, parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup], *, title: Optional[str] = 'GPT requester', description: Optional[str] = None, group_kwargs: Optional[dict[str, Any]] = None, include_endpoint: bool = False, **custom_defaults) -> argparse._ArgumentGroup:  # noqa
-		# parser = Argument parser or group
-		# title = If parser is not already an argument group, the title to use for the created argument group
-		# description = If parser is not already an argument group, the description to use for the created argument group
-		# group_kwargs = If parser is not already an argument group, the extra keyword arguments to use for the created argument group
-		# include_endpoint = Whether to include an argument for the API endpoint to use (often this should be task-specific and more specific arguments like chat_endpoint should be defined and used by the task itself)
-		# custom_defaults = Keyword arguments that can be used to override individual default argument values
-		# Returns the passed or newly created argument group
+	def configure_argparse(
+		cls,
+		parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup],  # noqa / Argument parser or group
+		*,                                                                # Keyword arguments only beyond here
+		title: Optional[str] = 'GPT requester',                           # If parser is not already an argument group, the title to use for the created argument group
+		description: Optional[str] = None,                                # If parser is not already an argument group, the description to use for the created argument group
+		group_kwargs: Optional[dict[str, Any]] = None,                    # If parser is not already an argument group, the extra keyword arguments to use for the created argument group
+		include_endpoint: bool = False,                                   # Whether to include an argument for the API endpoint to use (often this should be task-specific and more specific arguments like chat_endpoint should be defined and used by the task itself)
+		include_auto_parse: bool = False,                                 # Whether to include an argument for auto-parsing (often this is task-specific)
+		**custom_defaults,                                                # noqa / Keyword arguments that can be used to override individual default argument values
+	) -> argparse._ArgumentGroup:                                         # noqa / Returns the passed or newly created argument group
 
 		if isinstance(parser, argparse.ArgumentParser):
 			group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {}))
@@ -630,6 +644,9 @@ class GPTRequester:
 		add_argument(name='lock_status_interval', type=float, metavar='SEC', unit='s', help="Lock file status update interval (see utils.LockFile)")
 		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
+
+		if include_auto_parse:
+			add_argument(name='auto_parse', type=bool, help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
 
 		add_argument(name='cost_input_direct_mtoken', type=float, metavar='COST', help="The cost per million direct input tokens (1M tokens ~ 750K words)")
 		add_argument(name='cost_input_cached_mtoken', type=float, metavar='COST', help="The cost per million cached input tokens")

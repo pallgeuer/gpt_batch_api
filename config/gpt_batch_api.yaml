@@ -35,6 +35,9 @@ token_estimator_warn: once
 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 remote_update_interval: 10.0
 
+# Whether to perform auto-parsing to help validate and Python-ify API requests and responses
+auto_parse: True
+
 # The cost per million direct input tokens (1M tokens ~ 750K words)
 cost_input_direct_mtoken: 2.50
 # The cost per million cached input tokens (only applicable to direct requests)

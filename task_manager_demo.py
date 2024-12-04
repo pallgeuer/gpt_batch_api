@@ -165,7 +165,7 @@ def main():
 	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
 	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
 
-	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.", add_help=False, formatter_class=functools.partial(argparse.HelpFormatter, max_help_position=33))
+	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.", add_help=False, formatter_class=functools.partial(argparse.HelpFormatter, max_help_position=36))
 	parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='Show this help message and exit')
 	parser.add_argument('--task', type=str, required=True, help='Which task to run (e.g. char_codes)')
 	parser.add_argument('--task_prefix', type=str, metavar='PREFIX', help='Name prefix to use for task-related files (default is same as task)')
