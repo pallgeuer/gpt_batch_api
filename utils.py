@@ -13,6 +13,7 @@ import logging
 import importlib
 import itertools
 import contextlib
+import collections
 import dataclasses
 import typing
 from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol
@@ -140,7 +141,9 @@ def _dict_from_dataclass_inner(obj: Any, json_mode: bool) -> Any:
 	elif isinstance(obj, (list, tuple)):
 		return type(obj)(_dict_from_dataclass_inner(obj=v, json_mode=json_mode) for v in obj)
 	elif isinstance(obj, dict):
-		if hasattr(type(obj), 'default_factory'):
+		if isinstance(obj, collections.Counter):
+			return type(obj)({_dict_from_dataclass_inner(obj=k, json_mode=json_mode): c for k, c in obj.items()})
+		elif hasattr(type(obj), 'default_factory'):
 			result = type(obj)(getattr(obj, 'default_factory'))
 			for k, v in obj.items():
 				result[_dict_from_dataclass_inner(obj=k, json_mode=json_mode)] = _dict_from_dataclass_inner(obj=v, json_mode=json_mode)
@@ -182,7 +185,13 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 				else:
 					data = generic_typ(data)
 			elif isinstance(data, dict) and generic_typ is not dict and issubclass(generic_typ, dict):
-				if hasattr(generic_typ, 'default_factory'):
+				key_typ = typing.get_args(typ)[0]
+				generic_key_typ = typing.get_origin(key_typ) or key_typ
+				if issubclass(generic_key_typ, (int, float)):
+					data = {generic_key_typ(key): value for key, value in data.items()}
+				if issubclass(generic_typ, collections.Counter):
+					data = generic_typ(data)
+				elif hasattr(generic_typ, 'default_factory'):
 					newdata = generic_typ(None)  # noqa / Note: We have no way of knowing what the default factory was prior to JSON serialization...
 					for key, value in data.items():
 						newdata[key] = value
@@ -199,10 +208,10 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 				raise ValueError(f"Cannot construct {get_class_str(typ)} from dict that does not include exactly all the fields as keys for safety/correctness reasons => Dict is missing {sorted(field_names - data_keys)} and has {sorted(data_keys - field_names)} extra")
 			field_types = typing.get_type_hints(typ)
 			ret = typ(**{key: _dataclass_from_dict_inner(typ=field_types[key], data=value, json_mode=json_mode) for key, value in data.items()})
-		elif issubclass(typ, pydantic.BaseModel):
+		elif issubclass(generic_typ, pydantic.BaseModel):
 			if not (isinstance(data, dict) and all(isinstance(key, str) for key in data.keys())):
-				raise TypeError(f"Invalid dict data for conversion to pydantic model {get_class_str(typ)}: {data}")
-			ret = typ.model_validate(data, strict=True)
+				raise TypeError(f"Invalid dict data for conversion to pydantic model {get_class_str(generic_typ)}: {data}")
+			ret = generic_typ.model_validate(data, strict=True)
 		elif not isinstance(data, generic_typ):
 			raise TypeError(f"Expected type {get_type_str(typ)} with generic type {get_class_str(generic_typ)} but got class {get_class_str(data)}: {data}")
 		elif typ in dataclasses._ATOMIC_TYPES:  # noqa
@@ -225,15 +234,21 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 					raise TypeError(f"Invalid multi-argument {get_class_str(generic_typ)} type annotation: {get_type_str(typ)}")
 				ret = generic_typ(_dataclass_from_dict_inner(typ=subtyps[0], data=value, json_mode=json_mode) for value in data)
 			elif issubclass(generic_typ, dict):
-				if len(subtyps) != 2:
-					raise TypeError(f"Invalid {get_class_str(generic_typ)} type annotation: {get_type_str(typ)}")
-				key_typ, value_typ = subtyps
-				if hasattr(generic_typ, 'default_factory'):
-					ret = generic_typ(getattr(data, 'default_factory'))
-					for key, value in data.items():
-						ret[_dataclass_from_dict_inner(typ=key_typ, data=key, json_mode=json_mode)] = _dataclass_from_dict_inner(typ=value_typ, data=value, json_mode=json_mode)
+				if issubclass(generic_typ, collections.Counter):
+					if len(subtyps) != 1:
+						raise TypeError(f"Invalid {get_class_str(generic_typ)} type annotation: {get_type_str(typ)}")
+					key_typ, = subtyps
+					ret = generic_typ({_dataclass_from_dict_inner(typ=key_typ, data=key, json_mode=json_mode): count for key, count in data.items()})
 				else:
-					ret = generic_typ((_dataclass_from_dict_inner(typ=key_typ, data=key, json_mode=json_mode), _dataclass_from_dict_inner(typ=value_typ, data=value, json_mode=json_mode)) for key, value in data.items())
+					if len(subtyps) != 2:
+						raise TypeError(f"Invalid {get_class_str(generic_typ)} type annotation: {get_type_str(typ)}")
+					key_typ, value_typ = subtyps
+					if hasattr(generic_typ, 'default_factory'):
+						ret = generic_typ(getattr(data, 'default_factory'))
+						for key, value in data.items():
+							ret[_dataclass_from_dict_inner(typ=key_typ, data=key, json_mode=json_mode)] = _dataclass_from_dict_inner(typ=value_typ, data=value, json_mode=json_mode)
+					else:
+						ret = generic_typ((_dataclass_from_dict_inner(typ=key_typ, data=key, json_mode=json_mode), _dataclass_from_dict_inner(typ=value_typ, data=value, json_mode=json_mode)) for key, value in data.items())
 			else:
 				ret = copy.deepcopy(data)
 		if not isinstance(ret, generic_typ):
