@@ -3,6 +3,7 @@
 # Imports
 from __future__ import annotations
 import os
+import copy
 import json
 import time
 import getpass
@@ -89,7 +90,7 @@ class TokensCost:
 			cost_output_batch=self.cost_output_batch + other.cost_output_batch,
 		)
 
-	def __iadd__(self, other: TokensCost) -> TokensCost:
+	def __iadd__(self, other: TokensCost) -> Self:
 		# other = TokensCost instance to add in-place to the current one
 		# Returns the updated (self) TokensCost instance
 		if not isinstance(other, TokensCost):
@@ -102,7 +103,7 @@ class TokensCost:
 		self.cost_output_batch += other.cost_output_batch
 		return self
 
-	def add(self, *others: Union[TokensCost, Iterable[TokensCost]]) -> TokensCost:
+	def add(self, *others: Union[TokensCost, Iterable[TokensCost]]) -> Self:
 		# others = TokensCost instances or iterables thereof to add in-place to the current one
 		# Returns the updated (self) TokensCost instance
 		for other in others:
@@ -162,6 +163,106 @@ class PushStats:
 	total_requests: int = 0                                                        # Total number of requests pushed
 	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)  # Total token count and cost pushed
 
+# Request metrics class
+@dataclasses.dataclass
+class RequestMetrics:
+
+	num_requests: int = 0                                                                                        # Total number of completed requests
+	models: collections.Counter[str] = dataclasses.field(default_factory=collections.Counter)                    # Models used for completed requests
+	system_fingerprints: collections.Counter[str] = dataclasses.field(default_factory=collections.Counter)       # System fingerprints seen for completed requests
+	local_jsonl_size: int = 0                                                                                    # Total number of completed request bytes as per how big requests are in the local JSONL batch input files
+	usage: dict[str, Union[int, float, dict[str, Union[int, float]]]] = dataclasses.field(default_factory=dict)  # Total true usage associated with completed requests (i.e. token usage)
+	true_cost: float = 0.0                                                                                       # Total true cost associated with completed requests
+
+	def __add__(self, other: RequestMetrics) -> RequestMetrics:
+		# other = Another RequestMetrics instance to combine with this one
+		# Returns a new RequestMetrics instance with combined metrics
+		if not isinstance(other, RequestMetrics):
+			return NotImplemented
+		return RequestMetrics(
+			num_requests=self.num_requests + other.num_requests,
+			models=self.models + other.models,
+			system_fingerprints=self.system_fingerprints + other.system_fingerprints,
+			local_jsonl_size=self.local_jsonl_size + other.local_jsonl_size,
+			usage=RequestMetrics.usage_iadd(copy.deepcopy(self.usage), other.usage),
+			true_cost=self.true_cost + other.true_cost,
+		)
+
+	def __iadd__(self, other: RequestMetrics) -> Self:
+		# other = Another RequestMetrics instance to merge into this one
+		# Returns the updated (self) RequestMetrics instance
+		if not isinstance(other, RequestMetrics):
+			return NotImplemented
+		self.num_requests += other.num_requests
+		self.models.update(other.models)
+		self.system_fingerprints.update(other.system_fingerprints)
+		self.local_jsonl_size += other.local_jsonl_size
+		RequestMetrics.usage_iadd(self.usage, other.usage)
+		self.true_cost += other.true_cost
+		return self
+
+	def add_metrics(self, *others: Union[RequestMetrics, Iterable[RequestMetrics]]) -> Self:
+		# others = RequestMetrics instances or iterables thereof to add in-place to the current one
+		# Returns the updated (self) RequestMetrics instance
+		for other in others:
+			if isinstance(other, RequestMetrics):
+				self.__iadd__(other)
+			elif isinstance(other, Iterable):
+				for oth in other:
+					self.__iadd__(oth)
+			else:
+				raise TypeError(f"Unexpected type: {utils.get_class_str(other)}")
+		return self
+
+	def add_response(self, model: str, system_fingerprint: str, local_jsonl_size: int, usage: dict[str, Union[int, float, dict[str, Union[int, float]]]], true_cost: float) -> Self:
+		# model = The model that the response used
+		# system_fingerprint = The system fingerprint of the server that was used to generate the response
+		# local_jsonl_size = The request JSONL size (including a trailing newline)
+		# usage = The true usage of the request/response
+		# true_cost = The true cost of the request/response calculated based on the true usage
+		# Returns the updated request metrics (self)
+		self.num_requests += 1
+		self.models[model] += 1
+		self.system_fingerprints[system_fingerprint] += 1
+		self.local_jsonl_size += local_jsonl_size
+		RequestMetrics.usage_iadd(self.usage, usage)
+		self.true_cost += true_cost
+		return self
+
+	@staticmethod
+	def usage_iadd(self_usage: dict[str, Union[int, float, dict[str, Union[int, float]]]], other_usage: dict[str, Union[int, float, dict[str, Union[int, float]]]]) -> dict[str, Union[int, float, dict[str, Union[int, float]]]]:
+		# self_usage = The usage to update
+		# other_usage = The usage to add/merge into self_usage
+		# Returns the updated self_usage
+		for key, value in other_usage.items():
+			if key in self_usage:
+				self_value = self_usage[key]
+				if isinstance(self_value, dict) and isinstance(value, dict):
+					RequestMetrics.usage_iadd(self_usage=self_value, other_usage=value)
+				elif isinstance(self_value, (int, float)) and isinstance(value, (int, float)):
+					self_usage[key] += value
+				else:
+					raise TypeError(f"Type mismatch while trying to add usages: {utils.get_class_str(self_value)} vs {utils.get_class_str(value)}")
+			else:
+				self_usage[key] = value if isinstance(value, (int, float)) else copy.deepcopy(value)
+		return self_usage
+
+# API metrics class
+@dataclasses.dataclass
+class APIMetrics:
+	succeeded: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)  # Metrics associated with succeeded requests
+	failed: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)     # Metrics associated with failed requests
+	total: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)      # Total metrics of completed requests for the API
+	num_api_calls: int = 0                                                         # Number of API calls that were associated with the completed requests
+
+# Metrics class
+@dataclasses.dataclass
+class Metrics:
+	direct: APIMetrics = dataclasses.field(default_factory=APIMetrics)         # Metrics associated with completed direct API requests
+	batch: APIMetrics = dataclasses.field(default_factory=APIMetrics)          # Metrics associated with completed batch API requests
+	total: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)  # Total metrics of completed requests across both APIs
+	total_api_calls: int = 0                                                   # Total number of API calls that were associated with the completed requests
+
 # State class
 @dataclasses.dataclass
 class State:
@@ -170,7 +271,9 @@ class State:
 	queue: QueueState = dataclasses.field(default_factory=QueueState)          # State of the request queue
 	max_batch_id: int = 0                                                      # Maximum batch ID used thus far (0 = No batch ID used so far)
 	batches: list[BatchState] = dataclasses.field(default_factory=list)        # States of all batches that are currently pending or in progress (in ascending batch ID order)
+	batch_history: list[BatchState] = dataclasses.field(default_factory=list)  # TODO: History of the final states of the completed batches (with some overdetailed per-request information removed for space reasons)
 	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)  # Task push statistics
+	metrics: Metrics = dataclasses.field(default_factory=Metrics)              # TODO: Completed request metrics
 
 # State file class
 class StateFile:
@@ -775,12 +878,15 @@ class GPTRequester:
 		pool_queue_tokens_cost = TokensCost().add((cached_req.info.tokens_cost for cached_req in self.P), (cached_req.info.tokens_cost for cached_req in self.Q if cached_req is not None))
 		local_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is None)
 		remote_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is not None)
-		log.info(f"{self.name_prefix}: There are {self.PQ.pool_len} pooled requests and {self.PQ.queue_len} queued requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: There are {self.num_unpushed_batches()} unpushed local batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished remote batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
-		# TODO: Log statement about metrics, i.e. how many requests, token, cost etc has totally finished/completed (split by batch/direct and session/task?)
-		log.info(f"{self.name_prefix}: Session push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: Task push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: There are {self.PQ.pool_len} POOLED requests and {self.PQ.queue_len} QUEUED requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: There are {self.num_unpushed_batches()} unpushed LOCAL batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"{self.name_prefix}: TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+		batch_metrics, direct_metrics, total_metrics = self.S.metrics.batch.total, self.S.metrics.direct.total, self.S.metrics.total
+		log.info(f"{self.name_prefix}: {batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} output = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {batch_metrics.true_cost:.3f} true cost")
+		log.info(f"{self.name_prefix}: {direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} output = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {direct_metrics.true_cost:.3f} true cost")
+		log.info(f"{self.name_prefix}: A total of {total_metrics.num_requests} requests have been COMPLETED, entailing {len(total_metrics.models)} models, {len(total_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(total_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := total_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached + {total_metrics.usage.get('prompt_tokens', 0) - cached_tokens} input + {(reasoning_tokens := total_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {total_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} output = {total_metrics.usage.get('total_tokens', 0)} total tokens, {total_metrics.true_cost:.3f} true cost")
 
 	# Create a GPT request item
 	def create_request_item(self, req: GPTRequest) -> GPTRequestItem:
@@ -1239,6 +1345,7 @@ class GPTRequester:
 	# TODO: DESCRIPTION
 	def process_batches(self):  # TODO: Return value annotation (does this return num_unfinished_batches? Or rather (NOT?) how many it processed?)
 		# TODO: DOC
+		# TODO: Separate step to download output file? Or direct to memory?
 		# TODO: Do not do any actual processing if DRYRUN (no client calls allowed, no updating of state allowed, just don't do anything?)
 		# TODO: MUST Use update_remote_batch_state() (don't need to comment about this doing nothing really for dry run if this line never executes in dry run mode due to a prior IF)
 		# TODO: Log error if a batch is finished by NOT completed => FAIL the associated samples (or retry them once auto-retrying is a thing) if remote_batch.status != 'completed': print(f"ERROR: Remote batch {remote_batch.id} has status '{remote_batch.status}' with errors: {remote_batch.errors}")
@@ -1246,6 +1353,13 @@ class GPTRequester:
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		# TODO: IF item.parse_info is not None THEN (converts ChatCompletion -> ParsedChatCompletion in terms of tools and response_format) openai_parsing.parse_chat_completion(response_format=self.type_cache.retrieve_type(serial=item.parse_info['response_format_type']) if 'response_format_type' in item.parse_info else item.req.payload.get('response_format', openai.NOT_GIVEN), input_tools=item.req.payload.get('tools', openai.NOT_GIVEN), chat_completion=COMPLETION)
+		# TODO: When batches are completed, clear out request_info (dict) and remote.batch.errors (list), and save them to the State.batch_history
+		# TODO: Rejected prediction tokens somehow still count towards cost as output tokens - no issue as already counted in returned 'completion_tokens' right? (see Predicted Outputs - Note that any rejected tokens are still billed like other completion tokens generated by the API, so Predicted Outputs can introduce higher costs for your requests.)
+		# TODO: Update METRICS
+		# TODO: Compare received metrics to assumed/expected token counts etc
+		# TODO: Assert that cached tokens <= input tokens, reasoning tokens <= output tokens
+		# TODO: Refer to guide on structured outputs for how to error check it!
+		# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
 		pass
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
@@ -1273,6 +1387,4 @@ class GPTRequester:
 
 	# TODO: wandb (conditional import to not require install if don't need it!)
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
-
-	# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
 # EOF

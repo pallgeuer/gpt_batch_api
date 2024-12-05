@@ -6,7 +6,7 @@
 
 A Python library for efficiently interacting with OpenAI's GPT API in batch mode. This library helps handle multiple requests in a single batch to streamline and optimize API usage, making it ideal for high-volume non-real-time text and image processing applications. The Batch API provides a significantly faster and more cost-effective solution than performing multiple single API requests individually.
 
-This library deals with all the complexities involved with having a safe, robust, cost-controlled, and restartable Large Language Model (LLM) batch processing application. This includes error handling, strict atomic control of state, and robustness to SIGINTs (keyboard interrupts, i.e. `Ctrl+C`) and crashes. Isolated calls to the standard non-batch API are also supported to allow efficient individual low-volume runs.
+This library deals with all the complexities involved with having a safe, robust, cost-controlled, and restartable Large Language Model (LLM) batch processing application. This includes error handling, strict atomic control of state, and robustness to SIGINTs (keyboard interrupts, i.e. `Ctrl+C`) and crashes. Isolated calls to the standard non-batch (i.e. direct) API are also supported to allow efficient individual low-volume runs.
 
 The library supports `wandb` integration to allow for the graphical/remote monitoring of progress of long-running processing applications.
 
