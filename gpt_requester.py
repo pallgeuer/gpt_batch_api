@@ -323,15 +323,17 @@ class StateFile:
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
 		log.info(f"{self.name}: Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
 
-	def save(self, rstack: utils.RevertStack):
+	def save(self, rstack: utils.RevertStack, show_log: bool = True):
 		# rstack = RevertStack to use for the safe reversible saving of the state file
 		if self.dryrun:
-			log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches")
+			if show_log:
+				log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches")
 		else:
 			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
-			log.info(f"{self.name}: Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
+			if show_log:
+				log.info(f"{self.name}: Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
 
 	def unload(self):
 		self.state = None
@@ -1268,9 +1270,10 @@ class GPTRequester:
 		return sum(1 for batch in self.S.batches if batch.remote is not None)
 
 	# Update the current state of all pushed remote batches (unless dry run)
-	def update_remote_batch_state(self, only_check_finished: bool) -> bool:
+	def update_remote_batch_state(self, only_check_finished: bool, log_save: bool) -> tuple[bool, bool]:
 		# only_check_finished = If True, return as soon as a single pushed remote batch is seen to be in the finished state (whether this is new or not)
-		# Returns whether there are any finished remote batches
+		# log_save = Whether to log if the state file is saved
+		# Returns whether there are any finished remote batches, and whether any batch statuses were updated
 
 		any_finished = False
 		status_updated = False
@@ -1299,16 +1302,19 @@ class GPTRequester:
 								if only_check_finished:
 									break
 					except (openai.OpenAIError, ValueError) as e:
+						utils.print_clear_line()
 						log.error(f"{self.name_prefix}: Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
 
 		if status_updated:
+			if status_changed or log_save:
+				utils.print_clear_line()
 			if status_changed:
 				log.info(f"{self.name_prefix}: Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
 			with utils.AtomicRevertStack() as rstack:
 				self.validate_state_queue(clean=False)
-				self.state.save(rstack=rstack)
+				self.state.save(rstack=rstack, show_log=log_save)
 
-		return any_finished
+		return any_finished, status_updated
 
 	# Return how many unfinished remote batches there are according to the latest local state of information (see update_remote_batch_state())
 	def num_unfinished_batches(self) -> int:
@@ -1328,16 +1334,19 @@ class GPTRequester:
 			return
 
 		start_time = time.perf_counter()
+		num_status_updates = 0
 		printed_str = None
 
 		while True:
-			self.update_remote_batch_state(only_check_finished=True)
+			_, status_updated = self.update_remote_batch_state(only_check_finished=True, log_save=False)
+			if status_updated:
+				num_status_updates += 1
 			num_unfinished_batches = self.num_unfinished_batches()
 			if self.num_finished_batches() > 0 or num_unfinished_batches <= 0:
-				utils.print_in_place(f"{self.name_prefix}: Waited {utils.format_duration(time.perf_counter() - start_time)} until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
+				utils.print_in_place(f"{self.name_prefix}: Waited {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
 				return
 			time.sleep((start_time - time.perf_counter()) % self.remote_update_interval)
-			print_str = f" {self.name_prefix}: Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)}...\r"
+			print_str = f"{self.name_prefix}: Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates... "
 			if print_str != printed_str:
 				utils.print_in_place(print_str)
 				printed_str = print_str
@@ -1349,7 +1358,7 @@ class GPTRequester:
 
 		return  # TODO: TEMP
 
-		self.update_remote_batch_state(only_check_finished=False)  # Does not do much in case of dry run
+		self.update_remote_batch_state(only_check_finished=False, log_save=True)  # Does not do much in case of dry run
 
 		for batch in self.S.batches:
 			if batch.remote is not None and batch.remote.finished:
