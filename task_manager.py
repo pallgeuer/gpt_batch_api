@@ -51,29 +51,30 @@ class TaskStateFile:
 		return False
 
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack, utils.AtomicExitStack() as atomic_stack:
-			stack.callback(self.unload)
-			try:
-				self.load()
-				if self.reinit_meta:
-					self.state.meta = copy.deepcopy(self.init_meta)
-					self.save(stack=atomic_stack)
-			except FileNotFoundError:
-				self.create(stack=atomic_stack)
-			atomic_stack.push(self.clear_reinit_meta)
-			assert self.state is not None
-			log.info(f"{self.name}: Task metadata:\n{'\n'.join(f'    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.state.meta.items())}")
-			self._enter_stack = stack.pop_all()
-		assert self._enter_stack is not stack
+		with self._enter_stack as enter_stack:
+			with utils.AtomicRevertStack() as rstack:
+				enter_stack.callback(self.unload)
+				try:
+					self.load()
+					if self.reinit_meta:
+						self.state.meta = copy.deepcopy(self.init_meta)
+						self.save(rstack=rstack)
+				except FileNotFoundError:
+					self.create(rstack=rstack)
+				rstack.push_always(self.clear_reinit_meta)
+				assert self.state is not None
+				log.info(f"{self.name}: Task metadata:\n{'\n'.join(f'    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.state.meta.items())}")
+			self._enter_stack = enter_stack.pop_all()
+		assert self._enter_stack is not enter_stack
 		return self
 
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
-	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
-		# stack = Exit stack to use for safe reversible creation of the task state file
+	def create(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible creation of the task state file
 		self.state = TaskState(meta=copy.deepcopy(self.init_meta))
-		self.save(stack=stack)
+		self.save(rstack=rstack)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
@@ -81,12 +82,12 @@ class TaskStateFile:
 			self.state = utils.dataclass_from_json(cls=TaskState, json_data=file)
 		log.info(f"{self.name}: Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)})")
 
-	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
-		# stack = Exit stack to use for safe reversible saving of the task state file
+	def save(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible saving of the task state file
 		if self.dryrun:
 			log.warning(f"{self.name}: {gpt_requester.DRYRUN}Did not save task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys")
 		else:
-			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
+			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
 			log.info(f"{self.name}: Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)})")
@@ -149,16 +150,16 @@ class TaskManager:
 
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack:
-			stack.enter_context(self.GR)
-			stack.callback(self.on_exit)
+		with self._enter_stack as enter_stack:
+			enter_stack.enter_context(self.GR)
+			enter_stack.callback(self.on_exit)
 			self.step_num = 0
 			self.generating = False
-			stack.enter_context(self.task)
+			enter_stack.enter_context(self.task)
 			self.T = self.task.state
 			self.validate_state()
-			self._enter_stack = stack.pop_all()
-		assert self._enter_stack is not stack
+			self._enter_stack = enter_stack.pop_all()
+		assert self._enter_stack is not enter_stack
 		return self
 
 	# Exit method for the required use of TaskManager as a context manager
@@ -215,7 +216,7 @@ class TaskManager:
 		while True:
 
 			# Process all finished remote batches (nullifies then ensures condition F, nullifies conditions M and C), and update the task state (nullifies condition G)
-			# Requests may internally be auto-retried (if it occurs, temporarily nullifies condition P then re-ensures it and nullifies conditions Q and B)
+			# TODO: Requests may internally be auto-retried (if it occurs, temporarily nullifies condition P then re-ensures it and nullifies conditions Q and B)
 			self.process_batches()
 
 			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
@@ -281,7 +282,7 @@ class TaskManager:
 
 			log.info(f"{self.GR.name_prefix}: Committing generated requests...")
 
-			with self.GR.commit_requests() as (cached_reqs, stack):
+			with self.GR.commit_requests() as (rstack, cached_reqs):
 				if cached_reqs:
 
 					def revert_committed_state(meta: dict[str, Any], samples_all: bool, samples: dict[str, Any]):
@@ -297,19 +298,20 @@ class TaskManager:
 
 					DELETE = object()
 					if (sample_keys := self.cached_request_keys(cached_reqs)) is None:
-						stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=True, samples=copy.deepcopy(self.T.committed_samples))
+						rstack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=True, samples=copy.deepcopy(self.T.committed_samples))
 					else:
-						stack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=False, samples={sample_key: (copy.deepcopy(self.T.committed_samples[sample_key]) if sample_key in self.T.committed_samples else DELETE) for sample_key in sample_keys})
+						rstack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=False, samples={sample_key: (copy.deepcopy(self.T.committed_samples[sample_key]) if sample_key in self.T.committed_samples else DELETE) for sample_key in sample_keys})
 
 					for cached_req in cached_reqs:
 						self.commit_cached_request(cached_req)
+
 					self.validate_state()
-					self.task.save(stack=stack)
+					self.task.save(rstack=rstack)
 
 			log.info(f"{self.GR.name_prefix}: Committed {len(cached_reqs)} generated requests")
 
 		if batch and self.GR.Q:
-			log.info(f"{self.GR.name_prefix}: Attempting to create local batches from {len(self.GR.Q)} available committed requests...")
+			log.info(f"{self.GR.name_prefix}: Attempting to {'force-' if force_batch else ''}create local batches from {len(self.GR.Q)} available committed requests...")
 			num_unpushed_batches = self.GR.batch_requests(force=force_batch)
 			if num_unpushed_batches > 0:
 				log.info(f"{self.GR.name_prefix}: The total number of unpushed local batches is now {num_unpushed_batches}")
@@ -340,7 +342,8 @@ class TaskManager:
 		# TODO: Return whether there are some ongoing started batches AFTER processing any finished ones now and successfully updating the task state and output file
 		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)
 		# TODO: Log how many samples errored for whatever reasons (be specific), and how many were internally auto-retried by GPT requester
-		pass
+		for rstack, TODO in self.GR.process_batches():
+			pass
 
 	# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 # EOF

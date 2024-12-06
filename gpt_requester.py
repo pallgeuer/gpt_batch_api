@@ -293,28 +293,29 @@ class StateFile:
 		self.state = None
 
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack, utils.AtomicExitStack() as atomic_stack:
-			stack.callback(self.unload)
-			try:
-				self.load()
-			except FileNotFoundError:
-				self.create(stack=atomic_stack)
-			assert self.state is not None
-			if not self.state.endpoint:
-				raise ValueError("State API endpoint must be non-empty")
-			if self.state.endpoint != self.endpoint:
-				raise ValueError(f"State API endpoint mismatch: {self.state.endpoint} vs {self.endpoint}")
-			self._enter_stack = stack.pop_all()
-		assert self._enter_stack is not stack
+		with self._enter_stack as enter_stack:
+			with utils.AtomicRevertStack() as rstack:
+				enter_stack.callback(self.unload)
+				try:
+					self.load()
+				except FileNotFoundError:
+					self.create(rstack=rstack)
+				assert self.state is not None
+				if not self.state.endpoint:
+					raise ValueError("State API endpoint must be non-empty")
+				if self.state.endpoint != self.endpoint:
+					raise ValueError(f"State API endpoint mismatch: {self.state.endpoint} vs {self.endpoint}")
+			self._enter_stack = enter_stack.pop_all()
+		assert self._enter_stack is not enter_stack
 		return self
 
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
-	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
-		# stack = Exit stack to use for the safe reversible creation of the state file
+	def create(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for the safe reversible creation of the state file
 		self.state = State(endpoint=self.endpoint)
-		self.save(stack=stack)
+		self.save(rstack=rstack)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
@@ -322,12 +323,12 @@ class StateFile:
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
 		log.info(f"{self.name}: Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
 
-	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
-		# stack = Exit stack to use for the safe reversible saving of the state file
+	def save(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for the safe reversible saving of the state file
 		if self.dryrun:
 			log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches")
 		else:
-			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
+			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
 			log.info(f"{self.name}: Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
@@ -433,24 +434,25 @@ class QueueFile:
 		self.pool_queue = None
 
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack, utils.AtomicExitStack() as atomic_stack:
-			stack.callback(self.unload)
-			try:
-				self.load()
-			except FileNotFoundError:
-				self.create(atomic_stack)
-			assert self.pool_queue is not None
-			self._enter_stack = stack.pop_all()
-		assert self._enter_stack is not stack
+		with self._enter_stack as enter_stack:
+			with utils.AtomicRevertStack() as rstack:
+				enter_stack.callback(self.unload)
+				try:
+					self.load()
+				except FileNotFoundError:
+					self.create(rstack=rstack)
+				assert self.pool_queue is not None
+			self._enter_stack = enter_stack.pop_all()
+		assert self._enter_stack is not enter_stack
 		return self
 
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
-	def create(self, stack: contextlib.ExitStack[Optional[bool]]):
-		# stack = Exit stack to use for safe reversible creation of the queue file
+	def create(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible creation of the queue file
 		self.pool_queue = PoolQueue()
-		self.save(stack=stack)
+		self.save(rstack=rstack)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
@@ -463,15 +465,15 @@ class QueueFile:
 			) for line in file.readlines()])
 		log.info(f"{self.name}: Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
 
-	def save(self, stack: contextlib.ExitStack[Optional[bool]]):
-		# stack = Exit stack to use for safe reversible saving of the queue file
+	def save(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible saving of the queue file
 		if self.dryrun:
 			log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester queue file with {self.pool_queue.queue_len} requests")
 		else:
-			with utils.SafeOpenForWrite(path=self.path, stack=stack) as file:
+			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				for cached_req in self.pool_queue.queue:
 					if cached_req is not None:
-						utils.json_from_dataclass(obj=cached_req.item, file=file)
+						utils.json_from_dataclass(obj=cached_req.item, file=file, indent=None)
 						file.write('\n')
 				file_size = utils.get_file_size(file)
 			log.info(f"{self.name}: Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
@@ -789,21 +791,21 @@ class GPTRequester:
 
 	# Enter method for the required use of GPTRequester as a context manager
 	def __enter__(self) -> Self:
-		with self._enter_stack as stack:
-			stack.enter_context(self.lock)
-			stack.callback(self.on_exit)
+		with self._enter_stack as enter_stack:
+			enter_stack.enter_context(self.lock)
+			enter_stack.callback(self.on_exit)
 			self.type_cache = utils.SerialTypeCache()
-			stack.enter_context(self.state)
+			enter_stack.enter_context(self.state)
 			self.S = self.state.state
 			self.max_request_id = self.S.queue.max_request_id
-			stack.enter_context(self.queue)
+			enter_stack.enter_context(self.queue)
 			self.PQ = self.queue.pool_queue
 			self.P = self.PQ.pool
 			self.Q = self.PQ.queue
 			self.session_push_stats = PushStats()
 			self.validate_state_queue(clean=True)
-			self._enter_stack = stack.pop_all()
-		assert self._enter_stack is not stack
+			self._enter_stack = enter_stack.pop_all()
+		assert self._enter_stack is not enter_stack
 		return self
 
 	# Exit method for the required use of GPTRequester as a context manager
@@ -941,10 +943,10 @@ class GPTRequester:
 
 	# Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
 	@contextlib.contextmanager
-	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None) -> ContextManager[tuple[list[CachedGPTRequest], contextlib.ExitStack[Optional[bool]]]]:
-		# reqs = Optionally requests to add to the request pool immediately prior to committing
-		# The context manager returns the list of committed cached GPT requests and the currently active exit stack
-		# The body of the context manager is executed within an AtomicExitStack (an ExitStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
+	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None) -> ContextManager[tuple[utils.RevertStack, list[CachedGPTRequest]]]:
+		# reqs = Optional requests to add to the request pool immediately prior to committing
+		# The context manager returns the currently active RevertStack and the list of committed cached GPT requests
+		# The body of the context manager is executed within an AtomicRevertStack (a RevertStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
 		# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far (given by a list[CachedGPTRequest]) do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be immediately keyboard interrupted (or crash)
 
 		if reqs is not None:
@@ -961,23 +963,22 @@ class GPTRequester:
 			for field, value in queue_state_dict.items():
 				setattr(self.S.queue, field, value)
 
-		with utils.AtomicExitStack() as stack:
+		with utils.AtomicRevertStack() as rstack:
 			cached_reqs = self.P.copy()
 			if self.P or any(cached_req is None for cached_req in self.Q):
-				stack.callback(revert_queue, P=cached_reqs, Q=self.Q.copy())
+				rstack.callback(revert_queue, P=cached_reqs, Q=self.Q.copy())
 				self.Q[:] = [cached_req for cached_req in self.Q if cached_req is not None]
 				self.Q.extend(self.P)
 				self.P.clear()
-				stack.callback(revert_queue_state, queue_state_dict=dataclasses.asdict(self.S.queue))  # noqa
+				rstack.callback(revert_queue_state, queue_state_dict=dataclasses.asdict(self.S.queue))  # noqa
 				self.S.queue.max_request_id = self.max_request_id
 				self.S.queue.request_id_meta = self.PQ.queue_request_id_meta()
 				self.validate_state_queue(clean=True)
-				self.queue.save(stack=stack)
-				self.state.save(stack=stack)
+				self.queue.save(rstack=rstack)
+				self.state.save(rstack=rstack)
 			else:
 				self.validate_state_queue(clean=True)
-			yield cached_reqs, stack  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
-			stack.pop_all()
+			yield rstack, cached_reqs  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
 
 	# Process the request queue and generate full batches as much as possible (also generate a trailing non-full batch with whatever requests are left if force=True)
 	def batch_requests(self, force: bool = False) -> int:
@@ -1054,9 +1055,9 @@ class GPTRequester:
 						self.S.batches.pop()
 					self.S.max_batch_id = max_batch_id
 
-				with utils.AtomicExitStack() as stack:
+				with utils.AtomicRevertStack() as rstack:
 
-					stack.callback(revert_state, max_batch_id=self.S.max_batch_id, request_id_meta=self.S.queue.request_id_meta.copy(), queue=self.Q[batch_index:index])
+					rstack.callback(revert_state, max_batch_id=self.S.max_batch_id, request_id_meta=self.S.queue.request_id_meta.copy(), queue=self.Q[batch_index:index])
 
 					self.S.max_batch_id += 1
 					batch.id = self.S.max_batch_id
@@ -1071,17 +1072,15 @@ class GPTRequester:
 					if self.dryrun:
 						log.warning(f"{self.name_prefix}: {DRYRUN}Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 					else:
-						with utils.SafeOpenForWrite(path=batch.local_jsonl, stack=stack) as file:
+						with utils.SafeOpenForWrite(path=batch.local_jsonl, rstack=rstack) as file:
 							file.writelines(batch_reqs)
 							file_size = utils.get_file_size(file)
 						assert file_size == batch.local_jsonl_size
 						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 
 					self.validate_state_queue(clean=False)
-					self.queue.save(stack=stack)
-					self.state.save(stack=stack)
-
-					stack.pop_all()
+					self.queue.save(rstack=rstack)
+					self.state.save(rstack=rstack)
 
 				num_created += 1
 				num_created_requests += batch.num_requests
@@ -1110,9 +1109,9 @@ class GPTRequester:
 				remote_tokens_cost += batch.tokens_cost
 
 		try:
-			current_user = getpass.getuser()  # str
+			current_user = getpass.getuser()
 		except OSError:
-			current_user = os.getuid()  # int
+			current_user = str(os.getuid())
 
 		num_pushed = 0
 		reasons_nopush = set()
@@ -1169,10 +1168,10 @@ class GPTRequester:
 							self.session_push_stats.total_requests = session_requests
 							self.session_push_stats.total_tokens_cost = session_tokens_cost
 
-						with utils.AtomicExitStack() as stack:
+						with utils.AtomicRevertStack() as rstack:
 
 							file_object = self.client.files.create(file=open(batch.local_jsonl, 'rb'), purpose='batch')
-							stack.callback(self.delete_remote_file, file_id=file_object.id)
+							rstack.callback(self.delete_remote_file, file_id=file_object.id)
 							if file_object.bytes != batch.local_jsonl_size:
 								log.warning(f"{self.name_prefix}: Uploaded input JSONL file {file_object.id} for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
 
@@ -1185,28 +1184,26 @@ class GPTRequester:
 									host=os.uname().nodename,
 									user=current_user,
 									script=__file__,
-									pid=os.getpid(),
+									pid=str(os.getpid()),
 									name_prefix=self.name_prefix,
-									batch_id=batch.id,
+									batch_id=str(batch.id),
 									local_jsonl=batch.local_jsonl,
 									state_file=self.state.path,
 								),
 							)
-							stack.callback(self.cancel_remote_batch, batch_id=batch_object.id)
+							rstack.callback(self.cancel_remote_batch, batch_id=batch_object.id)
 
-							stack.callback(setattr, batch, 'remote', batch.remote)
+							rstack.callback(setattr, batch, 'remote', batch.remote)
 							batch.remote = RemoteBatchState(file=file_object, batch=batch_object, finished=batch_object.status in FINISHED_BATCH_STATUSES)
 
-							stack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_requests=self.session_push_stats.total_requests, session_tokens_cost=self.session_push_stats.total_tokens_cost)
+							rstack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_requests=self.session_push_stats.total_requests, session_tokens_cost=self.session_push_stats.total_tokens_cost)
 							self.S.task_push_stats.total_requests = next_task_requests
 							self.S.task_push_stats.total_tokens_cost = next_task_tokens_cost
 							self.session_push_stats.total_requests = next_session_requests
 							self.session_push_stats.total_tokens_cost = next_session_tokens_cost
 
 							self.validate_state_queue(clean=False)
-							self.state.save(stack=stack)
-
-							stack.pop_all()
+							self.state.save(rstack=rstack)
 
 						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
 
@@ -1303,10 +1300,9 @@ class GPTRequester:
 		if status_updated:
 			if status_changed:
 				log.info(f"{self.name_prefix}: Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
-			with utils.AtomicExitStack() as stack:
+			with utils.AtomicRevertStack() as rstack:
 				self.validate_state_queue(clean=False)
-				self.state.save(stack=stack)
-				stack.pop_all()
+				self.state.save(rstack=rstack)
 
 		return any_finished
 
@@ -1342,24 +1338,54 @@ class GPTRequester:
 				utils.print_in_place(print_str)
 				printed_str = print_str
 
-	# TODO: DESCRIPTION
-	def process_batches(self):  # TODO: Return value annotation (does this return num_unfinished_batches? Or rather (NOT?) how many it processed?)
-		# TODO: DOC
-		# TODO: Separate step to download output file? Or direct to memory?
+	# Process any finished remote batches (unless dry run)
+	def process_batches(self) -> Iterable[tuple[utils.RevertStack, list[Any]]]:  # TODO: Update 'list[Any]' to be more specific
+		# TODO: Explain the idea of this function and how it is intended to be used to update task-state (and output file) atomically etc (see similar explanation in commit_requests())
+		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next()
+
+		return  # TODO: TEMP
+
+		self.update_remote_batch_state(only_check_finished=False)  # Does not do much in case of dry run
+
+		for batch in self.S.batches:
+			if batch.remote is not None and batch.remote.finished:
+
+				if self.dryrun:
+					log.warning(f"{self.name_prefix}: {DRYRUN}Not processing finished batch {batch.id} ({batch.remote.file.id}) containing {batch.num_requests} requests")
+				else:
+
+					log.info(f"{self.name_prefix}: Processing finished batch {batch.id} ({batch.remote.file.id}) containing {batch.num_requests} requests...")
+
+					if batch.remote.batch.status != 'completed':
+						log.error(f"{self.name_prefix}: Batch {batch.id} ({batch.remote.batch.id}) was overall unsuccessful with status '{batch.remote.batch.status}' and errors: {batch.remote.batch.errors}")
+
+					# TODO: Get an example output
+					if batch.remote.batch.output_file_id:
+						batch_output = tuple(json.loads(line) for line in self.client.files.content(file_id=batch.remote.batch.output_file_id).text.splitlines() if line)
+					else:
+						batch_output = ()
+					# TODO: Also batch_errors
+					# TODO: Merge to single list (error trumps response)
+
+					yield None, None  # TODO
+
+		# TODO: Show up to 10 request errors?
+		# TODO: Batch-wise yield (including rstack) whatever information is required
+		# TODO: Logging
+		# TODO: When/how to fail/auto-retry samples?
 		# TODO: Do not do any actual processing if DRYRUN (no client calls allowed, no updating of state allowed, just don't do anything?)
-		# TODO: MUST Use update_remote_batch_state() (don't need to comment about this doing nothing really for dry run if this line never executes in dry run mode due to a prior IF)
-		# TODO: Log error if a batch is finished by NOT completed => FAIL the associated samples (or retry them once auto-retrying is a thing) if remote_batch.status != 'completed': print(f"ERROR: Remote batch {remote_batch.id} has status '{remote_batch.status}' with errors: {remote_batch.errors}")
 		# TODO: if remote_batch.output_file_id: remote_batch_content = tuple(json.loads(line) for line in client.files.content(file_id=remote_batch.output_file_id).text.splitlines() if line)
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
 		# TODO: IF item.parse_info is not None THEN (converts ChatCompletion -> ParsedChatCompletion in terms of tools and response_format) openai_parsing.parse_chat_completion(response_format=self.type_cache.retrieve_type(serial=item.parse_info['response_format_type']) if 'response_format_type' in item.parse_info else item.req.payload.get('response_format', openai.NOT_GIVEN), input_tools=item.req.payload.get('tools', openai.NOT_GIVEN), chat_completion=COMPLETION)
-		# TODO: When batches are completed, clear out request_info (dict) and remote.batch.errors (list), and save them to the State.batch_history
+		# TODO: When batches are completed, clear out request_info (dict), and save them to the State.batch_history
 		# TODO: Rejected prediction tokens somehow still count towards cost as output tokens - no issue as already counted in returned 'completion_tokens' right? (see Predicted Outputs - Note that any rejected tokens are still billed like other completion tokens generated by the API, so Predicted Outputs can introduce higher costs for your requests.)
 		# TODO: Update METRICS
 		# TODO: Compare received metrics to assumed/expected token counts etc
 		# TODO: Assert that cached tokens <= input tokens, reasoning tokens <= output tokens
 		# TODO: Refer to guide on structured outputs for how to error check it!
 		# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
+		# TODO: Beware, if you auto-retry and eventually a small batch consists of only already-failed retries then don't want to quit right due to "whole batch" erroring out?
 		pass
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
@@ -1375,12 +1401,9 @@ class GPTRequester:
 	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
 	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
 	# TODO: Errors that one should not attempt to continue from (e.g. inconsistent state?) so that manual intervention can fix, errors like timeouts that could benefit from a simple retry (but need to back off?), errors like requests/samples that permanently fail and never go through - when to accept? How to retry after accepted? (allow a launch to clear the failed task manager state / gpt requester attempts state?)
-	# TODO: Deal with possibly aborting if log.error()'s happen too often (search where I've used them)? Or exponentially relax (e.g. temporary internet/server outage) and then eventually abort?
+	# TODO: Deal with possibly aborting if log.error()'s happen too often (search where I've used them - certain number of them within last hour?)? Or exponentially relax (e.g. temporary internet/server outage) and then eventually abort?
 
 	# TODO: Need a command line argument where you can supply batch IDs to forget (e.g. ones that were accidentally deleted from the server, or error out when trying to retrieve/process?) => Would need a mode that 'uncommits' that batch in the task state? Or generally allow on start a flag that says assume no more queue/batches exist and start again? (general hammer against all kinds of problems)
-
-	# TODO: Metrics (tokens in/out (what happens about thought tokens), per batch, num requests, divided by successful/unsuccessful)
-	# TODO: Count token usage from single/direct requests in a separate counter, and add them to a combined total elsewhere
 
 	# TODO: How to gracefully deal with an entire batch erroring out? Raise a runtime exception as no clue whether data is the problem or wrong limits configured, but not auto-recoverable in any case? Or maybe after 2-3 failed batches raise? Failed push? Failed result?
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)

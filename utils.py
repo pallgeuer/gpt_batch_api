@@ -16,13 +16,14 @@ import contextlib
 import collections
 import dataclasses
 import typing
-from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol
+from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol, Callable
 from types import FrameType
 import filelock
 import pydantic
 
 # Types
 DataclassInstance = typing.TypeVar('DataclassInstance')
+T = typing.TypeVar('T')
 
 # Logging configuration
 logging.getLogger("filelock").setLevel(logging.WARNING)
@@ -259,86 +260,6 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 # OS/System
 #
 
-# Affix class
-@dataclasses.dataclass
-class Affix:                           # /path/to/file.ext --> /path/to/{prefix}file{root_suffix}.ext{suffix}
-	prefix: Optional[str] = None       # /path/to/file.ext --> /path/to/{prefix}file.ext
-	root_suffix: Optional[str] = None  # /path/to/file.ext --> /path/to/file{root_suffix}.ext
-	suffix: Optional[str] = None       # /path/to/file.ext --> /path/to/file.ext{suffix}
-
-# Context manager that performs an effectively atomic write to a file by using a temporary file (in the same directory) as an intermediate and performing an atomic file replace (completely reversible on future error if an ExitStack is supplied)
-@contextlib.contextmanager
-def SafeOpenForWrite(
-	path: str,                                                     # path = Path of the file to safe-write to
-	mode: str = 'w',                                               # mode = File opening mode (should always be a 'write' mode that ensures the file is created, i.e. including 'w' or 'x')
-	*,                                                             # Keyword arguments only beyond here
-	temp_affix: Optional[Affix] = None,                            # temp_affix = Affix to use for the temporary file path to write to before atomically replacing the target file with the temporary written file (defaults to a suffix of '.tmp')
-	stack: Optional[contextlib.ExitStack[Optional[bool]]] = None,  # stack = If an ExitStack is provided, callbacks are pushed to the stack to revert all changes to the file if the stack unwinds with an exception
-	backup_affix: Optional[Affix] = None,                          # backup_affix = If an ExitStack is provided, the affix to use for the backup file path (defaults to a suffix of '.bak')
-	**open_kwargs,                                                 # open_kwargs = Keyword arguments to provide to the internal call to open() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
-) -> ContextManager[Union[TextIO, BinaryIO]]:
-
-	if 'w' not in mode and 'x' not in mode:
-		raise ValueError(f"File opening mode must be a truncating write mode (w or x): {mode}")
-	if 'b' not in mode:
-		open_kwargs.setdefault('encoding', 'utf-8')
-		open_kwargs.setdefault('newline', '\n')
-
-	dirname, basename = os.path.split(path)
-	root, ext = os.path.splitext(basename)
-
-	if temp_affix is None:
-		temp_affix = Affix(prefix=None, root_suffix=None, suffix='.tmp')
-	temp_path = os.path.join(dirname, f"{temp_affix.prefix or ''}{root}{temp_affix.root_suffix or ''}{ext}{temp_affix.suffix or ''}")
-
-	# noinspection PyUnusedLocal
-	def unlink_temp_if_exc(exc_type, exc_val, exc_tb) -> bool:
-		if exc_type is not None:
-			with contextlib.suppress(FileNotFoundError):
-				os.unlink(temp_path)
-		return False
-
-	with contextlib.ExitStack() as stack_:
-		stack_.push(unlink_temp_if_exc)
-		yield stack_.enter_context(open(temp_path, mode=mode, **open_kwargs))
-
-	if stack is not None:
-
-		if backup_affix is None:
-			backup_affix = Affix(prefix=None, root_suffix=None, suffix='.bak')
-		backup_path = os.path.join(dirname, f"{backup_affix.prefix or ''}{root}{backup_affix.root_suffix or ''}{ext}{backup_affix.suffix or ''}")
-
-		def unlink_backup():
-			with contextlib.suppress(FileNotFoundError):
-				os.unlink(backup_path)
-		stack.callback(unlink_backup)
-
-		# noinspection PyUnusedLocal
-		def revert_backup_if_exc(exc_type, exc_val, exc_tb) -> bool:
-			if exc_type is not None:
-				os.replace(src=backup_path, dst=path)
-			return False
-
-		# noinspection PyUnusedLocal
-		def unlink_path_if_exc(exc_type, exc_val, exc_tb) -> bool:
-			if exc_type is not None:
-				with contextlib.suppress(FileNotFoundError):
-					os.unlink(path)
-			return False
-
-		try:
-			shutil.copy2(src=path, dst=backup_path)
-			stack.push(revert_backup_if_exc)
-		except FileNotFoundError:
-			stack.push(unlink_path_if_exc)
-
-	try:
-		os.replace(src=temp_path, dst=path)  # Internally atomic operation
-	except OSError:
-		with contextlib.suppress(FileNotFoundError):
-			os.unlink(temp_path)
-		raise
-
 # Context manager that temporarily delays keyboard interrupts until the context manager exits
 class DelayKeyboardInterrupt:
 
@@ -363,11 +284,132 @@ class DelayKeyboardInterrupt:
 		self.original_handler = None
 		return False
 
-# Context manager that extends DelayKeyboardInterrupt to also by default provide an ExitStack that can be used to unwind partial operations in case one of the operations raises an exception
+# Exit stack that allows convenient implementation of action reversion that takes effect only if an exception is encountered (based on contextlib.ExitStack @ Python 3.12.7)
+# Note that whether the reversion callbacks are called (ALL of them) depends solely on whether the RevertStack receives an INITIAL exception, NOT whether an exception occurs during unwinding
+class RevertStack(contextlib.ExitStack):
+
+	def __init__(self):
+		super().__init__()
+		self._exit_callbacks_always = collections.deque()
+
+	def pop_all(self) -> Self:
+		new_stack = super().pop_all()
+		new_stack._exit_callbacks_always = self._exit_callbacks_always
+		self._exit_callbacks_always = collections.deque()
+		return new_stack
+
+	# noinspection PyShadowingBuiltins
+	def push_always(self, exit: Callable) -> Callable:
+		num_exit_callbacks = len(self._exit_callbacks)
+		ret = self.push(exit=exit)
+		assert len(self._exit_callbacks) == num_exit_callbacks + 1
+		self._exit_callbacks_always.append(self._exit_callbacks[-1])
+		return ret
+
+	def enter_context_always(self, cm: ContextManager[T]) -> T:
+		num_exit_callbacks = len(self._exit_callbacks)
+		ret = self.enter_context(cm=cm)
+		assert len(self._exit_callbacks) == num_exit_callbacks + 1
+		self._exit_callbacks_always.append(self._exit_callbacks[-1])
+		return ret
+
+	def callback_always(self, callback: Callable, /, *args, **kwds) -> Callable:
+		num_exit_callbacks = len(self._exit_callbacks)
+		ret = self.callback(callback, *args, **kwds)
+		assert len(self._exit_callbacks) == num_exit_callbacks + 1
+		self._exit_callbacks_always.append(self._exit_callbacks[-1])
+		return ret
+
+	def __enter__(self) -> Self:
+		return super().__enter__()
+
+	def __exit__(self, *exc_details) -> bool:
+		if exc_details[0] is None:
+			self._exit_callbacks = self._exit_callbacks_always
+		else:
+			self._exit_callbacks_always.clear()
+		# noinspection PyArgumentList
+		return super().__exit__(*exc_details)
+
+# Context manager that provides an ExitStack wrapped in DelayKeyboardInterrupt
 @contextlib.contextmanager
 def AtomicExitStack() -> ContextManager[contextlib.ExitStack[Optional[bool]]]:
 	with DelayKeyboardInterrupt(), contextlib.ExitStack() as stack:
 		yield stack
+
+# Context manager that provides a RevertStack wrapped in DelayKeyboardInterrupt
+@contextlib.contextmanager
+def AtomicRevertStack() -> ContextManager[RevertStack]:
+	with DelayKeyboardInterrupt(), RevertStack() as rstack:
+		yield rstack
+
+# Affix class
+@dataclasses.dataclass
+class Affix:                           # /path/to/file.ext --> /path/to/{prefix}file{root_suffix}.ext{suffix}
+	prefix: Optional[str] = None       # /path/to/file.ext --> /path/to/{prefix}file.ext
+	root_suffix: Optional[str] = None  # /path/to/file.ext --> /path/to/file{root_suffix}.ext
+	suffix: Optional[str] = None       # /path/to/file.ext --> /path/to/file.ext{suffix}
+
+# Context manager that performs a reversible write to a file by using a temporary file (in the same directory) as an intermediate and performing an atomic file replace (completely reversible on future exception if a RevertStack is supplied)
+@contextlib.contextmanager
+def SafeOpenForWrite(
+	path: str,                             # path = Path of the file to safe-write to
+	mode: str = 'w',                       # mode = File opening mode (should always be a 'write' mode that ensures the file is created, i.e. including 'w' or 'x')
+	*,                                     # Keyword arguments only beyond here
+	temp_affix: Optional[Affix] = None,    # temp_affix = Affix to use for the temporary file path to write to before atomically replacing the target file with the temporary written file (defaults to a suffix of '.tmp')
+	rstack: Optional[RevertStack] = None,  # rstack = If a RevertStack is provided, callbacks are pushed to the stack to make all changes reversible on exception
+	backup_affix: Optional[Affix] = None,  # backup_affix = If a RevertStack is provided, the affix to use for the backup file path (defaults to a suffix of '.bak')
+	**open_kwargs,                         # open_kwargs = Keyword arguments to provide to the internal call to open() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
+) -> ContextManager[Union[TextIO, BinaryIO]]:
+
+	if 'w' not in mode and 'x' not in mode:
+		raise ValueError(f"File opening mode must be a truncating write mode (w or x): {mode}")
+	if 'b' not in mode:
+		open_kwargs.setdefault('encoding', 'utf-8')
+		open_kwargs.setdefault('newline', '\n')
+
+	dirname, basename = os.path.split(path)
+	root, ext = os.path.splitext(basename)
+
+	if temp_affix is None:
+		temp_affix = Affix(prefix=None, root_suffix=None, suffix='.tmp')
+	temp_path = os.path.join(dirname, f"{temp_affix.prefix or ''}{root}{temp_affix.root_suffix or ''}{ext}{temp_affix.suffix or ''}")
+
+	with RevertStack() as temp_rstack:
+		@temp_rstack.callback
+		def unlink_temp():
+			with contextlib.suppress(FileNotFoundError):
+				os.unlink(temp_path)
+		yield temp_rstack.enter_context_always(open(temp_path, mode=mode, **open_kwargs))
+
+	if rstack is not None:
+
+		if backup_affix is None:
+			backup_affix = Affix(prefix=None, root_suffix=None, suffix='.bak')
+		backup_path = os.path.join(dirname, f"{backup_affix.prefix or ''}{root}{backup_affix.root_suffix or ''}{ext}{backup_affix.suffix or ''}")
+
+		@rstack.callback_always
+		def unlink_backup():
+			with contextlib.suppress(FileNotFoundError):
+				os.unlink(backup_path)
+
+		try:
+			shutil.copy2(src=path, dst=backup_path)
+			@rstack.callback  # noqa
+			def revert_backup():
+				os.replace(src=backup_path, dst=path)  # Internally atomic operation
+		except FileNotFoundError:
+			@rstack.callback
+			def unlink_path():
+				with contextlib.suppress(FileNotFoundError):
+					os.unlink(path)
+
+	try:
+		os.replace(src=temp_path, dst=path)  # Internally atomic operation
+	except OSError:
+		with contextlib.suppress(FileNotFoundError):
+			os.unlink(temp_path)
+		raise
 
 # Lock file class that uses verbose prints to inform about the lock acquisition process in case it isn't quick
 class LockFile:
