@@ -185,20 +185,21 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 					data = generic_typ(*data)
 				else:
 					data = generic_typ(data)
-			elif isinstance(data, dict) and generic_typ is not dict and issubclass(generic_typ, dict):
+			elif isinstance(data, dict) and issubclass(generic_typ, dict):
 				key_typ = typing.get_args(typ)[0]
 				generic_key_typ = typing.get_origin(key_typ) or key_typ
 				if issubclass(generic_key_typ, (int, float)):
-					data = {generic_key_typ(key): value for key, value in data.items()}
-				if issubclass(generic_typ, collections.Counter):
-					data = generic_typ(data)
-				elif hasattr(generic_typ, 'default_factory'):
-					newdata = generic_typ(None)  # noqa / Note: We have no way of knowing what the default factory was prior to JSON serialization...
-					for key, value in data.items():
-						newdata[key] = value
-					data = newdata
-				else:
-					data = generic_typ(data.items())
+					data = {(generic_key_typ(key) if isinstance(key, str) else key): value for key, value in data.items()}
+				if generic_typ is not dict:
+					if issubclass(generic_typ, collections.Counter):
+						data = generic_typ(data)
+					elif hasattr(generic_typ, 'default_factory'):
+						newdata = generic_typ(None)  # noqa / Note: We have no way of knowing what the default factory was prior to JSON serialization...
+						for key, value in data.items():
+							newdata[key] = value
+						data = newdata
+					else:
+						data = generic_typ(data.items())
 		if dataclasses.is_dataclass(typ):
 			if not (isinstance(data, dict) and all(isinstance(key, str) for key in data.keys())):
 				raise TypeError(f"Invalid dict data for conversion to dataclass {get_class_str(typ)}: {data}")
