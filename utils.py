@@ -34,11 +34,11 @@ logging.getLogger("filelock").setLevel(logging.WARNING)
 
 # In-place printing (replace the current line and don't advance to the next line)
 def print_in_place(obj: Any):
-	print(f"\x1b[2K\r{obj}", end='')
+	print(f"\x1b[2K\r{obj}", end='', flush=True)
 
 # Clear current line
 def print_clear_line():
-	print("\x1b[2K\r", end='')
+	print("\x1b[2K\r", end='', flush=True)
 
 # Format a duration as a single nearest appropriate integral time unit (e.g. one of 15s, 3m, 6h, 4d)
 def format_duration(seconds: float) -> str:
