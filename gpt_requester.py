@@ -566,18 +566,17 @@ class GPTRequester:
 			log.warning(f"{self.name_prefix}: {DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
-		if self.client.base_url == 'https://api.openai.com/v1/':
-			log.info(f"{self.name_prefix}: View the OpenAI rate/usage limits: https://platform.openai.com/settings/organization/limits")
-			log.info(f"{self.name_prefix}: Manage OpenAI file storage: https://platform.openai.com/storage")
-			log.info(f"{self.name_prefix}: Manage OpenAI batches: https://platform.openai.com/batches")
-			log.info(f"{self.name_prefix}: Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
-
 		self.endpoint = endpoint
 		if self.endpoint is None:
 			self.endpoint = os.environ.get("OPENAI_ENDPOINT")
 		if self.endpoint is None:
 			self.endpoint = DEFAULT_ENDPOINT
 		log.info(f"{self.name_prefix}: Using client base URL '{self.client.base_url}' with endpoint '{self.endpoint}'")
+		if self.client.base_url == 'https://api.openai.com/v1/':
+			log.info(f"{self.name_prefix}: View the OpenAI rate/usage limits: https://platform.openai.com/settings/organization/limits")
+			log.info(f"{self.name_prefix}: Manage OpenAI file storage: https://platform.openai.com/storage")
+			log.info(f"{self.name_prefix}: Manage OpenAI batches: https://platform.openai.com/batches")
+			log.info(f"{self.name_prefix}: Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
 
 		self.auto_parse = auto_parse
 		log.info(f"{self.name_prefix}: Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
