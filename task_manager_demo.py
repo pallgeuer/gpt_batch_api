@@ -97,7 +97,7 @@ class CharCodesTask(task_manager.TaskManager):
 							),
 						))
 
-			if self.commit_requests():
+			if self.GR.P and self.commit_requests():
 				return False
 
 		return True

@@ -566,6 +566,12 @@ class GPTRequester:
 			log.warning(f"{self.name_prefix}: {DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
+		if self.client.base_url == 'https://api.openai.com/v1/':
+			log.info(f"{self.name_prefix}: View the OpenAI rate/usage limits: https://platform.openai.com/settings/organization/limits")
+			log.info(f"{self.name_prefix}: Manage OpenAI file storage: https://platform.openai.com/storage")
+			log.info(f"{self.name_prefix}: Manage OpenAI batches: https://platform.openai.com/batches")
+			log.info(f"{self.name_prefix}: Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
+
 		self.endpoint = endpoint
 		if self.endpoint is None:
 			self.endpoint = os.environ.get("OPENAI_ENDPOINT")
@@ -862,13 +868,11 @@ class GPTRequester:
 		if any(req_id > self.S.queue.max_request_id for req_id in flat_req_id_bounds):
 			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.S.queue.max_request_id}: {req_id_intervals}")
 
-		batch_state_requests = sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)
-		if not self.S.task_push_stats.total_requests >= self.session_push_stats.total_requests >= batch_state_requests:
-			raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of requests: {self.S.task_push_stats.total_requests} vs {self.session_push_stats.total_requests} vs {batch_state_requests}")
-		batch_state_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is not None)
+		if self.S.task_push_stats.total_requests < self.session_push_stats.total_requests:
+			raise ValueError(f"Unexpected push stats of task vs session in terms of requests: {self.S.task_push_stats.total_requests} < {self.session_push_stats.total_requests}")
 		for field in dataclasses.fields(TokensCost):  # noqa
-			if not getattr(self.S.task_push_stats.total_tokens_cost, field.name) >= getattr(self.session_push_stats.total_tokens_cost, field.name) >= getattr(batch_state_tokens_cost, field.name):
-				raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of {field.name}: {getattr(self.S.task_push_stats.total_tokens_cost, field.name)} vs {getattr(self.session_push_stats.total_tokens_cost, field.name)} vs {getattr(batch_state_tokens_cost, field.name)}")
+			if getattr(self.S.task_push_stats.total_tokens_cost, field.name) < getattr(self.session_push_stats.total_tokens_cost, field.name):
+				raise ValueError(f"Unexpected push stats of task vs session vs batch state in terms of {field.name}: {getattr(self.S.task_push_stats.total_tokens_cost, field.name)} < {getattr(self.session_push_stats.total_tokens_cost, field.name)}")
 
 		for batch in self.S.batches:
 			batch_tokens_cost = TokensCost().add(req_info.tokens_cost for req_info in batch.request_info.values())
@@ -1283,17 +1287,18 @@ class GPTRequester:
 
 					try:
 						batch_status = self.client.batches.retrieve(batch_id=batch.remote.batch.id)
-						if batch_status.id != batch.remote.batch.id or batch_status.input_file_id != batch.remote.batch.input_file_id:
-							raise ValueError(f"Remote returned incorrect IDs for query: {batch_status.id} != {batch.remote.batch.id} or {batch_status.input_file_id} != {batch.remote.batch.input_file_id}")
-						if batch_status.status != batch.remote.batch.status:
-							status_changed[batch_status.status].append(batch.id)
-						batch.remote.batch = batch_status
-						status_updated = True
-						if batch.remote.batch.status in FINISHED_BATCH_STATUSES:
-							batch.remote.finished = True
-							any_finished = True
-							if only_check_finished:
-								break
+						if batch_status != batch.remote.batch:
+							if batch_status.id != batch.remote.batch.id or batch_status.input_file_id != batch.remote.batch.input_file_id:
+								raise ValueError(f"Remote returned incorrect IDs for query: {batch_status.id} != {batch.remote.batch.id} or {batch_status.input_file_id} != {batch.remote.batch.input_file_id}")
+							if batch_status.status != batch.remote.batch.status:
+								status_changed[batch_status.status].append(batch.id)
+							batch.remote.batch = batch_status
+							status_updated = True
+							if batch.remote.batch.status in FINISHED_BATCH_STATUSES:
+								batch.remote.finished = True
+								any_finished = True
+								if only_check_finished:
+									break
 					except (openai.OpenAIError, ValueError) as e:
 						log.error(f"{self.name_prefix}: Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
 
