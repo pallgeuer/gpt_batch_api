@@ -1183,7 +1183,7 @@ class GPTRequester:
 							file_object = self.client.files.create(file=open(batch.local_jsonl, 'rb'), purpose='batch')
 							rstack.callback(self.delete_remote_file, file_id=file_object.id)
 							if file_object.bytes != batch.local_jsonl_size:
-								log.warning(f"{self.name_prefix}: Uploaded input JSONL file {file_object.id} for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
+								log.warning(f"{self.name_prefix}: Uploaded input JSONL file '{file_object.id}' for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
 
 							# noinspection PyTypeChecker
 							batch_object = self.client.batches.create(
@@ -1215,7 +1215,7 @@ class GPTRequester:
 							self.validate_state_queue(clean=False)
 							self.state.save(rstack=rstack)
 
-						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as {batch.remote.batch.id} based on {batch.remote.file.id} of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
+						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as '{batch.remote.batch.id}' based on '{batch.remote.file.id}' of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
 
 						remote_batches = next_remote_batches
 						remote_requests = next_remote_requests
@@ -1244,25 +1244,25 @@ class GPTRequester:
 	def delete_remote_file(self, file_id: str):
 		# file_id = The remote file ID to delete
 		if self.dryrun:
-			log.warning(f"{self.name_prefix}: {DRYRUN}Not deleting remote file {file_id}")
+			log.warning(f"{self.name_prefix}: {DRYRUN}Not deleting remote file '{file_id}'")
 		else:
 			try:
 				deleted_file = self.client.files.delete(file_id=file_id)
 				assert deleted_file.id == file_id, "Remote file ID mismatch during deletion"
 			except Exception as e:  # noqa
-				log.error(f"{self.name_prefix}: Failed to delete remote file {file_id} due to {utils.get_class_str(e)}: {e}")
+				log.error(f"{self.name_prefix}: Failed to delete remote file '{file_id}' due to {utils.get_class_str(e)}: {e}")
 
 	# Cancel a remote batch (only log an error if cancellation fails, never raise an exception)
 	def cancel_remote_batch(self, batch_id: str):
 		# batch_id = The remote batch ID to cancel
 		if self.dryrun:
-			log.warning(f"{self.name_prefix}: {DRYRUN}Not canceling remote batch {batch_id}")
+			log.warning(f"{self.name_prefix}: {DRYRUN}Not canceling remote batch '{batch_id}'")
 		else:
 			try:
 				cancelled_batch = self.client.batches.cancel(batch_id=batch_id)
 				assert cancelled_batch.id == batch_id, "Remote batch ID mismatch during cancellation"
 			except Exception as e:  # noqa
-				log.error(f"{self.name_prefix}: Failed to cancel remote batch {batch_id} due to {utils.get_class_str(e)}: {e}")
+				log.error(f"{self.name_prefix}: Failed to cancel remote batch '{batch_id}' due to {utils.get_class_str(e)}: {e}")
 
 	# Retrieve the number of unpushed local batches
 	def num_unpushed_batches(self) -> int:
