@@ -103,6 +103,38 @@ def get_type_str(typ: type) -> str:
 	else:
 		return typ_str
 
+# Error logger that only logs the first N errors then provides a summary at the end
+class ErrorSummaryLogger:
+
+	def __init__(self, log: logging.Logger, show_errors: int):
+		# log = Logger to use
+		# show_errors = Number of first-received errors to log, before waiting until finalization to summarize how many further/total errors occured
+		self.log = log
+		self.show_errors = show_errors
+		self.num_errors = 0
+
+	def reset(self):
+		self.num_errors = 0
+
+	def error(self, msg: str) -> bool:
+		# msg = Error message to conditionally log
+		# Returns whether the message was logged
+		self.num_errors += 1
+		if self.num_errors <= self.show_errors:
+			self.log.error(msg)
+			return True
+		else:
+			return False
+
+	def finalize(self, msg_fn: Callable[[int, int], str]) -> bool:
+		# msg_fn = Callable that generates a summary error message string to log given how many errors were hidden and how many errors there were in total
+		# Returns whether a final message was logged (a final message is only logged if more errors occurred than were shown)
+		if self.num_errors > self.show_errors:
+			self.log.error(msg_fn(self.num_errors - self.show_errors, self.num_errors))
+			return True
+		else:
+			return False
+
 #
 # Dataclasses
 #
