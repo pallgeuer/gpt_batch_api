@@ -514,6 +514,7 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
+		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
 		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 
 		cost_input_direct_mtoken: float = 2.50,               # The cost per million direct input tokens (1M tokens ~ 750K words)
@@ -580,8 +581,11 @@ class GPTRequester:
 			log.info(f"{self.name_prefix}: Manage OpenAI batches: https://platform.openai.com/batches")
 			log.info(f"{self.name_prefix}: Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
 
+		self.show_errors = show_errors
+		if self.show_errors < 1:
+			raise ValueError(f"Number of errors to show/log must be at least 1: {self.show_errors}")
 		self.auto_parse = auto_parse
-		log.info(f"{self.name_prefix}: Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
+		log.info(f"{self.name_prefix}: Showing up to {self.show_errors} errors explicitly, Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
 
 		self.cost_input_direct_mtoken = cost_input_direct_mtoken
 		self.cost_input_cached_mtoken = cost_input_cached_mtoken
@@ -765,6 +769,7 @@ class GPTRequester:
 		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
+		add_argument(name='show_errors', type=int, metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
 		if include_auto_parse:
 			add_argument(name='auto_parse', type=bool, help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
 
