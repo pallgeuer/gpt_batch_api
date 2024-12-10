@@ -18,6 +18,7 @@ import dataclasses
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
 import httpx
 import openai
+import openai.types.chat as openai_chat
 import openai.lib._parsing as openai_parsing  # noqa
 import openai._utils as openai_utils  # noqa
 from .logger import log
@@ -482,6 +483,41 @@ class QueueFile:
 
 	def unload(self):
 		self.pool_queue = None
+
+#
+# Responses
+#
+
+# Response information class
+@dataclasses.dataclass(frozen=True)
+class ResponseInfo:
+	model: str                                                                            # Model that was used for the response
+	system_fingerprint: str                                                               # System fingerprint of the system that generated the response (empty string if none provided by remote)
+	payload: Union[openai_chat.ChatCompletion, openai_chat.ParsedChatCompletion[object]]  # Response payload (type depends on endpoint and auto-parsing)
+	usage: dict[str, Union[int, float, dict[str, Union[int, float]]]]                     # Response usage (part of the raw payload) as a nested dict
+
+# Error information class
+@dataclasses.dataclass(frozen=True)
+class ErrorInfo:
+	type: str            # Type of the error
+	subtype: str         # Sub-type of the error (may be empty string if there is no division by sub-type for this error type)
+	data: Optional[Any]  # Optional data associated with the error (the type of the data depends on the type of the error)
+	msg: str             # String message summarizing the error
+
+# Result information class
+@dataclasses.dataclass(frozen=True)
+class ResultInfo:
+	req_id: int                        # Request ID
+	req_payload: dict[str, Any]        # Request payload (JSON-loaded)
+	req_info: RequestInfo              # Request information
+	resp_info: Optional[ResponseInfo]  # Response information (if available)
+	err_info: Optional[ErrorInfo]      # Error information (if errored)
+
+# Batch result class
+@dataclasses.dataclass(frozen=True)
+class BatchResult:
+	batch: BatchState            # Final batch state (prior to any removal of overdetailed per-request information for space reasons)
+	info: dict[int, ResultInfo]  # Result information for each request ID in the batch (in ascending request ID order, guaranteed to be for exactly all requests in the batch)
 
 #
 # GPT requester
