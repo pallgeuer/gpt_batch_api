@@ -1240,6 +1240,17 @@ class GPTRequester:
 
 		return batch_congestion
 
+	# Delete a local file (only log an error if deletion fails, never raise an exception)
+	def delete_local_file(self, path: str):
+		# path = Local file path to delete
+		if self.dryrun:
+			log.warning(f"{self.name_prefix}: {DRYRUN}Not deleting local file '{path}'")
+		else:
+			try:
+				os.unlink(path)
+			except Exception as e:  # noqa
+				log.error(f"{self.name_prefix}: Failed to delete local file '{path}' due to {utils.get_class_str(e)}: {e}")
+
 	# Delete a remote file (only log an error if deletion fails, never raise an exception)
 	def delete_remote_file(self, file_id: str):
 		# file_id = The remote file ID to delete
