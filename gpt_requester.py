@@ -130,9 +130,9 @@ class QueueState:
 	max_request_id: int = 0                                                                         # Maximum request ID used thus far (0 = No request ID used so far)
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the request queue (NOT including the request pool, ordered by ascending request ID)
 
-# Batch request information class
+# Request information class
 @dataclasses.dataclass(frozen=True)
-class BatchRequestInfo:
+class RequestInfo:
 	meta: Optional[dict[str, Any]]        # Optional custom metadata that is associated with this request (JSON-compatible)
 	tokens_cost: TokensCost               # The approximate token count and cost of the request payload
 	parse_info: Optional[dict[str, Any]]  # Data required for or associated with auto-parsing of the request
@@ -147,15 +147,15 @@ class RemoteBatchState:
 # Batch state class
 @dataclasses.dataclass
 class BatchState:
-	id: int = 0                                                                          # Unique monotonic ID corresponding to the batch
-	local_jsonl: str = ''                                                                # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
-	local_jsonl_size: int = 0                                                            # Number of bytes in the local JSONL batch input file
-	num_requests: int = 0                                                                # Number of requests in the batch
-	request_info: dict[int, BatchRequestInfo] = dataclasses.field(default_factory=dict)  # The approximate token counts and costs of each request
-	tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)              # The total approximate token count and cost across all requests in the batch
-	full_batch: bool = False                                                             # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
-	reasons: list[str] = dataclasses.field(default_factory=list)                         # String reasons of what triggered the formation of the batch
-	remote: Optional[RemoteBatchState] = None                                            # Remote state of the batch once it has been pushed
+	id: int = 0                                                                     # Unique monotonic ID corresponding to the batch
+	local_jsonl: str = ''                                                           # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
+	local_jsonl_size: int = 0                                                       # Number of bytes in the local JSONL batch input file
+	num_requests: int = 0                                                           # Number of requests in the batch
+	request_info: dict[int, RequestInfo] = dataclasses.field(default_factory=dict)  # The extra information pertaining to each request
+	tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)         # The total approximate token count and cost across all requests in the batch
+	full_batch: bool = False                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
+	reasons: list[str] = dataclasses.field(default_factory=list)                    # String reasons of what triggered the formation of the batch
+	remote: Optional[RemoteBatchState] = None                                       # Remote state of the batch once it has been pushed
 
 # Push stats class
 @dataclasses.dataclass
@@ -1044,7 +1044,7 @@ class GPTRequester:
 					batch.local_jsonl_size = next_local_jsonl_size
 					batch.num_requests = next_num_requests
 					assert req_id not in batch.request_info and cached_req.info.tokens_cost.is_valid()
-					batch.request_info[req_id] = BatchRequestInfo(meta=cached_req.item.req.meta, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
+					batch.request_info[req_id] = RequestInfo(meta=cached_req.item.req.meta, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
 					batch.tokens_cost = next_tokens_cost
 
 				index += 1
