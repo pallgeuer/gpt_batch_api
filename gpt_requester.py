@@ -271,7 +271,7 @@ class State:
 	queue: QueueState = dataclasses.field(default_factory=QueueState)          # State of the request queue
 	max_batch_id: int = 0                                                      # Maximum batch ID used thus far (0 = No batch ID used so far)
 	batches: list[BatchState] = dataclasses.field(default_factory=list)        # States of all batches that are currently pending or in progress (in ascending batch ID order)
-	batch_history: list[BatchState] = dataclasses.field(default_factory=list)  # TODO: History of the final states of the completed batches (with some overdetailed per-request information removed for space reasons)
+	batch_history: list[BatchState] = dataclasses.field(default_factory=list)  # History of the final states of the completed batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
 	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)  # Task push statistics
 	metrics: Metrics = dataclasses.field(default_factory=Metrics)              # TODO: Completed request metrics
 
@@ -866,6 +866,13 @@ class GPTRequester:
 			raise ValueError(f"The request IDs in the request queue are not strictly ascending: {list(self.S.queue.request_id_meta.keys())}")
 		if not utils.is_ascending((pool_request_ids := [cached_req.item.id for cached_req in self.P]), strict=True):
 			raise ValueError(f"The request IDs in the request pool are not strictly ascending: {pool_request_ids}")
+
+		for batch in self.S.batch_history:
+			if batch.request_info:
+				raise ValueError(f"The request IDs in historical batch {batch.id} were not cleared")
+		batch_id_history = [batch.id for batch in self.S.batch_history]
+		if not utils.is_ascending(batch_id_history, strict=True):
+			raise ValueError(f"The batch IDs in the batch history are not strictly ascending: {batch_id_history}")
 
 		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in (*(batch.request_info.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
 		flat_req_id_bounds = [req_id for req_id_interval in req_id_intervals for req_id in req_id_interval if req_id is not None]
