@@ -464,7 +464,7 @@ class QueueFile:
 				endpoint=self.endpoint,
 				token_estimator=self.token_estimator,
 				token_coster=self.token_coster,
-			) for line in file.readlines()])
+			) for line in file])
 		log.info(f"{self.name}: Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
 
 	def save(self, rstack: utils.RevertStack):
