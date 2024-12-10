@@ -336,14 +336,16 @@ class TaskManager:
 		raise NotImplementedError
 
 	# TODO: Calls some abstract methods to do the task-specific processing
-	def process_batches(self) -> bool:
+	def process_batches(self):
 		# TODO: DOC
-		# TODO: RETURN self.GR.num_unfinished_batches() ORRRR the return value of GR.process_batches, which is potentially (rather not??) how many finished batches were processed?
-		# TODO: Return whether there are some ongoing started batches AFTER processing any finished ones now and successfully updating the task state and output file
+
 		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)
 		# TODO: Log how many samples errored for whatever reasons (be specific), and how many were internally auto-retried by GPT requester
+
 		for rstack, TODO in self.GR.process_batches():
-			pass
+			print("BLAH")  # TODO: TEMP
+
+		# TODO: assert self.GR.num_finished_batches() <= 0
 
 	# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 # EOF
