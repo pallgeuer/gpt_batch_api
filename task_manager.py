@@ -63,7 +63,7 @@ class TaskStateFile:
 					self.create(rstack=rstack)
 				rstack.push_always(self.clear_reinit_meta)
 				assert self.state is not None
-				log.info(f"{self.name}: Task metadata:\n{'\n'.join(f'    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.state.meta.items())}")
+				log.info(f"{self.name}: Task metadata:{''.join(f'\n    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.state.meta.items())}")
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
 		return self

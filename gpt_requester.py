@@ -3,7 +3,9 @@
 # Imports
 from __future__ import annotations
 import os
+import re
 import copy
+import http
 import json
 import time
 import getpass
@@ -27,6 +29,8 @@ from . import tokens, utils
 # Constants
 DEFAULT_ENDPOINT = '/v1/chat/completions'
 FINISHED_BATCH_STATUSES = {'failed', 'completed', 'expired', 'cancelled'}
+RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+RETRYABLE_ERROR_CODES = {'batch_expired', 'batch_cancelled'}
 DRYRUN = '\x1b[38;5;226m[DRYRUN]\x1b[0m '
 
 # Logging configuration
@@ -491,18 +495,19 @@ class QueueFile:
 # Response information class
 @dataclasses.dataclass(frozen=True)
 class ResponseInfo:
+	payload: Union[openai_chat.ChatCompletion, openai_chat.ParsedChatCompletion[object]]  # Response payload (type depends on endpoint and auto-parsing)
 	model: str                                                                            # Model that was used for the response
 	system_fingerprint: str                                                               # System fingerprint of the system that generated the response (empty string if none provided by remote)
-	payload: Union[openai_chat.ChatCompletion, openai_chat.ParsedChatCompletion[object]]  # Response payload (type depends on endpoint and auto-parsing)
 	usage: dict[str, Union[int, float, dict[str, Union[int, float]]]]                     # Response usage (part of the raw payload) as a nested dict
 
 # Error information class
 @dataclasses.dataclass(frozen=True)
 class ErrorInfo:
-	type: str            # Type of the error
-	subtype: str         # Sub-type of the error (may be empty string if there is no division by sub-type for this error type)
-	data: Optional[Any]  # Optional data associated with the error (the type of the data depends on the type of the error)
-	msg: str             # String message summarizing the error
+	fatal: bool                 # Whether the error is fatal (True, should raise an exception) or retryable (False)
+	type: str                   # Type of the error
+	msg: str                    # String message summarizing the error
+	subtype: str = ''           # Sub-type of the error (may be empty string if there is no division by sub-type for this error type)
+	data: Optional[Any] = None  # Optional data associated with the error (the type of the data depends on the type of the error)
 
 # Result information class
 @dataclasses.dataclass(frozen=True)
@@ -516,8 +521,9 @@ class ResultInfo:
 # Batch result class
 @dataclasses.dataclass(frozen=True)
 class BatchResult:
-	batch: BatchState            # Final batch state (prior to any removal of overdetailed per-request information for space reasons)
-	info: dict[int, ResultInfo]  # Result information for each request ID in the batch (in ascending request ID order, guaranteed to be for exactly all requests in the batch)
+	batch: BatchState                      # Final batch state including final remote state (prior to any removal of overdetailed per-request information for the purpose of saving the batch to the history)
+	errors: list[openai.types.BatchError]  # List of any encountered batch errors
+	info: dict[int, ResultInfo]            # Result information for each request ID in the batch (in ascending request ID order, guaranteed to be for exactly all requests in the batch)
 
 #
 # GPT requester
@@ -1411,45 +1417,238 @@ class GPTRequester:
 				printed_str = print_str
 
 	# Process any finished remote batches (unless dry run)
-	def process_batches(self) -> Iterable[tuple[utils.RevertStack, list[Any]]]:  # TODO: Update 'list[Any]' to be more specific
-		# TODO: Explain the idea of this function and how it is intended to be used to update task-state (and output file) atomically etc (see similar explanation in commit_requests())
-		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next()
-
-		return  # TODO: TEMP
+	def process_batches(self) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
+		# This method is implemented as a generator that returns the results for one batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
+		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
+		# Error handling comments guide:
+		#   [NO ERROR] = The given situation is not innately an error
+		#   [COVERED] = The given situation does not require explicit error consequences as other errors are guaranteed to trigger later anyway that cover this situation (if there is truly a problem)
+		#   [DELAYED RAISE] = The fact that this situation occurred is noted, a corresponding exception will be raised later on, and the batch state will be kept as finished/unprocessed
+		#   [RETRYABLE] = The given situation is retryable and thus only needs to be remembered as such
 
 		self.update_remote_batch_state(only_check_finished=False, log_save=True)  # Does not do much in case of dry run
 
-		for batch in self.S.batches:
+		delayed_raise = utils.DelayedRaise()
+		for batch in self.S.batches.copy():
+
+			delayed_raise.new_section()
 			if batch.remote is not None and batch.remote.finished:
 
 				if self.dryrun:
 					log.warning(f"{self.name_prefix}: {DRYRUN}Not processing finished batch {batch.id} ({batch.remote.file.id}) containing {batch.num_requests} requests")
 				else:
 
-					log.info(f"{self.name_prefix}: Processing finished batch {batch.id} ({batch.remote.file.id}) containing {batch.num_requests} requests...")
+					log.info(f"{self.name_prefix}: Processing finished batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests...")
 
-					if batch.remote.batch.status != 'completed':
-						log.error(f"{self.name_prefix}: Batch {batch.id} ({batch.remote.batch.id}) was overall unsuccessful with status '{batch.remote.batch.status}' and errors: {batch.remote.batch.errors}")
+					batch_errors: list[openai.types.BatchError] = batch.remote.batch.errors.data if batch.remote.batch.errors is not None and batch.remote.batch.errors.data is not None else []
+					if batch.remote.batch.status == 'failed':
+						log.error(f"{self.name_prefix}: Batch {batch.id} failed with errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
+						delayed_raise.add(msg=f"Batch status is '{batch.remote.batch.status}'")  # [DELAYED RAISE]
+					elif batch.remote.batch.status != 'completed' or batch_errors:
+						# [COVERED] If this occurs then we just log an error, and continue trying to parse the batch anyway and deal with any errors that we encounter doing that, because that's the only thing that actually matters (e.g. expired and cancelled batches can still have valid results)
+						log.error(f"{self.name_prefix}: Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
 
-					# TODO: Get an example output
-					if batch.remote.batch.output_file_id:
-						batch_output = tuple(json.loads(line) for line in self.client.files.content(file_id=batch.remote.batch.output_file_id).text.splitlines() if line)
-					else:
-						batch_output = ()
-					# TODO: Also batch_errors
-					# TODO: Merge to single list (error trumps response)
+					log.info(f"{self.name_prefix}: Loading batch {batch.id} input JSONL: {batch.local_jsonl}")
+					req_payload_map: dict[int, dict[str, Any]] = {}  # Maps: Request ID --> Request payload
+					with open(batch.local_jsonl, 'r', encoding='utf-8') as file:
+						file_size = utils.get_file_size(file)
+						try:
+							for line in file:
+								req = json.loads(line)
+								if req['url'] != self.endpoint:
+									raise ValueError(f"Endpoint mismatch: {req['url']} vs {self.endpoint}")
+								req_id = int(re.fullmatch(r'id-([0-9]+)', req['custom_id']).group(1))
+								if req_id in req_payload_map:
+									raise ValueError(f"Duplicate request ID: {req_id}")
+								req_payload_map[req_id] = req['body']
+						except (json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError) as e:
+							raise ValueError("Unexpected input JSONL data") from e
+					if len(req_payload_map) != batch.num_requests:
+						raise ValueError(f"Input JSONL has unexpected number of requests: {len(req_payload_map)} vs {batch.num_requests}")
+					elif req_payload_map.keys() != batch.request_info.keys():
+						raise ValueError(f"Input JSONL does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(req_payload_map.keys() ^ batch.request_info.keys())}")
+					elif file_size != batch.local_jsonl_size:
+						raise ValueError(f"Input JSONL has unexpected file size: {file_size} vs {batch.local_jsonl_size}")
+					log.info(f"{self.name_prefix}: Loaded {batch.num_requests} requests of endpoint '{self.endpoint}' from batch {batch.id} input JSONL of size {utils.format_size_si(batch.local_jsonl_size)}")
 
-					yield None, None  # TODO
+					result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
+					err_line_json, err_req_out_keys, err_req_id_fail, err_req_id_bad, err_req_id_dupl, err_resp_retry, err_resp_fatal = [utils.ErrorSummaryLogger(log=log, show_errors=self.show_errors) for _ in range(7)]
 
-		# TODO: Show up to 10 request errors?
+					for remote_file_id in (batch.remote.batch.error_file_id, batch.remote.batch.output_file_id):
+
+						if remote_file_id is None:
+							continue  # [NO ERROR] It is okay for e.g. an error file to not exist as long as then all requests are covered in the output file (or vice versa)
+
+						try:
+							file_content = self.client.files.content(file_id=remote_file_id)
+						except openai.OpenAIError as e:
+							log.error(f"{self.name_prefix}: Failed to retrieve remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
+							continue  # [COVERED] If the file contained requests, a request IDs mismatch will later occur (even if this is just a connectivity issue, there is not really much useful work that can be done at all without connectivity, so it's okay to error out)
+
+						for line_num, line in enumerate(file_content.text.splitlines(), 1):
+
+							if not line:
+								continue  # [NO ERROR] Is actually not expected to occur, but skipping empty lines is harmless and no error in itself
+
+							try:
+								request_output = json.loads(line)
+							except json.JSONDecodeError as e:
+								err_line_json.error(f"{self.name_prefix}: Failed to parse line {line_num} to JSON in remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
+								continue  # [DELAYED RAISE]
+
+							if 'custom_id' not in request_output or 'error' not in request_output or 'response' not in request_output:
+								err_req_out_keys.error(f"{self.name_prefix}: Request output does not have the expected keys on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								continue  # [DELAYED RAISE]
+
+							custom_id = request_output['custom_id']
+							if isinstance(custom_id, str) and (match := re.fullmatch(r'id-([0-9]+)', custom_id)):
+								req_id = int(match.group(1))
+							else:
+								err_req_id_fail.error(f"{self.name_prefix}: Failed to parse the request ID from line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								continue  # [DELAYED RAISE]
+
+							if req_id not in req_payload_map or req_id not in batch.request_info:
+								err_req_id_bad.error(f"{self.name_prefix}: Unexpected request ID {req_id} in line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								continue  # [DELAYED RAISE]
+							req_payload = req_payload_map[req_id]
+							req_info = batch.request_info[req_id]
+
+							if req_id in result_info_map:
+								err_req_id_dupl.error(f"{self.name_prefix}: Encountered duplicate request ID {req_id} on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								continue  # [DELAYED RAISE]
+
+							err_info = None
+							resp_info = None
+							if not (response := request_output['response']):
+								err_info = ErrorInfo(fatal=True, type='ResponseEmpty', msg='Response field is empty')
+							elif (status_code := response.get('status_code', None)) is None:
+								err_info = ErrorInfo(fatal=True, type='ResponseStatusCode', subtype='MissingNull', msg='Response HTTP status code is missing or null')
+							elif status_code != 200:
+								try:
+									status_code_msg = f"Response HTTP {status_code}: {http.HTTPStatus(status_code).phrase}"
+								except ValueError:
+									status_code_msg = f"Response HTTP {status_code}: Unknown Error"
+								err_info = ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='ResponseStatusCode', subtype='NotOK', data=status_code, msg=status_code_msg)
+							elif not (resp_payload := response.get('body', None)):
+								err_info = ErrorInfo(fatal=True, type='ResponseBodyEmpty', msg='Response body is empty')
+							else:
+
+								# TODO: Extract model/sysfing/usage if possible
+								pass  # TODO: Extract model and fingerprint if at ALL possible
+								# TODO: As of here, usage/metrics/response info MUST be collected no matter what if it exists, even if a further error is present (thus both ErrorInfo and ResponseInfo can exist at same time to count usage/model/fingerprint of errored request - although in practice that shouldn't happen)
+								# TODO: Construct a ResponseInfo
+
+								# 	if self.endpoint == '/v1/chat/completions':
+								# 		resp_payload: openai_chat.ChatCompletion  # TODO: Parse resp_payload: dict[str, Any] --> openai_chat.ChatCompletion
+								# 		resp_model = resp_payload.model
+								# 		resp_system_fingerprint = resp_payload.system_fingerprint if resp_payload.system_fingerprint is not None else ''
+								# 		resp_usage = resp_payload['usage']
+								# 		# TODO: finish_reason / refusal (multiple choices! see structured outputs edge case handling?)
+								# 		if req_info.parse_info is not None:
+								# 			pass  # TODO: Convert ChatCompletion -> ParsedChatCompletion[object] in terms of tools and response_format => [careful as this raises exceptions and stuff] openai_parsing.parse_chat_completion(response_format=self.type_cache.retrieve_type(serial=item.parse_info['response_format_type']) if 'response_format_type' in item.parse_info else item.req.payload.get('response_format', openai.NOT_GIVEN), input_tools=item.req.payload.get('tools', openai.NOT_GIVEN), chat_completion=COMPLETION)
+								# 	else:
+								# 		raise ValueError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
+								#
+								# 	result_info_map[req_id] = ResultInfo(
+								# 		req_id=req_id,
+								# 		req_payload=req_payload,
+								# 		req_info=req_info,
+								# 		resp_payload=resp_payload,
+								# 		resp_model=resp_model,
+								# 		resp_system_fingerprint=resp_system_fingerprint,
+								# 		resp_usage=resp_usage,
+								# 	)
+
+							request_error = request_output['error']
+							if request_error is not None:
+								# [COVERED] Any errors in parsing the response above are acceptable (and mostly expected) when there is a request error
+								request_error_code = request_error['code']
+								request_error_message = request_error['message']
+								err_info = ErrorInfo(fatal=request_error_code not in RETRYABLE_ERROR_CODES, type='RequestError', subtype=request_error_code, data=request_error_message, msg=f"Request error {request_error_code}: {request_error_message}")
+
+							if err_info:
+								err_msg = f"{self.name_prefix}: Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
+								if err_info.fatal:
+									err_resp_fatal.error(err_msg)
+									delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")  # [DELAYED RAISE]
+								else:
+									err_resp_retry.error(err_msg)  # [RETRYABLE]
+
+					err_line_json.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Failed to parse a further {err_hidden} lines to JSON for batch {batch.id} (total {err_total} errors)")
+					err_req_out_keys.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: {err_hidden} further request outputs do not have the expected keys for batch {batch.id} (total {err_total} errors)")
+					err_req_id_fail.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Failed to parse the request ID from {err_hidden} further lines for batch {batch.id} (total {err_total} errors)")
+					err_req_id_bad.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Encountered {err_hidden} further unexpected request IDs for batch {batch.id} (total {err_total} unexpected)")
+					err_req_id_dupl.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Encountered {err_hidden} further duplicate request IDs for batch {batch.id} (total {err_total} duplicates)")
+					err_resp_retry.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Got {err_hidden} further retryable errors for batch {batch.id} (total {err_total} errors)")
+					err_resp_fatal.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Got {err_hidden} further fatal errors for batch {batch.id} (total {err_total} errors)")
+
+					delayed_raise.add(msg="Failed to parse output/error file line to JSON", count=err_line_json.num_errors)
+					delayed_raise.add(msg="Request output does not have the expected keys", count=err_req_out_keys.num_errors)
+					delayed_raise.add(msg="Failed to parse request ID from output/error file line", count=err_req_id_fail.num_errors)
+					delayed_raise.add(msg="Encountered an unexpected request ID", count=err_req_id_bad.num_errors)
+					delayed_raise.add(msg="Encountered a duplicate request ID", count=err_req_id_dupl.num_errors)
+
+					if result_info_map.keys() != batch.request_info.keys():
+						log.error(f"{self.name_prefix}: Batch {batch.id} ({batch.remote.batch.id}) response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
+						delayed_raise.add(msg="Batch response does not contain exactly the expected request IDs")  # [DELAYED RAISE]
+
+					# TODO: Summarise-log how many successful/unsuccessful/retryable/fatal/total/should-have-been-total/etc requests there were (log)
+
+					# TODO: BatchResult.info MUST be for EXACTLY all request ID expected in batch
+					# TODO: Freak out [DELAY RAISE somehow] if result_info_map does not include exactly all expected request IDs? => [TESTED] Even CANCELLATION or EXPIRY should have ALL requests being covered between output/error files! Only alternative is a "failed" batch (batch failed the input file validation process, which is definitely a FAT error)
+					# TODO: Freak out if all req_ids are there, but no single request was successful (there could be legit cases where that happens? cancellation/expiry/almost done and only retrying hard cases atm BUT NEED IT for overnight run safety from infinite loops? Or does number of retries already ensure that? (just possibly pricey) Is this before/after error due to task-parsing)
+
+					# TODO: Abort only AFTER all batches currently finished have been processed? But before exiting this function
+					# TODO: Error if did not receive a response for all expected request IDs => Abort if not perfectly matched all request IDs (even if connectivity problem, as if no connectivity then can't really upload batches either or do anything useful)
+					# TODO: Duplicate request ID does not necessarily result in mismatch of request IDs but should also lead to abort
+					# TODO: Shouldn't abort if individual request errors due to batch expiring or being cancelled! As otherwise it puts the entire task into a death loop
+
+					if delayed_raise.have_section_errors():
+						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} as errors were encountered (leaving batch as it was)")
+						continue  # [DELAYED RAISE]
+
+					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState]):
+						self.S.batch_history[:] = batch_history
+						batch.request_info = request_info
+						self.S.batches[:] = batches
+
+					# TODO: Reversibly update all state/files/remote/metrics/etc for this one batch and save everything (deleting the remote batches/files is OUTSIDE of the reversible thing AFTER state saved, as theoretically doesn't matter if batches and files exist if they are no longer in state? And deletion operation is NOT reversible anyway. It just needs to be exception-safe when deleting, log error if goes wrong and indicate maybe need to manually delete from remote)
+					with utils.AtomicRevertStack() as rstack:
+
+						result = BatchResult(batch=batch, info=dict(sorted(result_info_map.items())))  # TODO: Move further up?
+						yield rstack, result  # TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary
+
+						rstack.callback(revert_state, batches=self.S.batches.copy(), request_info=batch.request_info, batch_history=self.S.batch_history.copy())
+
+						self.S.batches.remove(batch)
+						batch.request_info = {}
+						self.S.batch_history.append(batch)
+						self.S.batch_history.sort()
+
+						# TODO: UPDATE METRICS (REVERSIBLE)
+						for req_id, info in result.info.items():
+							self.S.metrics  # TODO
+
+						self.validate_state_queue(clean=False)
+						self.state.save(rstack=rstack)
+
+					if batch.remote.batch.error_file_id is not None:
+						self.delete_remote_file(file_id=batch.remote.batch.error_file_id)
+					if batch.remote.batch.output_file_id is not None:
+						self.delete_remote_file(file_id=batch.remote.batch.output_file_id)
+					if batch.remote.file.id is not None:
+						self.delete_remote_file(file_id=batch.remote.file.id)
+					self.delete_local_file(path=batch.local_jsonl)
+
+					# TODO: LOG Finished processing batch etc (matching to initial log above)
+
+		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
+
 		# TODO: Batch-wise yield (including rstack) whatever information is required
 		# TODO: Logging
 		# TODO: When/how to fail/auto-retry samples?
-		# TODO: Do not do any actual processing if DRYRUN (no client calls allowed, no updating of state allowed, just don't do anything?)
-		# TODO: if remote_batch.output_file_id: remote_batch_content = tuple(json.loads(line) for line in client.files.content(file_id=remote_batch.output_file_id).text.splitlines() if line)
 		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
 		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
-		# TODO: IF item.parse_info is not None THEN (converts ChatCompletion -> ParsedChatCompletion in terms of tools and response_format) openai_parsing.parse_chat_completion(response_format=self.type_cache.retrieve_type(serial=item.parse_info['response_format_type']) if 'response_format_type' in item.parse_info else item.req.payload.get('response_format', openai.NOT_GIVEN), input_tools=item.req.payload.get('tools', openai.NOT_GIVEN), chat_completion=COMPLETION)
 		# TODO: When batches are completed, clear out request_info (dict), and save them to the State.batch_history
 		# TODO: Rejected prediction tokens somehow still count towards cost as output tokens - no issue as already counted in returned 'completion_tokens' right? (see Predicted Outputs - Note that any rejected tokens are still billed like other completion tokens generated by the API, so Predicted Outputs can introduce higher costs for your requests.)
 		# TODO: Update METRICS
@@ -1458,7 +1657,9 @@ class GPTRequester:
 		# TODO: Refer to guide on structured outputs for how to error check it!
 		# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
 		# TODO: Beware, if you auto-retry and eventually a small batch consists of only already-failed retries then don't want to quit right due to "whole batch" erroring out?
-		pass
+		# TODO: ANY error that requires manual inspection of batch output/errors/etc to resolve should raise an exception to make sure the batch is NOT processed and deleted. Only auto-retry is if TASK says so? Everything else causes immediate quit? Better need to restart (wasted time) than keep going on errors (wasted MONEY)
+		# TODO: If the exception is a retry-able one (e.g. no internet) then abort processing this batch instead of checking it off as done but errored!
+		# TODO: MUST ensure condition F!
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?

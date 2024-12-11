@@ -16,7 +16,7 @@ import contextlib
 import collections
 import dataclasses
 import typing
-from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol, Callable
+from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol, Callable, Counter
 from types import FrameType
 import filelock
 import pydantic
@@ -102,6 +102,40 @@ def get_type_str(typ: type) -> str:
 		return typ_str[8:-2]
 	else:
 		return typ_str
+
+#
+# Error handling
+#
+
+# Delayed raise class
+class DelayedRaise:
+
+	def __init__(self):
+		self.msgs: Counter[str] = collections.Counter()
+		self.section_msgs: Counter[str] = collections.Counter()
+
+	def new_section(self):
+		self.section_msgs.clear()
+
+	def add(self, msg: str, count: int = 1):
+		# msg = Raise message to add
+		# count = Multiplicity of the message (nothing is added if this is <=0)
+		if count > 0:
+			self.msgs[msg] += count
+			self.section_msgs[msg] += count
+
+	def have_errors(self) -> bool:
+		# Returns whether there are any delayed errors
+		return self.msgs.total() > 0
+
+	def have_section_errors(self) -> bool:
+		# Returns whether there are any delayed errors in the current section
+		return self.section_msgs.total() > 0
+
+	def raise_on_error(self, base_msg: str = 'Encountered errors'):
+		# base_msg = Base message of the raised exception
+		if self.have_errors():
+			raise RuntimeError(f"{base_msg}:{''.join(f'\n{count} \xd7 {msg}' for msg, count in sorted(self.msgs.items()) if count > 0)}")
 
 # Error logger that only logs the first N errors then provides a summary at the end
 class ErrorSummaryLogger:
