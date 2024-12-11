@@ -18,8 +18,10 @@ import contextlib
 import collections
 import dataclasses
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
+import pydantic
 import httpx
 import openai
+import openai._models as openai_models  # noqa
 import openai.types.chat as openai_chat
 import openai.lib._parsing as openai_parsing  # noqa
 import openai._utils as openai_utils  # noqa
@@ -278,7 +280,7 @@ class State:
 	batches: list[BatchState] = dataclasses.field(default_factory=list)        # States of all batches that are currently pending or in progress (in ascending batch ID order)
 	batch_history: list[BatchState] = dataclasses.field(default_factory=list)  # History of the final states of the completed batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
 	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)  # Task push statistics
-	metrics: Metrics = dataclasses.field(default_factory=Metrics)              # TODO: Completed request metrics
+	metrics: Metrics = dataclasses.field(default_factory=Metrics)              # Completed request metrics
 
 # State file class
 class StateFile:
@@ -1520,44 +1522,76 @@ class GPTRequester:
 							err_info = None
 							resp_info = None
 							if not (response := request_output['response']):
-								err_info = ErrorInfo(fatal=True, type='ResponseEmpty', msg='Response field is empty')
+								err_info = ErrorInfo(fatal=True, type='ResponseField', subtype='MissingEmpty', msg='Response field is missing or empty')
 							elif (status_code := response.get('status_code', None)) is None:
 								err_info = ErrorInfo(fatal=True, type='ResponseStatusCode', subtype='MissingNull', msg='Response HTTP status code is missing or null')
 							elif status_code != 200:
+
 								try:
-									status_code_msg = f"Response HTTP {status_code}: {http.HTTPStatus(status_code).phrase}"
+									status_code_phrase = http.HTTPStatus(status_code).phrase
 								except ValueError:
-									status_code_msg = f"Response HTTP {status_code}: Unknown Error"
-								err_info = ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='ResponseStatusCode', subtype='NotOK', data=status_code, msg=status_code_msg)
-							elif not (resp_payload := response.get('body', None)):
-								err_info = ErrorInfo(fatal=True, type='ResponseBodyEmpty', msg='Response body is empty')
+									status_code_phrase = 'Unknown Error'
+								msg_parts = [f"Response HTTP {status_code} ({status_code_phrase})"]
+
+								try:
+									response_error = response['body']['error']
+								except (KeyError, TypeError):
+									pass
+								else:
+									if isinstance(response_error, dict):
+										if (response_error_type := response_error.get('type', None)) is not None:
+											msg_parts.append(f' with error of type {response_error_type}')
+											if (response_error_code := response_error.get('code', None)) is not None:
+												msg_parts.append(f'.{response_error_code}')
+											if (response_error_param := response_error.get('param', None)) is not None:
+												msg_parts.append(f"(param='{response_error_param}')")
+										if (response_error_message := response_error.get('message', None)) is not None:
+											msg_parts.append(f': {response_error_message}')
+
+								err_info = ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='ResponseStatusCode', subtype='NotOK', data=status_code, msg=''.join(msg_parts))
+
+							elif not (resp_body := response.get('body', None)):
+								err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='MissingEmpty', msg='Response body is missing or empty')
 							else:
 
-								# TODO: Extract model/sysfing/usage if possible
-								pass  # TODO: Extract model and fingerprint if at ALL possible
-								# TODO: As of here, usage/metrics/response info MUST be collected no matter what if it exists, even if a further error is present (thus both ErrorInfo and ResponseInfo can exist at same time to count usage/model/fingerprint of errored request - although in practice that shouldn't happen)
-								# TODO: Construct a ResponseInfo
+								resp_payload = resp_model = resp_system_fingerprint = resp_usage = None
+								if self.endpoint == '/v1/chat/completions':
+									if resp_body.get('object', None) != 'chat.completion':
+										err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ObjectIncorrect', msg="Response body object field is not 'chat.completion'")
+									else:
+										try:
+											resp_payload = openai_models.validate_type(type_=openai_chat.ChatCompletion, value=resp_body)
+										except pydantic.ValidationError as e:
+											err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ValidationError', msg=f"Validation of response body as {utils.get_class_str(openai_chat.ChatCompletion)} model failed with {utils.get_class_str(e)}: {e}")
+										else:
+											if req_info.parse_info is not None:
+												response_format = self.type_cache.retrieve_type(serial=req_info.parse_info['response_format_type']) if 'response_format_type' in req_info.parse_info else req_payload.get('response_format', openai.NOT_GIVEN)
+												try:
+													resp_payload = openai_parsing.parse_chat_completion(response_format=response_format, input_tools=req_payload.get('tools', openai.NOT_GIVEN), chat_completion=resp_payload)
+												except (openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError, json.JSONDecodeError, pydantic.ValidationError) as e:
+													# TODO: Just set err_info?? and adding request ID to unparsed ChatCompletion and extracting the model etc can just happen as per normal? Having both err_info and resp_payload is not a problem (metrics!)
+													pass  # TODO: RETRY (JSON is obviously invalid if content filter or length affected or truncated the generated output! Retrying could reasonably resolve this. Or if the JSON failed to parse for tools, or for schema/tools fails to validate against the expected. In those cases a retry could potentially solve the issue.)
+												except Exception as e:  # noqa
+													# TODO: Here also just set err_info and this will later automatically lead to a raise? (Make sure you use e!)
+													pass  # TODO: FATAL Something went very wrong (e.g. TypeError) and that should really not happen and won't be fixed by a retry
+											openai_models.add_request_id(obj=resp_payload, request_id=request_output.get('id', None))
+											resp_model = resp_payload.model
+											resp_system_fingerprint = resp_payload.system_fingerprint if resp_payload.system_fingerprint is not None else ''
+											resp_usage = resp_body['usage']
+											# TODO: This SHOULD be AFTER we have our finalised resp_payload, as it's like that in the SDK (so right here where these two TODOs are)
+											# TODO: Only need to set err_info and LOG/RETRY is dealt with automatically?
+											# TODO: (LOG (e.g. refusal reason) + DEAL WITH) finish_reason (stop vs length, content_filter, ...) / refusal (multiple choices! see structured outputs edge case handling?) -> RETRY (non-fatal) if EVERY choice has AT LEAST ONE of these issues (i.e. there is no proper output, definitely like this to not waste any perfectly good responses, task can issue a new request if need be if you really need all n choices) => Do NOT clear resp_payload here or such (metrics!)
+								else:
+									raise ValueError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
 
-								# 	if self.endpoint == '/v1/chat/completions':
-								# 		resp_payload: openai_chat.ChatCompletion  # TODO: Parse resp_payload: dict[str, Any] --> openai_chat.ChatCompletion
-								# 		resp_model = resp_payload.model
-								# 		resp_system_fingerprint = resp_payload.system_fingerprint if resp_payload.system_fingerprint is not None else ''
-								# 		resp_usage = resp_payload['usage']
-								# 		# TODO: finish_reason / refusal (multiple choices! see structured outputs edge case handling?)
-								# 		if req_info.parse_info is not None:
-								# 			pass  # TODO: Convert ChatCompletion -> ParsedChatCompletion[object] in terms of tools and response_format => [careful as this raises exceptions and stuff] openai_parsing.parse_chat_completion(response_format=self.type_cache.retrieve_type(serial=item.parse_info['response_format_type']) if 'response_format_type' in item.parse_info else item.req.payload.get('response_format', openai.NOT_GIVEN), input_tools=item.req.payload.get('tools', openai.NOT_GIVEN), chat_completion=COMPLETION)
-								# 	else:
-								# 		raise ValueError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
-								#
-								# 	result_info_map[req_id] = ResultInfo(
-								# 		req_id=req_id,
-								# 		req_payload=req_payload,
-								# 		req_info=req_info,
-								# 		resp_payload=resp_payload,
-								# 		resp_model=resp_model,
-								# 		resp_system_fingerprint=resp_system_fingerprint,
-								# 		resp_usage=resp_usage,
-								# 	)
+								if resp_payload is not None:
+									assert resp_model is not None and resp_system_fingerprint is not None and resp_usage is not None
+									resp_info = ResponseInfo(
+										payload=resp_payload,
+										model=resp_model,
+										system_fingerprint=resp_system_fingerprint,
+										usage=resp_usage,
+									)
 
 							request_error = request_output['error']
 							if request_error is not None:
@@ -1573,6 +1607,14 @@ class GPTRequester:
 									delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")  # [DELAYED RAISE]
 								else:
 									err_resp_retry.error(err_msg)  # [RETRYABLE]
+
+							result_info_map[req_id] = ResultInfo(
+								req_id=req_id,
+								req_payload=req_payload,
+								req_info=req_info,
+								resp_info=resp_info,
+								err_info=err_info,
+							)
 
 					err_line_json.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Failed to parse a further {err_hidden} lines to JSON for batch {batch.id} (total {err_total} errors)")
 					err_req_out_keys.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: {err_hidden} further request outputs do not have the expected keys for batch {batch.id} (total {err_total} errors)")
@@ -1592,20 +1634,21 @@ class GPTRequester:
 						log.error(f"{self.name_prefix}: Batch {batch.id} ({batch.remote.batch.id}) response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
 						delayed_raise.add(msg="Batch response does not contain exactly the expected request IDs")  # [DELAYED RAISE]
 
-					# TODO: Summarise-log how many successful/unsuccessful/retryable/fatal/total/should-have-been-total/etc requests there were (log)
-
-					# TODO: BatchResult.info MUST be for EXACTLY all request ID expected in batch
-					# TODO: Freak out [DELAY RAISE somehow] if result_info_map does not include exactly all expected request IDs? => [TESTED] Even CANCELLATION or EXPIRY should have ALL requests being covered between output/error files! Only alternative is a "failed" batch (batch failed the input file validation process, which is definitely a FAT error)
 					# TODO: Freak out if all req_ids are there, but no single request was successful (there could be legit cases where that happens? cancellation/expiry/almost done and only retrying hard cases atm BUT NEED IT for overnight run safety from infinite loops? Or does number of retries already ensure that? (just possibly pricey) Is this before/after error due to task-parsing)
 
-					# TODO: Abort only AFTER all batches currently finished have been processed? But before exiting this function
-					# TODO: Error if did not receive a response for all expected request IDs => Abort if not perfectly matched all request IDs (even if connectivity problem, as if no connectivity then can't really upload batches either or do anything useful)
-					# TODO: Duplicate request ID does not necessarily result in mismatch of request IDs but should also lead to abort
-					# TODO: Shouldn't abort if individual request errors due to batch expiring or being cancelled! As otherwise it puts the entire task into a death loop
+					# TODO: [BEFORE ABORTING] Summarise-log how many successful/unsuccessful/retryable/fatal/total/should-have-been-total/etc requests there were (log)
 
 					if delayed_raise.have_section_errors():
 						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} as errors were encountered (leaving batch as it was)")
 						continue  # [DELAYED RAISE]
+
+					result = BatchResult(
+						batch=batch,
+						errors=batch_errors,
+						info=dict(sorted(result_info_map.items())),
+					)
+
+					return  # TODO: TEMP CONTINUE BELOW HERE (but don't execute or you corrupt state!)
 
 					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState]):
 						self.S.batch_history[:] = batch_history
@@ -1615,7 +1658,7 @@ class GPTRequester:
 					# TODO: Reversibly update all state/files/remote/metrics/etc for this one batch and save everything (deleting the remote batches/files is OUTSIDE of the reversible thing AFTER state saved, as theoretically doesn't matter if batches and files exist if they are no longer in state? And deletion operation is NOT reversible anyway. It just needs to be exception-safe when deleting, log error if goes wrong and indicate maybe need to manually delete from remote)
 					with utils.AtomicRevertStack() as rstack:
 
-						result = BatchResult(batch=batch, info=dict(sorted(result_info_map.items())))  # TODO: Move further up?
+						# TODO: Instead of requiring a fancy send() (although this could be clean-ish but is not compatible with for-loop!), you could mutably update a field in BatchResult to say YEAH retry, NO don't => Would be super clean except for the (unexpected?) mutability
 						yield rstack, result  # TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary
 
 						rstack.callback(revert_state, batches=self.S.batches.copy(), request_info=batch.request_info, batch_history=self.S.batch_history.copy())
@@ -1626,8 +1669,8 @@ class GPTRequester:
 						self.S.batch_history.sort()
 
 						# TODO: UPDATE METRICS (REVERSIBLE)
-						for req_id, info in result.info.items():
-							self.S.metrics  # TODO
+						# for req_id, info in result.info.items():
+						# 	self.S.metrics  # TODO
 
 						self.validate_state_queue(clean=False)
 						self.state.save(rstack=rstack)
@@ -1660,6 +1703,9 @@ class GPTRequester:
 		# TODO: ANY error that requires manual inspection of batch output/errors/etc to resolve should raise an exception to make sure the batch is NOT processed and deleted. Only auto-retry is if TASK says so? Everything else causes immediate quit? Better need to restart (wasted time) than keep going on errors (wasted MONEY)
 		# TODO: If the exception is a retry-able one (e.g. no internet) then abort processing this batch instead of checking it off as done but errored!
 		# TODO: MUST ensure condition F!
+
+	# TODO: Clean up remote files after process_batches() testing is over
+	# TODO: Estimate of input tokens is WAY off for char_codes => Is it a confusion of python class type vs JSON schema in TokenEstimator? Somehow schema is not being counted I think...
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
