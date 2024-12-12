@@ -29,11 +29,15 @@ from .logger import log
 from . import tokens, utils
 
 # Constants
+DRYRUN = '\x1b[38;5;226m[DRYRUN]\x1b[0m '
 DEFAULT_ENDPOINT = '/v1/chat/completions'
 FINISHED_BATCH_STATUSES = {'failed', 'completed', 'expired', 'cancelled'}
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_CODES = {'batch_expired', 'batch_cancelled'}
-DRYRUN = '\x1b[38;5;226m[DRYRUN]\x1b[0m '
+FINISH_REASON_NORMAL = 'stop'  # Finish reason that corresponds to normal response termination
+FINISH_REASONS_FAILED = {'length', 'content_filter'}  # Finish reasons that correpond to a retryable failure
+FINISH_REASONS_NOCONTENT = {'content_filter', 'tool_calls', 'function_call'}  # Finish reasons for which having no content is permissible or even expected
+FINISH_REASONS_ALL = set.union({FINISH_REASON_NORMAL}, FINISH_REASONS_FAILED, FINISH_REASONS_NOCONTENT)
 
 # Logging configuration
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -519,6 +523,22 @@ class ResultInfo:
 	req_info: RequestInfo              # Request information
 	resp_info: Optional[ResponseInfo]  # Response information (if available)
 	err_info: Optional[ErrorInfo]      # Error information (if errored)
+	warn_infos: list[ErrorInfo]        # Warning information (if warnings occurred)
+
+# Result statistics class
+@dataclasses.dataclass(frozen=True)
+class ResultStats:
+	duration: int       # Duration in seconds it took for the batch to finalize on the remote (complete, cancel, ...)
+	duration_str: str   # Duration formatted as a 'XhYm' string (see utils.format_duration_hmin)
+	num_requests: int   # Number of requests
+	num_results: int    # Number of received results
+	num_success: int    # Number of results with no warnings or error
+	num_warned: int     # Number of results with warnings but no error
+	num_errored: int    # Number of results with an error
+	num_retryable: int  # Number of results with a retryable error
+	num_cancelled: int  # Number of results with a retryable error due to the batch being cancelled
+	num_expired: int    # Number of results with a retryable error due to the batch being expired
+	num_fatal: int      # Number of results with a fatal error
 
 # Batch result class
 @dataclasses.dataclass(frozen=True)
@@ -526,6 +546,7 @@ class BatchResult:
 	batch: BatchState                      # Final batch state including final remote state (prior to any removal of overdetailed per-request information for the purpose of saving the batch to the history)
 	errors: list[openai.types.BatchError]  # List of any encountered batch errors
 	info: dict[int, ResultInfo]            # Result information for each request ID in the batch (in ascending request ID order, guaranteed to be for exactly all requests in the batch)
+	stats: ResultStats                     # Result statistics
 
 #
 # GPT requester
@@ -558,6 +579,7 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
+		show_warnings: int = 50,                              # How many warnings to show/log per batch per warning type when processing responses
 		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
 		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 
@@ -625,11 +647,16 @@ class GPTRequester:
 			log.info(f"{self.name_prefix}: Manage OpenAI batches: https://platform.openai.com/batches")
 			log.info(f"{self.name_prefix}: Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
 
+		self.show_warnings = show_warnings
+		if self.show_warnings < 1:
+			raise ValueError(f"Number of warnings to show/log must be at least 1: {self.show_warnings}")
 		self.show_errors = show_errors
 		if self.show_errors < 1:
 			raise ValueError(f"Number of errors to show/log must be at least 1: {self.show_errors}")
+		log.info(f"{self.name_prefix}: Showing up to {self.show_warnings} warnings and {self.show_errors} errors explicitly per batch per type")
+
 		self.auto_parse = auto_parse
-		log.info(f"{self.name_prefix}: Showing up to {self.show_errors} errors explicitly, Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
+		log.info(f"{self.name_prefix}: Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
 
 		self.cost_input_direct_mtoken = cost_input_direct_mtoken
 		self.cost_input_cached_mtoken = cost_input_cached_mtoken
@@ -813,6 +840,7 @@ class GPTRequester:
 		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
+		add_argument(name='show_warnings', type=int, metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
 		add_argument(name='show_errors', type=int, metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
 		if include_auto_parse:
 			add_argument(name='auto_parse', type=bool, help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
@@ -897,6 +925,8 @@ class GPTRequester:
 				raise ValueError(f"Invalid batch ID: {batch.id}")
 			if batch.id > self.S.max_batch_id:
 				raise ValueError(f"Batch ID is greater than the supposed maximum assigned batch ID: {batch.id} > {self.S.max_batch_id}")
+			if len(batch.request_info) != batch.num_requests:
+				raise ValueError(f"Mismatch in number of requests in batch {batch.id}: {len(batch.request_info)} vs {batch.num_requests}")
 			if batch.remote is not None:
 				if batch.remote.batch.input_file_id != batch.remote.file.id:
 					raise ValueError(f"Batch file ID is not consistent: {batch.remote.batch.input_file_id} vs {batch.remote.file.id}")
@@ -1474,7 +1504,8 @@ class GPTRequester:
 					log.info(f"{self.name_prefix}: Loaded {batch.num_requests} requests of endpoint '{self.endpoint}' from batch {batch.id} input JSONL of size {utils.format_size_si(batch.local_jsonl_size)}")
 
 					result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
-					err_line_json, err_req_out_keys, err_req_id_fail, err_req_id_bad, err_req_id_dupl, err_resp_retry, err_resp_fatal = [utils.ErrorSummaryLogger(log=log, show_errors=self.show_errors) for _ in range(7)]
+					warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
+					err_line_json, err_req_out_keys, err_req_id_fail, err_req_id_bad, err_req_id_dupl, err_resp_retry, err_resp_fatal = [utils.LogSummarizer(log_fn=log.error, show_msgs=self.show_errors) for _ in range(7)]
 
 					for remote_file_id in (batch.remote.batch.error_file_id, batch.remote.batch.output_file_id):
 
@@ -1495,36 +1526,38 @@ class GPTRequester:
 							try:
 								request_output = json.loads(line)
 							except json.JSONDecodeError as e:
-								err_line_json.error(f"{self.name_prefix}: Failed to parse line {line_num} to JSON in remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
+								err_line_json.log(f"{self.name_prefix}: Failed to parse line {line_num} to JSON in remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
 								continue  # [DELAYED RAISE]
 
 							if 'custom_id' not in request_output or 'error' not in request_output or 'response' not in request_output:
-								err_req_out_keys.error(f"{self.name_prefix}: Request output does not have the expected keys on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_out_keys.log(f"{self.name_prefix}: Request output does not have the expected keys on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 
 							custom_id = request_output['custom_id']
 							if isinstance(custom_id, str) and (match := re.fullmatch(r'id-([0-9]+)', custom_id)):
 								req_id = int(match.group(1))
 							else:
-								err_req_id_fail.error(f"{self.name_prefix}: Failed to parse the request ID from line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_id_fail.log(f"{self.name_prefix}: Failed to parse the request ID from line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 
 							if req_id not in req_payload_map or req_id not in batch.request_info:
-								err_req_id_bad.error(f"{self.name_prefix}: Unexpected request ID {req_id} in line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_id_bad.log(f"{self.name_prefix}: Unexpected request ID {req_id} in line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 							req_payload = req_payload_map[req_id]
 							req_info = batch.request_info[req_id]
 
 							if req_id in result_info_map:
-								err_req_id_dupl.error(f"{self.name_prefix}: Encountered duplicate request ID {req_id} on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_id_dupl.log(f"{self.name_prefix}: Encountered duplicate request ID {req_id} on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 
-							err_info = None
 							resp_info = None
+							err_info = None
+							warn_infos = []
+
 							if not (response := request_output['response']):
 								err_info = ErrorInfo(fatal=True, type='ResponseField', subtype='MissingEmpty', msg='Response field is missing or empty')
 							elif (status_code := response.get('status_code', None)) is None:
-								err_info = ErrorInfo(fatal=True, type='ResponseStatusCode', subtype='MissingNull', msg='Response HTTP status code is missing or null')
+								err_info = ErrorInfo(fatal=True, type='StatusCode', subtype='MissingNull', msg='Response HTTP status code is missing or null')
 							elif status_code != 200:
 
 								try:
@@ -1548,39 +1581,74 @@ class GPTRequester:
 										if (response_error_message := response_error.get('message', None)) is not None:
 											msg_parts.append(f': {response_error_message}')
 
-								err_info = ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='ResponseStatusCode', subtype='NotOK', data=status_code, msg=''.join(msg_parts))
+								err_info = ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='StatusCode', subtype='NotOK', data=status_code, msg=''.join(msg_parts))
 
 							elif not (resp_body := response.get('body', None)):
 								err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='MissingEmpty', msg='Response body is missing or empty')
 							else:
 
-								resp_payload = resp_model = resp_system_fingerprint = resp_usage = None
+								resp_payload: Union[None, openai_chat.ChatCompletion, openai_chat.ParsedChatCompletion[object]] = None
+								resp_model = resp_system_fingerprint = resp_usage = None
+
 								if self.endpoint == '/v1/chat/completions':
+
 									if resp_body.get('object', None) != 'chat.completion':
-										err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ObjectIncorrect', msg="Response body object field is not 'chat.completion'")
+										err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ObjectIncorrect', data=resp_body.get('object', None), msg="Chat completion response body object field is not 'chat.completion'")
 									else:
+
 										try:
+											# Converts response body: dict[str, Any] -> openai_chat.ChatCompletion
 											resp_payload = openai_models.validate_type(type_=openai_chat.ChatCompletion, value=resp_body)
 										except pydantic.ValidationError as e:
-											err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ValidationError', msg=f"Validation of response body as {utils.get_class_str(openai_chat.ChatCompletion)} model failed with {utils.get_class_str(e)}: {e}")
+											err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ValidationError', msg=f"Validation of chat completion response body as {utils.get_class_str(openai_chat.ChatCompletion)} model failed with {utils.get_class_str(e)}: {e}")
 										else:
+
 											if req_info.parse_info is not None:
 												response_format = self.type_cache.retrieve_type(serial=req_info.parse_info['response_format_type']) if 'response_format_type' in req_info.parse_info else req_payload.get('response_format', openai.NOT_GIVEN)
+												input_tools = req_payload.get('tools', openai.NOT_GIVEN)
 												try:
-													resp_payload = openai_parsing.parse_chat_completion(response_format=response_format, input_tools=req_payload.get('tools', openai.NOT_GIVEN), chat_completion=resp_payload)
-												except (openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError, json.JSONDecodeError, pydantic.ValidationError) as e:
-													# TODO: Just set err_info?? and adding request ID to unparsed ChatCompletion and extracting the model etc can just happen as per normal? Having both err_info and resp_payload is not a problem (metrics!)
-													pass  # TODO: RETRY (JSON is obviously invalid if content filter or length affected or truncated the generated output! Retrying could reasonably resolve this. Or if the JSON failed to parse for tools, or for schema/tools fails to validate against the expected. In those cases a retry could potentially solve the issue.)
+													# Converts response payload: openai_chat.ChatCompletion -> openai_chat.ParsedChatCompletion[object]
+													# The 'parsed' field of the choice messages CAN be None (e.g. if response_format is not given or a dict, if the raw choice message content is None, or if the message has a refusal)
+													resp_payload = openai_parsing.parse_chat_completion(response_format=response_format, input_tools=input_tools, chat_completion=resp_payload)
+												except (openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError) as e:
+													err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='FinishReason', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
+												except (json.JSONDecodeError, pydantic.ValidationError) as e:
+													err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='ValidationError', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
 												except Exception as e:  # noqa
-													# TODO: Here also just set err_info and this will later automatically lead to a raise? (Make sure you use e!)
-													pass  # TODO: FATAL Something went very wrong (e.g. TypeError) and that should really not happen and won't be fixed by a retry
+													err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='UnexpectedError', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
+												else:
+													if isinstance(response_format, type):
+														if num_parsed_none := sum(1 for choice in resp_payload.choices if choice.message.parsed is None):
+															err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='ParsedNone', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {num_parsed_none} missing parsed messages (e.g. due to refusals or missing content)")
+														elif unexpected_parsed_types := collections.Counter(utils.get_class_str(type(choice.message.parsed)) for choice in resp_payload.choices if not isinstance(choice.message.parsed, response_format)):
+															err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='ParsedIncorrectType', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {unexpected_parsed_types.total()} parsed messages of incorrect type: {', '.join(sorted(unexpected_parsed_types.keys()))}")
+
 											openai_models.add_request_id(obj=resp_payload, request_id=request_output.get('id', None))
+
 											resp_model = resp_payload.model
 											resp_system_fingerprint = resp_payload.system_fingerprint if resp_payload.system_fingerprint is not None else ''
 											resp_usage = resp_body['usage']
-											# TODO: This SHOULD be AFTER we have our finalised resp_payload, as it's like that in the SDK (so right here where these two TODOs are)
-											# TODO: Only need to set err_info and LOG/RETRY is dealt with automatically?
-											# TODO: (LOG (e.g. refusal reason) + DEAL WITH) finish_reason (stop vs length, content_filter, ...) / refusal (multiple choices! see structured outputs edge case handling?) -> RETRY (non-fatal) if EVERY choice has AT LEAST ONE of these issues (i.e. there is no proper output, definitely like this to not waste any perfectly good responses, task can issue a new request if need be if you really need all n choices) => Do NOT clear resp_payload here or such (metrics!)
+
+											if len(resp_payload.choices) != req_payload.get('n', 1):
+												warn_infos.append(ErrorInfo(fatal=False, type='MessageChoices', subtype='IncorrectNum', msg=f"Expected {req_payload.get('n', 1)} response message choices but got {len(resp_payload.choices)}"))
+
+											valid_choice = False
+											for c, choice in enumerate(resp_payload.choices):
+												if choice.finish_reason not in FINISH_REASONS_ALL:
+													if err_info is None or not err_info.fatal:
+														err_info = ErrorInfo(fatal=True, type='MessageChoices', subtype='FinishReason', data=choice.finish_reason, msg=f"Choice {c} has the unrecognized finish reason '{choice.finish_reason}'")
+												elif choice.finish_reason not in FINISH_REASONS_NOCONTENT and choice.message.content is None and choice.message.refusal is None and choice.message.audio is None:
+													if err_info is None or not err_info.fatal:
+														err_info = ErrorInfo(fatal=True, type='MessageChoices', subtype='NoContent', msg=f"Choice {c} has no content")
+												elif choice.message.refusal is not None:
+													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoices', subtype='Refusal', data=choice.message.refusal, msg=f"Choice {c} got refusal message: {choice.message.refusal}"))
+												elif choice.finish_reason in FINISH_REASONS_FAILED:
+													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoices', subtype='FinishReason', data=choice.finish_reason, msg=f"Choice {c} has the failed finish reason '{choice.finish_reason}'"))
+												else:
+													valid_choice = True
+											if resp_payload.choices and not valid_choice and err_info is None:
+												err_info = ErrorInfo(fatal=False, type='MessageChoices', subtype='NoneValid', msg="No valid response message choices")
+
 								else:
 									raise ValueError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
 
@@ -1600,13 +1668,16 @@ class GPTRequester:
 								request_error_message = request_error['message']
 								err_info = ErrorInfo(fatal=request_error_code not in RETRYABLE_ERROR_CODES, type='RequestError', subtype=request_error_code, data=request_error_message, msg=f"Request error {request_error_code}: {request_error_message}")
 
+							for warn_info in warn_infos:
+								warn_resp.log(f"{self.name_prefix}: Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
+
 							if err_info:
 								err_msg = f"{self.name_prefix}: Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
 								if err_info.fatal:
-									err_resp_fatal.error(err_msg)
+									err_resp_fatal.log(err_msg)
 									delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")  # [DELAYED RAISE]
 								else:
-									err_resp_retry.error(err_msg)  # [RETRYABLE]
+									err_resp_retry.log(err_msg)  # [RETRYABLE]
 
 							result_info_map[req_id] = ResultInfo(
 								req_id=req_id,
@@ -1614,29 +1685,76 @@ class GPTRequester:
 								req_info=req_info,
 								resp_info=resp_info,
 								err_info=err_info,
+								warn_infos=warn_infos,
 							)
 
-					err_line_json.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Failed to parse a further {err_hidden} lines to JSON for batch {batch.id} (total {err_total} errors)")
-					err_req_out_keys.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: {err_hidden} further request outputs do not have the expected keys for batch {batch.id} (total {err_total} errors)")
-					err_req_id_fail.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Failed to parse the request ID from {err_hidden} further lines for batch {batch.id} (total {err_total} errors)")
-					err_req_id_bad.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Encountered {err_hidden} further unexpected request IDs for batch {batch.id} (total {err_total} unexpected)")
-					err_req_id_dupl.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Encountered {err_hidden} further duplicate request IDs for batch {batch.id} (total {err_total} duplicates)")
-					err_resp_retry.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Got {err_hidden} further retryable errors for batch {batch.id} (total {err_total} errors)")
-					err_resp_fatal.finalize(msg_fn=lambda err_hidden, err_total: f"{self.name_prefix}: Got {err_hidden} further fatal errors for batch {batch.id} (total {err_total} errors)")
+					warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further warnings for batch {batch.id} (total {num_total} warnings)")
+					err_line_json.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Failed to parse a further {num_omitted} lines to JSON for batch {batch.id} (total {num_total} errors)")
+					err_req_out_keys.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: {num_omitted} further request outputs do not have the expected keys for batch {batch.id} (total {num_total} errors)")
+					err_req_id_fail.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Failed to parse the request ID from {num_omitted} further lines for batch {batch.id} (total {num_total} errors)")
+					err_req_id_bad.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Encountered {num_omitted} further unexpected request IDs for batch {batch.id} (total {num_total} unexpected)")
+					err_req_id_dupl.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Encountered {num_omitted} further duplicate request IDs for batch {batch.id} (total {num_total} duplicates)")
+					err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further retryable errors for batch {batch.id} (total {num_total} errors)")
+					err_resp_fatal.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further fatal errors for batch {batch.id} (total {num_total} errors)")
 
-					delayed_raise.add(msg="Failed to parse output/error file line to JSON", count=err_line_json.num_errors)
-					delayed_raise.add(msg="Request output does not have the expected keys", count=err_req_out_keys.num_errors)
-					delayed_raise.add(msg="Failed to parse request ID from output/error file line", count=err_req_id_fail.num_errors)
-					delayed_raise.add(msg="Encountered an unexpected request ID", count=err_req_id_bad.num_errors)
-					delayed_raise.add(msg="Encountered a duplicate request ID", count=err_req_id_dupl.num_errors)
+					delayed_raise.add(msg="Failed to parse output/error file line to JSON", count=err_line_json.num_msgs)
+					delayed_raise.add(msg="Request output does not have the expected keys", count=err_req_out_keys.num_msgs)
+					delayed_raise.add(msg="Failed to parse request ID from output/error file line", count=err_req_id_fail.num_msgs)
+					delayed_raise.add(msg="Encountered an unexpected request ID", count=err_req_id_bad.num_msgs)
+					delayed_raise.add(msg="Encountered a duplicate request ID", count=err_req_id_dupl.num_msgs)
+
+					num_results = num_success = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = 0
+					for info in result_info_map.values():
+						num_results += 1
+						if info.err_info is None:
+							if info.warn_infos:
+								num_warned += 1
+							else:
+								num_success += 1
+						else:
+							num_errored += 1
+							if info.err_info.fatal:
+								num_fatal += 1
+							else:
+								num_retryable += 1
+							if info.err_info.type == 'RequestError':
+								assert not info.err_info.fatal
+								if info.err_info.subtype == 'batch_cancelled':
+									num_cancelled += 1
+								elif info.err_info.subtype == 'batch_expired':
+									num_expired += 1
+
+					duration = max((at for at in (batch.remote.batch.failed_at, batch.remote.batch.completed_at, batch.remote.batch.expired_at, batch.remote.batch.cancelled_at) if at is not None), default=batch.remote.batch.created_at) - batch.remote.batch.created_at
+					result_stats = ResultStats(
+						duration=duration,
+						duration_str=utils.format_duration_hmin(duration),
+						num_requests=batch.num_requests,
+						num_results=num_results,
+						num_success=num_success,
+						num_warned=num_warned,
+						num_errored=num_errored,
+						num_retryable=num_retryable,
+						num_cancelled=num_cancelled,
+						num_expired=num_expired,
+						num_fatal=num_fatal,
+					)
+
+					log.info(f"{self.name_prefix}: Batch {batch.id} ({batch.remote.batch.id}) took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) and got {result_stats.num_results}/{result_stats.num_requests} responses = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired)")
+					assert result_stats.num_requests == len(batch.request_info) and result_stats.num_requests >= result_stats.num_results == len(result_info_map)
+					assert result_stats.num_results == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
+					assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
+					assert result_stats.num_cancelled + result_stats.num_expired <= result_stats.num_retryable
 
 					if result_info_map.keys() != batch.request_info.keys():
-						log.error(f"{self.name_prefix}: Batch {batch.id} ({batch.remote.batch.id}) response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
+						log.error(f"{self.name_prefix}: Batch {batch.id} response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
 						delayed_raise.add(msg="Batch response does not contain exactly the expected request IDs")  # [DELAYED RAISE]
+					if result_stats.num_cancelled != 0:
+						log.error(f"{self.name_prefix}: Batch {batch.id} response contains {result_stats.num_cancelled} cancelled requests")
+						delayed_raise.add(msg="Batch response contains cancelled requests")  # [DELAYED RAISE]
 
-					# TODO: Freak out if all req_ids are there, but no single request was successful (there could be legit cases where that happens? cancellation/expiry/almost done and only retrying hard cases atm BUT NEED IT for overnight run safety from infinite loops? Or does number of retries already ensure that? (just possibly pricey) Is this before/after error due to task-parsing)
-
-					# TODO: [BEFORE ABORTING] Summarise-log how many successful/unsuccessful/retryable/fatal/total/should-have-been-total/etc requests there were (log)
+					num_success_expired = result_stats.num_success + result_stats.num_expired
+					if num_success_expired <= 0 or num_success_expired / result_stats.num_requests < MIN_SUCCESS_RATIO:  # TODO: 0 <= MIN_SUCCESS_RATIO (~= 0.5) <= 1, strictly less is BAD (success + expired), except that 0 success ratio is always BAD
+						pass  # TODO: Have a parameter NUM_BAD_SUCCESS_RATIO (or so, ~= 2) so that if this condition occurs that many batches in a row then log.error and delayed_raise.add [DELAYED RAISE] --> REQUIRES STATE!!!
 
 					if delayed_raise.have_section_errors():
 						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} as errors were encountered (leaving batch as it was)")
@@ -1646,6 +1764,7 @@ class GPTRequester:
 						batch=batch,
 						errors=batch_errors,
 						info=dict(sorted(result_info_map.items())),
+						stats=result_stats,
 					)
 
 					return  # TODO: TEMP CONTINUE BELOW HERE (but don't execute or you corrupt state!)

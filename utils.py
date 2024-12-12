@@ -41,7 +41,7 @@ def print_clear_line():
 	print("\x1b[2K\r", end='', flush=True)
 
 # Format a duration as a single nearest appropriate integral time unit (e.g. one of 15s, 3m, 6h, 4d)
-def format_duration(seconds: float) -> str:
+def format_duration(seconds: Union[int, float]) -> str:
 	duration = abs(seconds)
 	round_duration = int(duration)
 	if round_duration < 60:
@@ -58,6 +58,16 @@ def format_duration(seconds: float) -> str:
 				round_duration = int(duration / 86400)
 				round_duration_unit = 'd'
 	return f"{'-' if seconds < 0 else ''}{round_duration}{round_duration_unit}"
+
+# Format a duration as hours and minutes
+def format_duration_hmin(seconds: Union[int, float]) -> str:
+	duration = abs(seconds)
+	hours = int(duration / 3600)
+	minutes = int(duration / 60 - hours * 60)
+	if hours == 0:
+		return f"{'-' if seconds < 0 else ''}{minutes}m"
+	else:
+		return f"{'-' if seconds < 0 else ''}{hours}h{minutes}m"
 
 # Format a size in bytes using the most appropriate IEC unit (e.g. 24B, 16.8KiB, 5.74MiB)
 def format_size_iec(size: int, fmt: str = '.3g') -> str:
@@ -137,34 +147,34 @@ class DelayedRaise:
 		if self.have_errors():
 			raise RuntimeError(f"{base_msg}:{''.join(f'\n{count} \xd7 {msg}' for msg, count in sorted(self.msgs.items()) if count > 0)}")
 
-# Error logger that only logs the first N errors then provides a summary at the end
-class ErrorSummaryLogger:
+# Log summarizer that only logs the first N messages and then provides a summary message at the end with how many further messages were omitted and/or how many there were in total
+class LogSummarizer:
 
-	def __init__(self, log: logging.Logger, show_errors: int):
-		# log = Logger to use
-		# show_errors = Number of first-received errors to log, before waiting until finalization to summarize how many further/total errors occured
-		self.log = log
-		self.show_errors = show_errors
-		self.num_errors = 0
+	def __init__(self, log_fn: Callable[[str], None], show_msgs: int):
+		# log_fn = Logging function to use (e.g. log.error where log is a logging.Logger)
+		# show_msgs = Number of first-received messages to log, before waiting until finalization to summarize how many further/total messages occured
+		self.log_fn = log_fn
+		self.show_msgs = show_msgs
+		self.num_msgs = 0
 
 	def reset(self):
-		self.num_errors = 0
+		self.num_msgs = 0
 
-	def error(self, msg: str) -> bool:
-		# msg = Error message to conditionally log
+	def log(self, msg: str) -> bool:
+		# msg = Message to conditionally log
 		# Returns whether the message was logged
-		self.num_errors += 1
-		if self.num_errors <= self.show_errors:
-			self.log.error(msg)
+		self.num_msgs += 1
+		if self.num_msgs <= self.show_msgs:
+			self.log_fn(msg)
 			return True
 		else:
 			return False
 
 	def finalize(self, msg_fn: Callable[[int, int], str]) -> bool:
-		# msg_fn = Callable that generates a summary error message string to log given how many errors were hidden and how many errors there were in total
-		# Returns whether a final message was logged (a final message is only logged if more errors occurred than were shown)
-		if self.num_errors > self.show_errors:
-			self.log.error(msg_fn(self.num_errors - self.show_errors, self.num_errors))
+		# msg_fn = Callable that generates a summary message string to log given how many messages were omitted and how many messages there were in total (e.g. lambda num_omitted, num_total: f"A further {num_omitted} messages occurred for a total of {num_total}")
+		# Returns whether a final message was logged (a final message is only logged if more messages occurred than were shown)
+		if self.num_msgs > self.show_msgs:
+			self.log_fn(msg_fn(self.num_msgs - self.show_msgs, self.num_msgs))
 			return True
 		else:
 			return False

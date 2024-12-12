@@ -35,6 +35,8 @@ token_estimator_warn: once
 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 remote_update_interval: 10.0
 
+# How many warnings to show/log per batch per warning type when processing responses
+show_warnings: 50
 # How many errors to show/log per batch per error type when processing responses
 show_errors: 25
 # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
