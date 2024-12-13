@@ -285,6 +285,7 @@ class State:
 	batch_history: list[BatchState] = dataclasses.field(default_factory=list)  # History of the final states of the completed batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
 	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)  # Task push statistics
 	metrics: Metrics = dataclasses.field(default_factory=Metrics)              # Completed request metrics
+	num_pass_failures: int = 0                                                 # Current number of consecutive batch pass failures
 
 # State file class
 class StateFile:
@@ -539,6 +540,8 @@ class ResultStats:
 	num_cancelled: int  # Number of results with a retryable error due to the batch being cancelled
 	num_expired: int    # Number of results with a retryable error due to the batch being expired
 	num_fatal: int      # Number of results with a fatal error
+	num_pass: int       # Number of results considered as 'passed' (i.e. not indicative of problems = successful or expired)
+	pass_ratio: float   # Ratio of passed results to the number of requests
 
 # Batch result class
 @dataclasses.dataclass(frozen=True)
@@ -608,6 +611,9 @@ class GPTRequester:
 		max_remote_cost: float = 150.0,                       # Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time
 		max_mb_safety: float = 1.01,                          # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
 		max_token_safety: float = 1.05,                       # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
+
+		min_pass_ratio: float = 0.5,                          # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)
+		max_pass_failures: int = 2,                           # Trigger a processing error if this many consecutive batches do not pass
 	):
 
 		self.working_dir = os.path.abspath(working_dir)
@@ -669,7 +675,7 @@ class GPTRequester:
 		log.info(f"{self.name_prefix}: Costs per output mtoken: Direct {self.cost_output_direct_mtoken:.3f}, Batch {self.cost_output_batch_mtoken:.3f}")
 
 		self.assumed_completion_ratio = assumed_completion_ratio
-		if not 0 <= self.assumed_completion_ratio <= 1:
+		if not 0.0 <= self.assumed_completion_ratio <= 1.0:
 			raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
 		log.info(f"{self.name_prefix}: Assuming an output token completion ratio of {self.assumed_completion_ratio:.3g}")
 
@@ -744,6 +750,14 @@ class GPTRequester:
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens, {self.max_session_cost:.3f} assumed cost per session")
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} assumed cost per task")
+
+		self.min_pass_ratio = min_pass_ratio
+		if not 0.0 <= self.min_pass_ratio <= 1.0:
+			raise ValueError(f"Minimum pass ratio must be in the interval [0,1]: {self.min_pass_ratio:.3g}")
+		self.max_pass_failures = max_pass_failures
+		if self.max_pass_failures < 1:
+			raise ValueError(f"Maximum number of pass failures must be at least 1: {self.max_pass_failures}")
+		log.info(f"{self.name_prefix}: Triggering a processing error if {self.max_pass_failures} consecutive batches have a pass ratio less than {self.min_pass_ratio:.3g}")
 
 		self._enter_stack = contextlib.ExitStack()
 		self.type_cache: Optional[utils.SerialTypeCache] = None
@@ -870,6 +884,9 @@ class GPTRequester:
 		add_argument(name='max_remote_cost', type=float, metavar='COST', help="Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time")
 		add_argument(name='max_mb_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
 		add_argument(name='max_token_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
+
+		add_argument(name='min_pass_ratio', type=float, metavar='RATIO', help="If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)")
+		add_argument(name='max_pass_failures', type=int, metavar='NUM', help="Trigger a processing error if this many consecutive batches do not pass")
 
 		return group
 
@@ -1724,6 +1741,8 @@ class GPTRequester:
 								elif info.err_info.subtype == 'batch_expired':
 									num_expired += 1
 
+					num_pass = num_success + num_expired
+					pass_ratio = num_pass / batch.num_requests
 					duration = max((at for at in (batch.remote.batch.failed_at, batch.remote.batch.completed_at, batch.remote.batch.expired_at, batch.remote.batch.cancelled_at) if at is not None), default=batch.remote.batch.created_at) - batch.remote.batch.created_at
 					result_stats = ResultStats(
 						duration=duration,
@@ -1737,9 +1756,11 @@ class GPTRequester:
 						num_cancelled=num_cancelled,
 						num_expired=num_expired,
 						num_fatal=num_fatal,
+						num_pass=num_pass,
+						pass_ratio=pass_ratio,
 					)
 
-					log.info(f"{self.name_prefix}: Batch {batch.id} ({batch.remote.batch.id}) took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) and got {result_stats.num_results}/{result_stats.num_requests} responses = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired)")
+					log.info(f"{self.name_prefix}: Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) and got {result_stats.num_results}/{result_stats.num_requests} responses = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%}")
 					assert result_stats.num_requests == len(batch.request_info) and result_stats.num_requests >= result_stats.num_results == len(result_info_map)
 					assert result_stats.num_results == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
 					assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
@@ -1752,12 +1773,8 @@ class GPTRequester:
 						log.error(f"{self.name_prefix}: Batch {batch.id} response contains {result_stats.num_cancelled} cancelled requests")
 						delayed_raise.add(msg="Batch response contains cancelled requests")  # [DELAYED RAISE]
 
-					num_success_expired = result_stats.num_success + result_stats.num_expired
-					if num_success_expired <= 0 or num_success_expired / result_stats.num_requests < MIN_SUCCESS_RATIO:  # TODO: 0 <= MIN_SUCCESS_RATIO (~= 0.5) <= 1, strictly less is BAD (success + expired), except that 0 success ratio is always BAD
-						pass  # TODO: Have a parameter NUM_BAD_SUCCESS_RATIO (or so, ~= 2) so that if this condition occurs that many batches in a row then log.error and delayed_raise.add [DELAYED RAISE] --> REQUIRES STATE!!!
-
 					if delayed_raise.have_section_errors():
-						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} as errors were encountered (leaving batch as it was)")
+						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} ({batch.remote.batch.id}) as errors were encountered (leaving batch as it was)")
 						continue  # [DELAYED RAISE]
 
 					result = BatchResult(
@@ -1769,7 +1786,9 @@ class GPTRequester:
 
 					return  # TODO: TEMP CONTINUE BELOW HERE (but don't execute or you corrupt state!)
 
-					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState]):
+					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState], num_pass_failures: int):
+						self.S.num_pass_failures = num_pass_failures
+						# TODO: REVERSE METRICS
 						self.S.batch_history[:] = batch_history
 						batch.request_info = request_info
 						self.S.batches[:] = batches
@@ -1780,7 +1799,7 @@ class GPTRequester:
 						# TODO: Instead of requiring a fancy send() (although this could be clean-ish but is not compatible with for-loop!), you could mutably update a field in BatchResult to say YEAH retry, NO don't => Would be super clean except for the (unexpected?) mutability
 						yield rstack, result  # TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary
 
-						rstack.callback(revert_state, batches=self.S.batches.copy(), request_info=batch.request_info, batch_history=self.S.batch_history.copy())
+						rstack.callback(revert_state, batches=self.S.batches.copy(), request_info=batch.request_info, batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
 
 						self.S.batches.remove(batch)
 						batch.request_info = {}
@@ -1790,6 +1809,11 @@ class GPTRequester:
 						# TODO: UPDATE METRICS (REVERSIBLE)
 						# for req_id, info in result.info.items():
 						# 	self.S.metrics  # TODO
+
+						if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
+							self.S.num_pass_failures += 1
+						else:
+							self.S.num_pass_failures = 0
 
 						self.validate_state_queue(clean=False)
 						self.state.save(rstack=rstack)
@@ -1802,7 +1826,11 @@ class GPTRequester:
 						self.delete_remote_file(file_id=batch.remote.file.id)
 					self.delete_local_file(path=batch.local_jsonl)
 
-					# TODO: LOG Finished processing batch etc (matching to initial log above)
+					log.info(f"{self.name_prefix}: Finished processing batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests")
+
+					if self.S.num_pass_failures >= self.max_pass_failures:
+						log.error(f"{self.name_prefix}: Have encountered {self.S.num_pass_failures} consecutive batch pass failures (max allowed {self.max_pass_failures})")
+						delayed_raise.add(msg="Number of consecutive batch pass failures has reached limit")  # [DELAYED RAISE]
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
