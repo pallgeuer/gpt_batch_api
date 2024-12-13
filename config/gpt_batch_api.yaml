@@ -93,7 +93,7 @@ max_mb_safety: 1.01
 max_token_safety: 1.05
 
 # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
-warn_predicted_input_factor: 1.05
+warn_predicted_input_factor: 1.2
 # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
 warn_assumed_completion_factor: 2.0
 # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)

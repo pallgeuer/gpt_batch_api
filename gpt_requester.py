@@ -612,7 +612,7 @@ class GPTRequester:
 		max_mb_safety: float = 1.01,                          # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
 		max_token_safety: float = 1.05,                       # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 
-		warn_predicted_input_factor: float = 1.05,            # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
+		warn_predicted_input_factor: float = 1.2,             # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
 		warn_assumed_completion_factor: float = 2.0,          # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
 		min_pass_ratio: float = 0.5,                          # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)
 		max_pass_failures: int = 2,                           # Trigger a processing error if this many consecutive batches do not pass

@@ -28,6 +28,7 @@ class InputTokensCount:
 	meta: int           # Number of input tokens representing message metadata (non-extra non-content data)
 	text: int           # Number of input tokens representing text content
 	image: int          # Number of input tokens representing image content
+	format: int         # Number of input tokens for specifying response format
 	tools: int          # Number of input tokens for specifying available tools
 	functions: int      # Number of input tokens for specifying available functions
 	extra: int          # Number of hidden extra input tokens (including fixed)
@@ -70,6 +71,7 @@ class CCFuncTokensConfig:
 	prop_desc_oth: int       # Number of extra tokens required for descriptions of other properties (array/enum)
 	prop_desc_item_obj: int  # Number of extra tokens required for descriptions of non-empty object array items
 	prop_desc_item_oth: int  # Number of extra tokens required for descriptions of other array items
+	prop_title_init: int     # Number of extra tokens required for titles
 
 # Token estimator class
 class TokenEstimator:
@@ -161,10 +163,12 @@ class TokenEstimator:
 				prop_desc_oth=1,
 				prop_desc_item_obj=4,
 				prop_desc_item_oth=5,
+				prop_title_init=3,
 			)
 			supports_tools = True
+			supports_json_schema = False
 			if re.match(r'(ft:)?(?:chat)?gpt-4o(?:-mini)?', model):
-				pass
+				supports_json_schema = True
 			elif re.match(r'(ft:)?(?:gpt-3.5-turbo|gpt-4|gpt-4-turbo)', model):
 				func_cfg.desc_strip_dot = 3
 				func_cfg.prop_desc_value = 3
@@ -235,6 +239,16 @@ class TokenEstimator:
 						msg_tokens[role] += value_tokens
 						meta += value_tokens
 
+			payload_response_format: Optional[dict[str, Any]] = payload.get('response_format', None)
+			if payload_response_format:
+				type_tokens['format'] += self.cc_response_format_input_tokens(
+					encoding=encoding,
+					response_format=payload_response_format,
+					supports_json_schema=supports_json_schema,
+					model=model,
+					func_cfg=func_cfg,
+				)
+
 			payload_tools: Optional[Sequence[dict[str, Any]]] = payload.get('tools', None)
 			if payload_tools:
 				if not supports_tools:
@@ -271,11 +285,12 @@ class TokenEstimator:
 
 		text = type_tokens['text']
 		image = type_tokens['image']
+		rformat = type_tokens['format']
 		tools = type_tokens['tools']
 		functions = type_tokens['functions']
 
-		total = fixed + msg_total + tools + functions
-		assert meta + text + image + tools + functions + extra == total
+		total = fixed + msg_total + rformat + tools + functions
+		assert meta + text + image + rformat + tools + functions + extra == total
 
 		return InputTokensCount(
 			fixed=fixed,
@@ -289,6 +304,7 @@ class TokenEstimator:
 			meta=meta,
 			text=text,
 			image=image,
+			format=rformat,
 			tools=tools,
 			functions=functions,
 			extra=extra,
@@ -344,6 +360,21 @@ class TokenEstimator:
 				self.warning("Ignoring input tokens corresponding to image URL that failed to open in PIL")
 			return None
 
+	# Chat completions: Estimate the number of input tokens required for response format
+	def cc_response_format_input_tokens(self, encoding: tiktoken.Encoding, response_format: dict[str, Any], supports_json_schema: bool, model: str, func_cfg: CCFuncTokensConfig) -> int:
+		response_format_type = response_format['type']
+		if response_format_type == 'text':
+			return 0
+		elif response_format_type == 'json_object':
+			return 0
+		elif response_format_type == 'json_schema':
+			if not supports_json_schema:
+				self.warning(f"Assuming default chat completions function tokens configuration for unrecognised JSON schema response format model: {model}")
+			return self.cc_functions_input_tokens(encoding=encoding, functions=(response_format['json_schema'],), function_call=None, func_cfg=func_cfg, key='schema')
+		else:
+			self.warning(f"Ignoring input tokens corresponding to unrecognised response format type: {response_format_type}")
+			return 0
+
 	# Chat completions: Estimate the number of input tokens required for tool use
 	def cc_tools_input_tokens(self, encoding: tiktoken.Encoding, tools: Sequence[dict[str, Any]], tool_choice: Union[str, dict[str, Any], None], func_cfg: CCFuncTokensConfig) -> int:
 
@@ -368,7 +399,7 @@ class TokenEstimator:
 		return self.cc_functions_input_tokens(encoding=encoding, functions=functions, function_call=function_call, func_cfg=func_cfg)
 
 	# Chat completions: Estimate the number of input tokens required for function use
-	def cc_functions_input_tokens(self, encoding: tiktoken.Encoding, functions: Sequence[dict[str, Any]], function_call: Union[str, dict[str, Any], None], func_cfg: CCFuncTokensConfig) -> int:
+	def cc_functions_input_tokens(self, encoding: tiktoken.Encoding, functions: Sequence[dict[str, Any]], function_call: Union[str, dict[str, Any], None], func_cfg: CCFuncTokensConfig, key: str = 'parameters') -> int:
 
 		if not functions:
 			return 0  # Note: It is actually an API error to pass empty tools/functions parameters, so we give it 0 tokens
@@ -383,7 +414,7 @@ class TokenEstimator:
 
 			total_tokens += func_cfg.func_init + len(encoding.encode(function['name']))
 
-			function_desc: Optional[str] = function.get('description', '')
+			function_desc: str = function.get('description', '')
 			if function_desc:
 				total_tokens += func_cfg.func_desc_pre
 			function_desc = function_desc.strip()
@@ -391,14 +422,23 @@ class TokenEstimator:
 				total_tokens += func_cfg.func_desc_post
 			total_tokens += len(encoding.encode(re.sub(rf'\.{{0,{func_cfg.desc_strip_dot}}}$', r'', function_desc)))
 
-			function_params: Optional[dict[str, Any]] = function.get('parameters', None)
+			function_params: Optional[dict[str, Any]] = function.get(key, None)
 			if function_params:
 				function_params_type: Optional[str] = function_params.get('type', None)
-				function_props: Optional[dict[str, Any]] = function_params.get('properties', None)
 				if function_params_type != 'object':
 					self.warning(f"Ignoring input tokens corresponding to functions due to unrecognised root function parameters type: {function_params_type}")
-				elif function_props:
-					total_tokens += func_cfg.root_props_init + self.cc_object_props_input_tokens(encoding=encoding, props=function_props, func_cfg=func_cfg)
+				else:
+					function_title: Optional[str] = function_params.get('title', None)
+					function_defs: Optional[dict[str, Any]] = function_params.get('$defs', None)
+					function_props: Optional[dict[str, Any]] = function_params.get('properties', None)
+					if function_title:
+						total_tokens += func_cfg.prop_title_init + len(encoding.encode(function_title))
+					if function_defs or function_props:
+						total_tokens += func_cfg.root_props_init
+					if function_defs:
+						total_tokens += self.cc_object_props_input_tokens(encoding=encoding, props=function_defs, func_cfg=func_cfg)
+					if function_props:
+						total_tokens += self.cc_object_props_input_tokens(encoding=encoding, props=function_props, func_cfg=func_cfg)
 
 		total_tokens += func_cfg.func_end
 
@@ -411,6 +451,7 @@ class TokenEstimator:
 		for prop_key, prop_spec in props.items():
 			last_valid = None
 			prop_type = prop_spec.get('type', None)
+			prop_title = prop_spec.get('title', None)
 			prop_desc = prop_spec.get('description', None)
 			prop_props = prop_spec.get('properties', None)
 			prop_items = prop_spec.get('items', None)
@@ -426,6 +467,7 @@ class TokenEstimator:
 				self.warning("Ignoring input tokens corresponding to array of properties-less objects in function schema")
 			else:
 				total_tokens += func_cfg.prop_key_init + len(encoding.encode(prop_key))
+				total_tokens += func_cfg.prop_title_init + len(encoding.encode(prop_title))
 				if prop_type == 'object':
 					total_tokens += self.cc_description_input_tokens(encoding=encoding, desc=prop_desc, func_cfg=func_cfg, prop_desc=func_cfg.prop_desc_obj)
 					if prop_props:
