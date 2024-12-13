@@ -195,7 +195,7 @@ class RequestMetrics:
 			models=self.models + other.models,
 			system_fingerprints=self.system_fingerprints + other.system_fingerprints,
 			local_jsonl_size=self.local_jsonl_size + other.local_jsonl_size,
-			usage=RequestMetrics.usage_iadd(copy.deepcopy(self.usage), other.usage),
+			usage=RequestMetrics.usage_iadd(self_usage=copy.deepcopy(self.usage), other_usage=other.usage),
 			true_cost=self.true_cost + other.true_cost,
 		)
 
@@ -208,7 +208,7 @@ class RequestMetrics:
 		self.models.update(other.models)
 		self.system_fingerprints.update(other.system_fingerprints)
 		self.local_jsonl_size += other.local_jsonl_size
-		RequestMetrics.usage_iadd(self.usage, other.usage)
+		RequestMetrics.usage_iadd(self_usage=self.usage, other_usage=other.usage)
 		self.true_cost += other.true_cost
 		return self
 
@@ -236,7 +236,7 @@ class RequestMetrics:
 		self.models[model] += 1
 		self.system_fingerprints[system_fingerprint] += 1
 		self.local_jsonl_size += local_jsonl_size
-		RequestMetrics.usage_iadd(self.usage, usage)
+		RequestMetrics.usage_iadd(self_usage=self.usage, other_usage=usage)
 		self.true_cost += true_cost
 		return self
 
@@ -522,8 +522,8 @@ class ResultInfo:
 	req_id: int                        # Request ID
 	req_payload: dict[str, Any]        # Request payload (JSON-loaded)
 	req_info: RequestInfo              # Request information
-	resp_info: Optional[ResponseInfo]  # Response information (if available)
-	err_info: Optional[ErrorInfo]      # Error information (if errored)
+	resp_info: Optional[ResponseInfo]  # Response information (if available, at least one of resp_info or err_info always exists)
+	err_info: Optional[ErrorInfo]      # Error information (if errored, at least one of resp_info or err_info always exists)
 	warn_infos: list[ErrorInfo]        # Warning information (if warnings occurred)
 
 # Result statistics class
@@ -612,6 +612,8 @@ class GPTRequester:
 		max_mb_safety: float = 1.01,                          # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
 		max_token_safety: float = 1.05,                       # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 
+		warn_predicted_input_factor: float = 1.05,            # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
+		warn_assumed_completion_factor: float = 2.0,          # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
 		min_pass_ratio: float = 0.5,                          # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)
 		max_pass_failures: int = 2,                           # Trigger a processing error if this many consecutive batches do not pass
 	):
@@ -751,12 +753,19 @@ class GPTRequester:
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens, {self.max_session_cost:.3f} assumed cost per session")
 		log.info(f"{self.name_prefix}: Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} assumed cost per task")
 
+		self.warn_predicted_input_factor = warn_predicted_input_factor
+		if self.warn_predicted_input_factor < 1.0:
+			raise ValueError(f"Predicted input tokens factor to warn at must be at least 1.0: {self.warn_predicted_input_factor:.3g}")
+		self.warn_assumed_completion_factor = warn_assumed_completion_factor
+		if self.warn_assumed_completion_factor < 1.0:
+			raise ValueError(f"Assumed completion tokens factor to warn at must be at least 1.0: {self.warn_assumed_completion_factor:.3g}")
 		self.min_pass_ratio = min_pass_ratio
 		if not 0.0 <= self.min_pass_ratio <= 1.0:
 			raise ValueError(f"Minimum pass ratio must be in the interval [0,1]: {self.min_pass_ratio:.3g}")
 		self.max_pass_failures = max_pass_failures
 		if self.max_pass_failures < 1:
 			raise ValueError(f"Maximum number of pass failures must be at least 1: {self.max_pass_failures}")
+		log.info(f"{self.name_prefix}: Warning on batches that exceed a predicted input tokens factor of {self.warn_predicted_input_factor:.3g} or an assumed completion tokens factor of {self.warn_assumed_completion_factor:.3g}")
 		log.info(f"{self.name_prefix}: Triggering a processing error if {self.max_pass_failures} consecutive batches have a pass ratio less than {self.min_pass_ratio:.3g}")
 
 		self._enter_stack = contextlib.ExitStack()
@@ -885,6 +894,8 @@ class GPTRequester:
 		add_argument(name='max_mb_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
 		add_argument(name='max_token_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
 
+		add_argument(name='warn_predicted_input_factor', type=float, metavar='FACTOR', help="Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
+		add_argument(name='warn_assumed_completion_factor', type=float, metavar='FACTOR', help="Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
 		add_argument(name='min_pass_ratio', type=float, metavar='RATIO', help="If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)")
 		add_argument(name='max_pass_failures', type=int, metavar='NUM', help="Trigger a processing error if this many consecutive batches do not pass")
 
@@ -994,9 +1005,9 @@ class GPTRequester:
 		log.info(f"{self.name_prefix}: SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"{self.name_prefix}: TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 		batch_metrics, direct_metrics, total_metrics = self.S.metrics.batch.total, self.S.metrics.direct.total, self.S.metrics.total
-		log.info(f"{self.name_prefix}: {batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} output = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {batch_metrics.true_cost:.3f} true cost")
-		log.info(f"{self.name_prefix}: {direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} output = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {direct_metrics.true_cost:.3f} true cost")
-		log.info(f"{self.name_prefix}: A total of {total_metrics.num_requests} requests have been COMPLETED, entailing {len(total_metrics.models)} models, {len(total_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(total_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := total_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached + {total_metrics.usage.get('prompt_tokens', 0) - cached_tokens} input + {(reasoning_tokens := total_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {total_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} output = {total_metrics.usage.get('total_tokens', 0)} total tokens, {total_metrics.true_cost:.3f} true cost")
+		log.info(f"{self.name_prefix}: {batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {batch_metrics.true_cost:.3f} true cost")
+		log.info(f"{self.name_prefix}: {direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {direct_metrics.true_cost:.3f} true cost")
+		log.info(f"{self.name_prefix}: A total of {total_metrics.num_requests} requests have been COMPLETED, entailing {len(total_metrics.models)} models, {len(total_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(total_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := total_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {total_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := total_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {total_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {total_metrics.usage.get('total_tokens', 0)} total tokens, {total_metrics.true_cost:.3f} true cost")
 
 	# Create a GPT request item
 	def create_request_item(self, req: GPTRequest) -> GPTRequestItem:
@@ -1696,6 +1707,7 @@ class GPTRequester:
 								else:
 									err_resp_retry.log(err_msg)  # [RETRYABLE]
 
+							assert resp_info is not None or err_info is not None
 							result_info_map[req_id] = ResultInfo(
 								req_id=req_id,
 								req_payload=req_payload,
@@ -1720,10 +1732,37 @@ class GPTRequester:
 					delayed_raise.add(msg="Encountered an unexpected request ID", count=err_req_id_bad.num_msgs)
 					delayed_raise.add(msg="Encountered a duplicate request ID", count=err_req_id_dupl.num_msgs)
 
+					batch_models = collections.Counter()
+					batch_system_fingerprints = collections.Counter()
+					batch_predicted_input_tokens = 0
+					batch_predicted_output_tokens = 0
+					batch_predicted_cost = 0.0
+					batch_usage = {}
+					for info in result_info_map.values():
+						if info.resp_info is not None:
+							batch_models[info.resp_info.model] += 1
+							batch_system_fingerprints[info.resp_info.system_fingerprint] += 1
+							RequestMetrics.usage_iadd(self_usage=batch_usage, other_usage=info.resp_info.usage)
+							batch_predicted_input_tokens += info.req_info.tokens_cost.input_tokens
+							batch_predicted_output_tokens += info.req_info.tokens_cost.output_tokens
+							batch_predicted_cost += info.req_info.tokens_cost.cost_batch
+					batch_input_tokens = batch_usage.get('prompt_tokens', 0)
+					batch_completion_tokens = batch_usage.get('completion_tokens', 0)
+					batch_reasoning_tokens = batch_usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0)
+					batch_response_tokens = batch_completion_tokens - batch_reasoning_tokens
+					batch_total_tokens = batch_usage.get('total_tokens', 0)
+					batch_true_cost = self.token_coster.cost(input_batch=batch_input_tokens, output_batch=batch_completion_tokens)
+					log.info(f"{self.name_prefix}: Batch {batch.id} received {len(result_info_map)} valid responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_cost:.3f} true cost (predicted {batch_predicted_cost:.3f})")
+					if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
+						log.warning(f"{self.name_prefix}: Batch {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
+					if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
+						log.warning(f"{self.name_prefix}: Batch {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens")
+
 					num_results = num_success = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = 0
 					for info in result_info_map.values():
 						num_results += 1
 						if info.err_info is None:
+							assert info.resp_info is not None
 							if info.warn_infos:
 								num_warned += 1
 							else:
@@ -1760,7 +1799,7 @@ class GPTRequester:
 						pass_ratio=pass_ratio,
 					)
 
-					log.info(f"{self.name_prefix}: Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) and got {result_stats.num_results}/{result_stats.num_requests} responses = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%}")
+					log.info(f"{self.name_prefix}: Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) and got {result_stats.num_results}/{result_stats.num_requests} responses = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
 					assert result_stats.num_requests == len(batch.request_info) and result_stats.num_requests >= result_stats.num_results == len(result_info_map)
 					assert result_stats.num_results == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
 					assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
@@ -1784,7 +1823,7 @@ class GPTRequester:
 						stats=result_stats,
 					)
 
-					return  # TODO: TEMP CONTINUE BELOW HERE (but don't execute or you corrupt state!)
+					continue  # TODO: TEMP CONTINUE BELOW HERE (but don't execute or you corrupt state!)
 
 					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState], num_pass_failures: int):
 						self.S.num_pass_failures = num_pass_failures

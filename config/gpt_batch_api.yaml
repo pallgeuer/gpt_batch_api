@@ -92,6 +92,10 @@ max_mb_safety: 1.01
 # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 max_token_safety: 1.05
 
+# Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
+warn_predicted_input_factor: 1.05
+# Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
+warn_assumed_completion_factor: 2.0
 # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)
 min_pass_ratio: 0.5
 # Trigger a processing error if this many consecutive batches do not pass
