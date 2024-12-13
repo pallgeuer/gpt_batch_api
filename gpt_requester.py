@@ -1324,7 +1324,7 @@ class GPTRequester:
 							self.validate_state_queue(clean=False)
 							self.state.save(rstack=rstack)
 
-						log.info(f"{self.name_prefix}: Pushed batch {batch.id} as '{batch.remote.batch.id}' based on '{batch.remote.file.id}' of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
+							log.info(f"{self.name_prefix}: Pushed batch {batch.id} as '{batch.remote.batch.id}' based on '{batch.remote.file.id}' of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
 
 						remote_batches = next_remote_batches
 						remote_requests = next_remote_requests
@@ -1506,7 +1506,7 @@ class GPTRequester:
 						delayed_raise.add(msg=f"Batch status is '{batch.remote.batch.status}'")  # [DELAYED RAISE]
 					elif batch.remote.batch.status != 'completed' or batch_errors:
 						# [COVERED] If this occurs then we just log an error, and continue trying to parse the batch anyway and deal with any errors that we encounter doing that, because that's the only thing that actually matters (e.g. expired and cancelled batches can still have valid results)
-						log.error(f"{self.name_prefix}: Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
+						(log.error if batch_errors else log.warning)(f"{self.name_prefix}: Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
 
 					log.info(f"{self.name_prefix}: Loading batch {batch.id} input JSONL: {batch.local_jsonl}")
 					req_payload_map: dict[int, dict[str, Any]] = {}  # Maps: Request ID --> Request payload
@@ -1823,8 +1823,6 @@ class GPTRequester:
 						stats=result_stats,
 					)
 
-					continue  # TODO: TEMP CONTINUE BELOW HERE (but don't execute or you corrupt state!)
-
 					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState], num_pass_failures: int):
 						self.S.num_pass_failures = num_pass_failures
 						# TODO: REVERSE METRICS
@@ -1832,40 +1830,41 @@ class GPTRequester:
 						batch.request_info = request_info
 						self.S.batches[:] = batches
 
-					# TODO: Reversibly update all state/files/remote/metrics/etc for this one batch and save everything (deleting the remote batches/files is OUTSIDE of the reversible thing AFTER state saved, as theoretically doesn't matter if batches and files exist if they are no longer in state? And deletion operation is NOT reversible anyway. It just needs to be exception-safe when deleting, log error if goes wrong and indicate maybe need to manually delete from remote)
-					with utils.AtomicRevertStack() as rstack:
+					with utils.DelayKeyboardInterrupt():
 
-						# TODO: Instead of requiring a fancy send() (although this could be clean-ish but is not compatible with for-loop!), you could mutably update a field in BatchResult to say YEAH retry, NO don't => Would be super clean except for the (unexpected?) mutability
-						yield rstack, result  # TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary
+						with utils.RevertStack() as rstack:
 
-						rstack.callback(revert_state, batches=self.S.batches.copy(), request_info=batch.request_info, batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
+							# TODO: Instead of requiring a fancy send() (although this could be clean-ish but is not compatible with for-loop!), you could mutably update a field in BatchResult to say YEAH retry, NO don't => Would be super clean except for the (unexpected?) mutability
+							yield rstack, result  # TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary
 
-						self.S.batches.remove(batch)
-						batch.request_info = {}
-						self.S.batch_history.append(batch)
-						self.S.batch_history.sort()
+							rstack.callback(revert_state, batches=self.S.batches.copy(), request_info=batch.request_info, batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
 
-						# TODO: UPDATE METRICS (REVERSIBLE)
-						# for req_id, info in result.info.items():
-						# 	self.S.metrics  # TODO
+							self.S.batches.remove(batch)
+							batch.request_info = {}
+							self.S.batch_history.append(batch)
+							self.S.batch_history.sort()
 
-						if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
-							self.S.num_pass_failures += 1
-						else:
-							self.S.num_pass_failures = 0
+							# TODO: UPDATE METRICS (REVERSIBLE)
+							# for req_id, info in result.info.items():
+							# 	self.S.metrics  # TODO
 
-						self.validate_state_queue(clean=False)
-						self.state.save(rstack=rstack)
+							if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
+								self.S.num_pass_failures += 1
+							else:
+								self.S.num_pass_failures = 0
 
-					if batch.remote.batch.error_file_id is not None:
-						self.delete_remote_file(file_id=batch.remote.batch.error_file_id)
-					if batch.remote.batch.output_file_id is not None:
-						self.delete_remote_file(file_id=batch.remote.batch.output_file_id)
-					if batch.remote.file.id is not None:
-						self.delete_remote_file(file_id=batch.remote.file.id)
-					self.delete_local_file(path=batch.local_jsonl)
+							self.validate_state_queue(clean=False)
+							self.state.save(rstack=rstack)
 
-					log.info(f"{self.name_prefix}: Finished processing batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests")
+						if batch.remote.batch.error_file_id is not None:
+							self.delete_remote_file(file_id=batch.remote.batch.error_file_id)
+						if batch.remote.batch.output_file_id is not None:
+							self.delete_remote_file(file_id=batch.remote.batch.output_file_id)
+						if batch.remote.file.id is not None:
+							self.delete_remote_file(file_id=batch.remote.file.id)
+						self.delete_local_file(path=batch.local_jsonl)
+
+						log.info(f"{self.name_prefix}: Finished processing batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests")
 
 					if self.S.num_pass_failures >= self.max_pass_failures:
 						log.error(f"{self.name_prefix}: Have encountered {self.S.num_pass_failures} consecutive batch pass failures (max allowed {self.max_pass_failures})")
@@ -1873,25 +1872,8 @@ class GPTRequester:
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-		# TODO: Batch-wise yield (including rstack) whatever information is required
-		# TODO: Logging
-		# TODO: When/how to fail/auto-retry samples?
-		# TODO: If you process batches, ensure that whatever state you change immediately reflects this in num_finished_batches (when you delete the remote batches they are no longer remote batches)
-		# TODO: Remove processed batches from the server/batch state list/local batch file => That way self.num_finished_batches() is implicitly updated
-		# TODO: When batches are completed, clear out request_info (dict), and save them to the State.batch_history
-		# TODO: Rejected prediction tokens somehow still count towards cost as output tokens - no issue as already counted in returned 'completion_tokens' right? (see Predicted Outputs - Note that any rejected tokens are still billed like other completion tokens generated by the API, so Predicted Outputs can introduce higher costs for your requests.)
-		# TODO: Update METRICS
-		# TODO: Compare received metrics to assumed/expected token counts etc
-		# TODO: Assert that cached tokens <= input tokens, reasoning tokens <= output tokens
-		# TODO: Refer to guide on structured outputs for how to error check it!
-		# TODO: In GPT requester: WARN if input token estimations are far off individually, or definitely too low on average (+2%)
-		# TODO: Beware, if you auto-retry and eventually a small batch consists of only already-failed retries then don't want to quit right due to "whole batch" erroring out?
-		# TODO: ANY error that requires manual inspection of batch output/errors/etc to resolve should raise an exception to make sure the batch is NOT processed and deleted. Only auto-retry is if TASK says so? Everything else causes immediate quit? Better need to restart (wasted time) than keep going on errors (wasted MONEY)
-		# TODO: If the exception is a retry-able one (e.g. no internet) then abort processing this batch instead of checking it off as done but errored!
-		# TODO: MUST ensure condition F!
-
-	# TODO: Clean up remote files after process_batches() testing is over
-	# TODO: Estimate of input tokens is WAY off for char_codes => Is it a confusion of python class type vs JSON schema in TokenEstimator? Somehow schema is not being counted I think...
+	# TODO: When/how to fail/auto-retry samples? TaskManager also should be able to cause a retry of a success/warned results? Do all with non-fatal err_info get auto-retried, yes right that was the point?
+	# TODO: Task manager output file and such
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
