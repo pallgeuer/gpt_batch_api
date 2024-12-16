@@ -501,7 +501,7 @@ class ErrorInfo:
 	data: Optional[Any] = None  # Optional data associated with the error (the type of the data depends on the type of the error)
 
 # Result information class
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class ResultInfo:
 	req_id: int                        # Request ID
 	req_jsonl_size: int                # Request JSONL size (bytes)
@@ -510,6 +510,7 @@ class ResultInfo:
 	resp_info: Optional[ResponseInfo]  # Response information (if available, at least one of resp_info or err_info always exists)
 	err_info: Optional[ErrorInfo]      # Error information (if errored, at least one of resp_info or err_info always exists)
 	warn_infos: list[ErrorInfo]        # Warning information (if warnings occurred)
+	retry: bool                        # Whether the request should be retried as something retryable went wrong
 
 # Result statistics class
 @dataclasses.dataclass(frozen=True)
@@ -1704,6 +1705,7 @@ class GPTRequester:
 								resp_info=resp_info,
 								err_info=err_info,
 								warn_infos=warn_infos,
+								retry=err_info is not None and not err_info.fatal,
 							)
 
 					warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further warnings for batch {batch.id} (total {num_total} warnings)")
@@ -1838,8 +1840,7 @@ class GPTRequester:
 
 						with utils.RevertStack() as rstack:
 
-							# TODO: Instead of requiring a fancy send() (although this could be clean-ish but is not compatible with for-loop!), you could mutably update a field in BatchResult to say YEAH retry, NO don't => Would be super clean except for the (unexpected?) mutability
-							yield rstack, result  # TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary
+							yield rstack, result  # Note: Task is permitted to update result.info[REQID].retry (boolean) to reflect whether a request can/should be retried or not if possible
 
 							rstack.callback(
 								revert_state,
@@ -1886,6 +1887,8 @@ class GPTRequester:
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
+	# TODO: --fatal_error retry/skip/raise
+
 	# TODO: When/how to fail/auto-retry samples? TaskManager also should be able to cause a retry of a success/warned results? Do all with non-fatal err_info get auto-retried, yes right that was the point?
 	# TODO: Task manager output file and such
 
@@ -1905,6 +1908,7 @@ class GPTRequester:
 	# TODO: Deal with possibly aborting if log.error()'s happen too often (search where I've used them - certain number of them within last hour?)? Or exponentially relax (e.g. temporary internet/server outage) and then eventually abort?
 
 	# TODO: Need a command line argument where you can supply batch IDs to forget (e.g. ones that were accidentally deleted from the server, or error out when trying to retrieve/process?) => Would need a mode that 'uncommits' that batch in the task state? Or generally allow on start a flag that says assume no more queue/batches exist and start again? (general hammer against all kinds of problems)
+	# TODO: Need a command line switch to force-process batches containing requests with fatal errors (and whether to retry fatal or not) => Allows the 49999 other requests in the batch to be processed, and allowed the user the chance to manually check what's going on prior to deleting all the files
 
 	# TODO: How to gracefully deal with an entire batch erroring out? Raise a runtime exception as no clue whether data is the problem or wrong limits configured, but not auto-recoverable in any case? Or maybe after 2-3 failed batches raise? Failed push? Failed result?
 	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)

@@ -342,7 +342,8 @@ class TaskManager:
 		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)
 		# TODO: Log how many samples errored for whatever reasons (be specific), and how many were internally auto-retried by GPT requester
 
-		for rstack, TODO in self.GR.process_batches():
+		# TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary by writing to result.info[REQID].retry
+		for rstack, result in self.GR.process_batches():
 			print("BLAH")  # TODO: TEMP
 
 		# TODO: assert self.GR.num_finished_batches() <= 0
