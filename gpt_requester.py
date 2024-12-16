@@ -573,7 +573,7 @@ class GPTRequester:
 		show_warnings: int = 50,                              # How many warnings to show/log per batch per warning type when processing responses
 		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
 		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
-		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or skip and fail them
+		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
 		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 
 		cost_input_direct_mtoken: float = 2.50,               # The cost per million direct input tokens (1M tokens ~ 750K words)
@@ -866,7 +866,7 @@ class GPTRequester:
 		add_argument(name='show_warnings', type=int, metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
 		add_argument(name='show_errors', type=int, metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
 		add_argument(name='process_failed_batches', type=int, metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
-		add_argument(name='retry_fatal_requests', type=bool, help="Whether to retry fatal requests from failed batches that are processed, or skip and fail them")
+		add_argument(name='retry_fatal_requests', type=bool, help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
 		if include_auto_parse:
 			add_argument(name='auto_parse', type=bool, help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
 
