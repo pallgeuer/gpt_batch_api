@@ -346,7 +346,7 @@ class TaskManager:
 		for rstack, result in self.GR.process_batches():
 			print("BLAH")  # TODO: TEMP
 
-		# TODO: assert self.GR.num_finished_batches() <= 0
+		assert self.GR.num_finished_batches() <= 0
 
 	# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 # EOF

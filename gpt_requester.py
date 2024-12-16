@@ -1924,7 +1924,7 @@ class GPTRequester:
 								else:
 									self.S.num_pass_failures = 0
 
-							# TODO: Retry exactly the requests for which result.info[REQID].retry is truthy (note that result.info is guaranteed to contain exactly all requests in the batch)
+							# TODO: Retry exactly the requests for which result.info[REQID].retry is truthy (note that result.info is guaranteed to contain exactly all requests in the batch) (need to save queue as well? Want to do that AFTER validation though?)
 
 							self.validate_state_queue(clean=False)
 							self.state.save(rstack=rstack)
@@ -1949,25 +1949,20 @@ class GPTRequester:
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-	# TODO: Implement request retry-ing
+	# TODO: Remove "char_codes: " and SIMILAR from ALL logs (ADD it to FIRST log - with prefix BLAH)
+	# TODO: The DEFAULT 'retry' should already take into consideration max_retries, BUT this can be overridden by task as final authority. That way requester deals with boilerplate counting YET task knows exactly whether a retry will happen (up to reversibility) and can success/ongoing/fail a sample appropriately
 	# TODO: Task manager output file and such
+	# TODO: Add a 'clear/wipe/forget all ongoing' NUKE option that in both TASK and REQUESTER wipes and cleans up all pool/queue/local-batches/remote-batches/num_pass_failures without processing any of it (there is an OPTION to also un-fail all task samples that have permanently failed so far - wipe_failed? Ends up with committed == succeeded and failed is empty)
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
+	# TODO: In DIRECT mode, an option to make it print very verbosely what was sent/received with exact token stats and everything for the initial/trial/debugging stage
 
 	# TODO: Add FORCE DIRECT mode that can be used to test how the LLM reacts to requests (e.g. approx how many tokens come out on average)
-	# TODO: In FORCE DIRECT mode, an option to make it print very verbosely what was sent/received with exact token stats and everything for the initial/trial/debugging stage
 
 	# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
 	# TODO: Have a batch size threshold below which direct requests are used instead of Batch API (minimum batch size?)
 	# TODO: Allow threshold below which a forced batch/push automatically uses single API requests instead
-
-	# TODO: Any meaningful way to implement auto-retry individual failed requests? (up to a certain retry count)
-	# TODO: Add transparent retry/attempts support (the function/code that processes received responses can indicate whether a retry is required, and then that happens if there are remaining attempts possible, otherwise permanent failure of the request)
-	# TODO: Errors that one should not attempt to continue from (e.g. inconsistent state?) so that manual intervention can fix, errors like timeouts that could benefit from a simple retry (but need to back off?), errors like requests/samples that permanently fail and never go through - when to accept? How to retry after accepted? (allow a launch to clear the failed task manager state / gpt requester attempts state?)
-	# TODO: Deal with possibly aborting if log.error()'s happen too often (search where I've used them - certain number of them within last hour?)? Or exponentially relax (e.g. temporary internet/server outage) and then eventually abort?
-
-	# TODO: Need a command line argument where you can supply batch IDs to forget (e.g. ones that were accidentally deleted from the server, or error out when trying to retrieve/process?) => Would need a mode that 'uncommits' that batch in the task state? Or generally allow on start a flag that says assume no more queue/batches exist and start again? (general hammer against all kinds of problems)
 
 	# TODO: wandb (conditional import to not require install if don't need it!)
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
