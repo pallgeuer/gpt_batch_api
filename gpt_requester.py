@@ -179,9 +179,9 @@ class PushStats:
 class RequestMetrics:
 
 	num_requests: int = 0                                                                                        # Total number of completed requests
+	local_jsonl_size: int = 0                                                                                    # Total number of completed request bytes (as per how many bytes the requests are in the local JSONL batch input files)
 	models: collections.Counter[str] = dataclasses.field(default_factory=collections.Counter)                    # Models used for completed requests
 	system_fingerprints: collections.Counter[str] = dataclasses.field(default_factory=collections.Counter)       # System fingerprints seen for completed requests
-	local_jsonl_size: int = 0                                                                                    # Total number of completed request bytes as per how big requests are in the local JSONL batch input files
 	usage: dict[str, Union[int, float, dict[str, Union[int, float]]]] = dataclasses.field(default_factory=dict)  # Total true usage associated with completed requests (i.e. token usage)
 	true_cost: float = 0.0                                                                                       # Total true cost associated with completed requests
 
@@ -192,9 +192,9 @@ class RequestMetrics:
 			return NotImplemented
 		return RequestMetrics(
 			num_requests=self.num_requests + other.num_requests,
+			local_jsonl_size=self.local_jsonl_size + other.local_jsonl_size,
 			models=self.models + other.models,
 			system_fingerprints=self.system_fingerprints + other.system_fingerprints,
-			local_jsonl_size=self.local_jsonl_size + other.local_jsonl_size,
 			usage=RequestMetrics.usage_iadd(self_usage=copy.deepcopy(self.usage), other_usage=other.usage),
 			true_cost=self.true_cost + other.true_cost,
 		)
@@ -205,9 +205,9 @@ class RequestMetrics:
 		if not isinstance(other, RequestMetrics):
 			return NotImplemented
 		self.num_requests += other.num_requests
+		self.local_jsonl_size += other.local_jsonl_size
 		self.models.update(other.models)
 		self.system_fingerprints.update(other.system_fingerprints)
-		self.local_jsonl_size += other.local_jsonl_size
 		RequestMetrics.usage_iadd(self_usage=self.usage, other_usage=other.usage)
 		self.true_cost += other.true_cost
 		return self
@@ -223,21 +223,6 @@ class RequestMetrics:
 					self.__iadd__(oth)
 			else:
 				raise TypeError(f"Unexpected type: {utils.get_class_str(other)}")
-		return self
-
-	def add_response(self, model: str, system_fingerprint: str, local_jsonl_size: int, usage: dict[str, Union[int, float, dict[str, Union[int, float]]]], true_cost: float) -> Self:
-		# model = The model that the response used
-		# system_fingerprint = The system fingerprint of the server that was used to generate the response
-		# local_jsonl_size = The request JSONL size (including a trailing newline)
-		# usage = The true usage of the request/response
-		# true_cost = The true cost of the request/response calculated based on the true usage
-		# Returns the updated request metrics (self)
-		self.num_requests += 1
-		self.models[model] += 1
-		self.system_fingerprints[system_fingerprint] += 1
-		self.local_jsonl_size += local_jsonl_size
-		RequestMetrics.usage_iadd(self_usage=self.usage, other_usage=usage)
-		self.true_cost += true_cost
 		return self
 
 	@staticmethod
@@ -261,18 +246,17 @@ class RequestMetrics:
 # API metrics class
 @dataclasses.dataclass
 class APIMetrics:
+	num_api_calls: int = 0                                                         # Number of API calls that were associated with the completed requests
 	succeeded: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)  # Metrics associated with succeeded requests
 	failed: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)     # Metrics associated with failed requests
 	total: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)      # Total metrics of completed requests for the API
-	num_api_calls: int = 0                                                         # Number of API calls that were associated with the completed requests
 
 # Metrics class
 @dataclasses.dataclass
 class Metrics:
-	direct: APIMetrics = dataclasses.field(default_factory=APIMetrics)         # Metrics associated with completed direct API requests
-	batch: APIMetrics = dataclasses.field(default_factory=APIMetrics)          # Metrics associated with completed batch API requests
-	total: RequestMetrics = dataclasses.field(default_factory=RequestMetrics)  # Total metrics of completed requests across both APIs
-	total_api_calls: int = 0                                                   # Total number of API calls that were associated with the completed requests
+	direct: APIMetrics = dataclasses.field(default_factory=APIMetrics)  # Metrics associated with completed direct API requests
+	batch: APIMetrics = dataclasses.field(default_factory=APIMetrics)   # Metrics associated with completed batch API requests
+	all: APIMetrics = dataclasses.field(default_factory=APIMetrics)     # Total metrics of completed requests across all APIs
 
 # State class
 @dataclasses.dataclass
@@ -520,6 +504,7 @@ class ErrorInfo:
 @dataclasses.dataclass(frozen=True)
 class ResultInfo:
 	req_id: int                        # Request ID
+	req_jsonl_size: int                # Request JSONL size (bytes)
 	req_payload: dict[str, Any]        # Request payload (JSON-loaded)
 	req_info: RequestInfo              # Request information
 	resp_info: Optional[ResponseInfo]  # Response information (if available, at least one of resp_info or err_info always exists)
@@ -550,6 +535,8 @@ class BatchResult:
 	errors: list[openai.types.BatchError]  # List of any encountered batch errors
 	info: dict[int, ResultInfo]            # Result information for each request ID in the batch (in ascending request ID order, guaranteed to be for exactly all requests in the batch)
 	stats: ResultStats                     # Result statistics
+	metrics_succeeded: RequestMetrics      # Combined metrics for all succeeded requests
+	metrics_failed: RequestMetrics         # Combined metrics for all failed requests
 
 #
 # GPT requester
@@ -1004,10 +991,10 @@ class GPTRequester:
 		log.info(f"{self.name_prefix}: There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"{self.name_prefix}: SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"{self.name_prefix}: TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
-		batch_metrics, direct_metrics, total_metrics = self.S.metrics.batch.total, self.S.metrics.direct.total, self.S.metrics.total
+		batch_metrics, direct_metrics, all_metrics = self.S.metrics.batch.total, self.S.metrics.direct.total, self.S.metrics.all.total
 		log.info(f"{self.name_prefix}: {batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {batch_metrics.true_cost:.3f} true cost")
 		log.info(f"{self.name_prefix}: {direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {direct_metrics.true_cost:.3f} true cost")
-		log.info(f"{self.name_prefix}: A total of {total_metrics.num_requests} requests have been COMPLETED, entailing {len(total_metrics.models)} models, {len(total_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(total_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := total_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {total_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := total_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {total_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {total_metrics.usage.get('total_tokens', 0)} total tokens, {total_metrics.true_cost:.3f} true cost")
+		log.info(f"{self.name_prefix}: A total of {all_metrics.num_requests} requests have been COMPLETED, entailing {len(all_metrics.models)} models, {len(all_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(all_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := all_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {all_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := all_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {all_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {all_metrics.usage.get('total_tokens', 0)} total tokens, {all_metrics.true_cost:.3f} true cost")
 
 	# Create a GPT request item
 	def create_request_item(self, req: GPTRequest) -> GPTRequestItem:
@@ -1509,26 +1496,27 @@ class GPTRequester:
 						(log.error if batch_errors else log.warning)(f"{self.name_prefix}: Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
 
 					log.info(f"{self.name_prefix}: Loading batch {batch.id} input JSONL: {batch.local_jsonl}")
-					req_payload_map: dict[int, dict[str, Any]] = {}  # Maps: Request ID --> Request payload
-					with open(batch.local_jsonl, 'r', encoding='utf-8') as file:
+					req_payload_map: dict[int, tuple[int, dict[str, Any]]] = {}  # Maps: Request ID --> (Request JSONL size, Request payload)
+					with open(batch.local_jsonl, 'rb') as file:
 						file_size = utils.get_file_size(file)
 						try:
-							for line in file:
-								req = json.loads(line)
+							for line_bytes in file:
+								req = json.loads(line_bytes.decode(encoding='utf-8'))
 								if req['url'] != self.endpoint:
 									raise ValueError(f"Endpoint mismatch: {req['url']} vs {self.endpoint}")
 								req_id = int(re.fullmatch(r'id-([0-9]+)', req['custom_id']).group(1))
 								if req_id in req_payload_map:
 									raise ValueError(f"Duplicate request ID: {req_id}")
-								req_payload_map[req_id] = req['body']
+								req_payload_map[req_id] = (len(line_bytes), req['body'])
 						except (json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError) as e:
 							raise ValueError("Unexpected input JSONL data") from e
+					total_line_size = sum(req_jsonl_size for req_jsonl_size, req_payload in req_payload_map.values())
 					if len(req_payload_map) != batch.num_requests:
 						raise ValueError(f"Input JSONL has unexpected number of requests: {len(req_payload_map)} vs {batch.num_requests}")
 					elif req_payload_map.keys() != batch.request_info.keys():
 						raise ValueError(f"Input JSONL does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(req_payload_map.keys() ^ batch.request_info.keys())}")
-					elif file_size != batch.local_jsonl_size:
-						raise ValueError(f"Input JSONL has unexpected file size: {file_size} vs {batch.local_jsonl_size}")
+					elif not file_size == total_line_size == batch.local_jsonl_size:
+						raise ValueError(f"Input JSONL has unexpected file size: {file_size} vs {total_line_size} vs {batch.local_jsonl_size}")
 					log.info(f"{self.name_prefix}: Loaded {batch.num_requests} requests of endpoint '{self.endpoint}' from batch {batch.id} input JSONL of size {utils.format_size_si(batch.local_jsonl_size)}")
 
 					result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
@@ -1571,7 +1559,7 @@ class GPTRequester:
 							if req_id not in req_payload_map or req_id not in batch.request_info:
 								err_req_id_bad.log(f"{self.name_prefix}: Unexpected request ID {req_id} in line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
-							req_payload = req_payload_map[req_id]
+							req_jsonl_size, req_payload = req_payload_map[req_id]
 							req_info = batch.request_info[req_id]
 
 							if req_id in result_info_map:
@@ -1710,6 +1698,7 @@ class GPTRequester:
 							assert resp_info is not None or err_info is not None
 							result_info_map[req_id] = ResultInfo(
 								req_id=req_id,
+								req_jsonl_size=req_jsonl_size,
 								req_payload=req_payload,
 								req_info=req_info,
 								resp_info=resp_info,
@@ -1816,16 +1805,31 @@ class GPTRequester:
 						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} ({batch.remote.batch.id}) as errors were encountered (leaving batch as it was)")
 						continue  # [DELAYED RAISE]
 
+					batch_metrics_succeeded = RequestMetrics()
+					batch_metrics_failed = RequestMetrics()
+					for info in result_info_map.values():
+						batch_metrics = (batch_metrics_succeeded if info.resp_info is not None and info.err_info is None and not info.warn_infos else batch_metrics_failed)
+						batch_metrics.num_requests += 1
+						batch_metrics.local_jsonl_size += info.req_jsonl_size
+						if info.resp_info is not None:
+							batch_metrics.models[info.resp_info.model] += 1
+							batch_metrics.system_fingerprints[info.resp_info.system_fingerprint] += 1
+							RequestMetrics.usage_iadd(self_usage=batch_metrics.usage, other_usage=info.resp_info.usage)
+							batch_metrics.true_cost += self.token_coster.cost(input_batch=batch_usage.get('prompt_tokens', 0), output_batch=batch_usage.get('completion_tokens', 0))
+
 					result = BatchResult(
 						batch=batch,
 						errors=batch_errors,
 						info=dict(sorted(result_info_map.items())),
 						stats=result_stats,
+						metrics_succeeded=batch_metrics_succeeded,
+						metrics_failed=batch_metrics_failed,
 					)
 
-					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState], num_pass_failures: int):
+					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState], api_metrics_batch: APIMetrics, api_metrics_all: APIMetrics, num_pass_failures: int):
 						self.S.num_pass_failures = num_pass_failures
-						# TODO: REVERSE METRICS
+						self.S.metrics.all = api_metrics_all
+						self.S.metrics.batch = api_metrics_batch
 						self.S.batch_history[:] = batch_history
 						batch.request_info = request_info
 						self.S.batches[:] = batches
@@ -1837,16 +1841,26 @@ class GPTRequester:
 							# TODO: Instead of requiring a fancy send() (although this could be clean-ish but is not compatible with for-loop!), you could mutably update a field in BatchResult to say YEAH retry, NO don't => Would be super clean except for the (unexpected?) mutability
 							yield rstack, result  # TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary
 
-							rstack.callback(revert_state, batches=self.S.batches.copy(), request_info=batch.request_info, batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
+							rstack.callback(
+								revert_state,
+								batches=self.S.batches.copy(),
+								request_info=batch.request_info,
+								batch_history=self.S.batch_history.copy(),
+								api_metrics_batch=copy.deepcopy(self.S.metrics.batch),
+								api_metrics_all=copy.deepcopy(self.S.metrics.all),
+								num_pass_failures=self.S.num_pass_failures,
+							)
 
 							self.S.batches.remove(batch)
 							batch.request_info = {}
 							self.S.batch_history.append(batch)
 							self.S.batch_history.sort()
 
-							# TODO: UPDATE METRICS (REVERSIBLE)
-							# for req_id, info in result.info.items():
-							# 	self.S.metrics  # TODO
+							for api_metrics in (self.S.metrics.batch, self.S.metrics.all):
+								api_metrics.num_api_calls += 1
+								api_metrics.succeeded.add_metrics(result.metrics_succeeded)
+								api_metrics.failed.add_metrics(result.metrics_failed)
+								api_metrics.total.add_metrics(result.metrics_succeeded, result.metrics_failed)
 
 							if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
 								self.S.num_pass_failures += 1
