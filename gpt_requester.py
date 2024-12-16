@@ -518,7 +518,6 @@ class ResultStats:
 	duration: int       # Duration in seconds it took for the batch to finalize on the remote (complete, cancel, ...)
 	duration_str: str   # Duration formatted as a 'XhYm' string (see utils.format_duration_hmin)
 	num_requests: int   # Number of requests
-	num_results: int    # Number of received results
 	num_success: int    # Number of results with no warnings or error
 	num_warned: int     # Number of results with warnings but no error
 	num_errored: int    # Number of results with an error
@@ -526,6 +525,7 @@ class ResultStats:
 	num_cancelled: int  # Number of results with a retryable error due to the batch being cancelled
 	num_expired: int    # Number of results with a retryable error due to the batch being expired
 	num_fatal: int      # Number of results with a fatal error
+	num_missing: int    # Number of requests for which no response/result was received
 	num_pass: int       # Number of results considered as 'passed' (i.e. not indicative of problems = successful or expired)
 	pass_ratio: float   # Ratio of passed results to the number of requests
 
@@ -572,6 +572,8 @@ class GPTRequester:
 
 		show_warnings: int = 50,                              # How many warnings to show/log per batch per warning type when processing responses
 		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
+		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
+		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or skip and fail them
 		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 
 		cost_input_direct_mtoken: float = 2.50,               # The cost per million direct input tokens (1M tokens ~ 750K words)
@@ -650,6 +652,15 @@ class GPTRequester:
 		if self.show_errors < 1:
 			raise ValueError(f"Number of errors to show/log must be at least 1: {self.show_errors}")
 		log.info(f"{self.name_prefix}: Showing up to {self.show_warnings} warnings and {self.show_errors} errors explicitly per batch per type")
+
+		self.process_failed_batches = process_failed_batches
+		self.retry_fatal_requests = retry_fatal_requests
+		if self.process_failed_batches > 0:
+			log.info(f"{self.name_prefix}: Processing and clearing up to {self.process_failed_batches} failed batches per session")
+		elif self.process_failed_batches == 0:
+			log.info(f"{self.name_prefix}: An exception will be raised if failed batches occur")
+		else:
+			log.info(f"{self.name_prefix}: Processing and clearing up any failed batches that occur")
 
 		self.auto_parse = auto_parse
 		log.info(f"{self.name_prefix}: Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
@@ -764,6 +775,7 @@ class GPTRequester:
 		self.Q: Optional[list[Optional[CachedGPTRequest]]] = None
 		self.max_request_id: Optional[int] = None
 		self.session_push_stats: Optional[PushStats] = None
+		self.session_processed_failed_batches: Optional[int] = None
 
 	@property
 	def max_task_tokens(self) -> int:
@@ -853,6 +865,8 @@ class GPTRequester:
 
 		add_argument(name='show_warnings', type=int, metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
 		add_argument(name='show_errors', type=int, metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
+		add_argument(name='process_failed_batches', type=int, metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
+		add_argument(name='retry_fatal_requests', type=bool, help="Whether to retry fatal requests from failed batches that are processed, or skip and fail them")
 		if include_auto_parse:
 			add_argument(name='auto_parse', type=bool, help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
 
@@ -903,6 +917,7 @@ class GPTRequester:
 			self.P = self.PQ.pool
 			self.Q = self.PQ.queue
 			self.session_push_stats = PushStats()
+			self.session_processed_failed_batches = 0
 			self.validate_state_queue(clean=True)
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
@@ -920,6 +935,7 @@ class GPTRequester:
 		self.S = self.PQ = self.P = self.Q = None
 		self.max_request_id = None
 		self.session_push_stats = None
+		self.session_processed_failed_batches = None
 
 	# Validate that there are no obvious issues with the current state and queue (clean refers to the expected status right after a commit)
 	def validate_state_queue(self, *, clean: bool):
@@ -1488,10 +1504,15 @@ class GPTRequester:
 
 					log.info(f"{self.name_prefix}: Processing finished batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests...")
 
+					raise_if_batch_failed = self.session_processed_failed_batches >= self.process_failed_batches >= 0
+					batch_failed = False
+
 					batch_errors: list[openai.types.BatchError] = batch.remote.batch.errors.data if batch.remote.batch.errors is not None and batch.remote.batch.errors.data is not None else []
 					if batch.remote.batch.status == 'failed':
 						log.error(f"{self.name_prefix}: Batch {batch.id} failed with errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
-						delayed_raise.add(msg=f"Batch status is '{batch.remote.batch.status}'")  # [DELAYED RAISE]
+						if raise_if_batch_failed:
+							delayed_raise.add(msg=f"Batch status is '{batch.remote.batch.status}'")  # [DELAYED RAISE]
+						batch_failed = True
 					elif batch.remote.batch.status != 'completed' or batch_errors:
 						# [COVERED] If this occurs then we just log an error, and continue trying to parse the batch anyway and deal with any errors that we encounter doing that, because that's the only thing that actually matters (e.g. expired and cancelled batches can still have valid results)
 						(log.error if batch_errors else log.warning)(f"{self.name_prefix}: Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
@@ -1688,11 +1709,13 @@ class GPTRequester:
 							for warn_info in warn_infos:
 								warn_resp.log(f"{self.name_prefix}: Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
 
-							if err_info:
+							if err_info is not None:
 								err_msg = f"{self.name_prefix}: Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
 								if err_info.fatal:
 									err_resp_fatal.log(err_msg)
-									delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")  # [DELAYED RAISE]
+									if raise_if_batch_failed:
+										delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")  # [DELAYED RAISE]
+									batch_failed = True
 								else:
 									err_resp_retry.log(err_msg)  # [RETRYABLE]
 
@@ -1705,7 +1728,7 @@ class GPTRequester:
 								resp_info=resp_info,
 								err_info=err_info,
 								warn_infos=warn_infos,
-								retry=err_info is not None and not err_info.fatal,
+								retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests),
 							)
 
 					warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further warnings for batch {batch.id} (total {num_total} warnings)")
@@ -1717,11 +1740,14 @@ class GPTRequester:
 					err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further retryable errors for batch {batch.id} (total {num_total} errors)")
 					err_resp_fatal.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further fatal errors for batch {batch.id} (total {num_total} errors)")
 
-					delayed_raise.add(msg="Failed to parse output/error file line to JSON", count=err_line_json.num_msgs)
-					delayed_raise.add(msg="Request output does not have the expected keys", count=err_req_out_keys.num_msgs)
-					delayed_raise.add(msg="Failed to parse request ID from output/error file line", count=err_req_id_fail.num_msgs)
-					delayed_raise.add(msg="Encountered an unexpected request ID", count=err_req_id_bad.num_msgs)
-					delayed_raise.add(msg="Encountered a duplicate request ID", count=err_req_id_dupl.num_msgs)
+					if raise_if_batch_failed:
+						delayed_raise.add(msg="Failed to parse output/error file line to JSON", count=err_line_json.num_msgs)
+						delayed_raise.add(msg="Request output does not have the expected keys", count=err_req_out_keys.num_msgs)
+						delayed_raise.add(msg="Failed to parse request ID from output/error file line", count=err_req_id_fail.num_msgs)
+						delayed_raise.add(msg="Encountered an unexpected request ID", count=err_req_id_bad.num_msgs)
+						delayed_raise.add(msg="Encountered a duplicate request ID", count=err_req_id_dupl.num_msgs)
+					if err_line_json.num_msgs > 0 or err_req_out_keys.num_msgs > 0 or err_req_id_fail.num_msgs > 0 or err_req_id_bad.num_msgs > 0 or err_req_id_dupl.num_msgs > 0:
+						batch_failed = True
 
 					batch_models = collections.Counter()
 					batch_system_fingerprints = collections.Counter()
@@ -1743,13 +1769,35 @@ class GPTRequester:
 					batch_response_tokens = batch_completion_tokens - batch_reasoning_tokens
 					batch_total_tokens = batch_usage.get('total_tokens', 0)
 					batch_true_cost = self.token_coster.cost(input_batch=batch_input_tokens, output_batch=batch_completion_tokens)
-					log.info(f"{self.name_prefix}: Batch {batch.id} received {len(result_info_map)} valid responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_cost:.3f} true cost (predicted {batch_predicted_cost:.3f})")
+					log.info(f"{self.name_prefix}: Batch {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_cost:.3f} true cost (predicted {batch_predicted_cost:.3f})")
 					if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
 						log.warning(f"{self.name_prefix}: Batch {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
 					if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
 						log.warning(f"{self.name_prefix}: Batch {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens")
 
-					num_results = num_success = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = 0
+					if result_info_map.keys() != batch.request_info.keys():
+						log.error(f"{self.name_prefix}: Batch {batch.id} response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
+						if raise_if_batch_failed:
+							delayed_raise.add(msg="Batch response does not contain exactly the expected request IDs")  # [DELAYED RAISE]
+						batch_failed = True
+
+					assert result_info_map.keys() <= batch.request_info.keys()
+					for req_id, req_info in batch.request_info.items():
+						if req_id not in result_info_map:
+							req_jsonl_size, req_payload = req_payload_map[req_id]
+							result_info_map[req_id] = ResultInfo(
+								req_id=req_id,
+								req_jsonl_size=req_jsonl_size,
+								req_payload=req_payload,
+								req_info=req_info,
+								resp_info=None,
+								err_info=ErrorInfo(fatal=True, type='ResponseError', subtype='Missing', msg='Response is missing'),
+								warn_infos=[],
+								retry=self.retry_fatal_requests,
+							)
+					assert result_info_map.keys() == batch.request_info.keys()
+
+					num_results = num_success = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0
 					for info in result_info_map.values():
 						num_results += 1
 						if info.err_info is None:
@@ -1770,6 +1818,11 @@ class GPTRequester:
 									num_cancelled += 1
 								elif info.err_info.subtype == 'batch_expired':
 									num_expired += 1
+							elif info.err_info.type == 'ResponseError':
+								assert info.err_info.fatal
+								if info.err_info.subtype == 'Missing':
+									num_missing += 1
+					assert num_results == batch.num_requests
 
 					num_pass = num_success + num_expired
 					pass_ratio = num_pass / batch.num_requests
@@ -1778,7 +1831,6 @@ class GPTRequester:
 						duration=duration,
 						duration_str=utils.format_duration_hmin(duration),
 						num_requests=batch.num_requests,
-						num_results=num_results,
 						num_success=num_success,
 						num_warned=num_warned,
 						num_errored=num_errored,
@@ -1786,26 +1838,29 @@ class GPTRequester:
 						num_cancelled=num_cancelled,
 						num_expired=num_expired,
 						num_fatal=num_fatal,
+						num_missing=num_missing,
 						num_pass=num_pass,
 						pass_ratio=pass_ratio,
 					)
 
-					log.info(f"{self.name_prefix}: Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) and got {result_stats.num_results}/{result_stats.num_requests} responses = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
-					assert result_stats.num_requests == len(batch.request_info) and result_stats.num_requests >= result_stats.num_results == len(result_info_map)
-					assert result_stats.num_results == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
+					log.info(f"{self.name_prefix}: Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) for {result_stats.num_requests} requests = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
+					assert result_stats.num_requests == len(batch.request_info) == len(result_info_map)
+					assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
 					assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
-					assert result_stats.num_cancelled + result_stats.num_expired <= result_stats.num_retryable
+					assert result_stats.num_retryable >= result_stats.num_cancelled + result_stats.num_expired
+					assert result_stats.num_fatal >= result_stats.num_missing
 
-					if result_info_map.keys() != batch.request_info.keys():
-						log.error(f"{self.name_prefix}: Batch {batch.id} response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
-						delayed_raise.add(msg="Batch response does not contain exactly the expected request IDs")  # [DELAYED RAISE]
 					if result_stats.num_cancelled != 0:
 						log.error(f"{self.name_prefix}: Batch {batch.id} response contains {result_stats.num_cancelled} cancelled requests")
-						delayed_raise.add(msg="Batch response contains cancelled requests")  # [DELAYED RAISE]
+						if raise_if_batch_failed:
+							delayed_raise.add(msg="Batch response contains cancelled requests")  # [DELAYED RAISE]
+						batch_failed = True
 
 					if delayed_raise.have_section_errors():
 						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} ({batch.remote.batch.id}) as errors were encountered (leaving batch as it was)")
 						continue  # [DELAYED RAISE]
+					elif batch_failed:
+						log.warning(f"{self.name_prefix}: Processing finished batch {batch.id} ({batch.remote.batch.id}) even though the batch at least partially failed")
 
 					batch_metrics_succeeded = RequestMetrics()
 					batch_metrics_failed = RequestMetrics()
@@ -1863,10 +1918,13 @@ class GPTRequester:
 								api_metrics.failed.add_metrics(result.metrics_failed)
 								api_metrics.total.add_metrics(result.metrics_succeeded, result.metrics_failed)
 
-							if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
-								self.S.num_pass_failures += 1
-							else:
-								self.S.num_pass_failures = 0
+							if not batch_failed:  # Note: Failed batches that are explicitly being allowed to clear out should not count towards pass failure, as otherwise clearing out failed batches would almost always lead to a pass failure, which is not the point
+								if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
+									self.S.num_pass_failures += 1
+								else:
+									self.S.num_pass_failures = 0
+
+							# TODO: Retry exactly the requests for which result.info[REQID].retry is truthy (note that result.info is guaranteed to contain exactly all requests in the batch)
 
 							self.validate_state_queue(clean=False)
 							self.state.save(rstack=rstack)
@@ -1885,11 +1943,13 @@ class GPTRequester:
 						log.error(f"{self.name_prefix}: Have encountered {self.S.num_pass_failures} consecutive batch pass failures (max allowed {self.max_pass_failures})")
 						delayed_raise.add(msg="Number of consecutive batch pass failures has reached limit")  # [DELAYED RAISE]
 
+					if batch_failed:
+						self.session_processed_failed_batches += 1
+						log.warning(f"{self.name_prefix}: Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
+
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-	# TODO: --fatal_error retry/skip/raise
-
-	# TODO: When/how to fail/auto-retry samples? TaskManager also should be able to cause a retry of a success/warned results? Do all with non-fatal err_info get auto-retried, yes right that was the point?
+	# TODO: Implement request retry-ing
 	# TODO: Task manager output file and such
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
@@ -1908,10 +1968,6 @@ class GPTRequester:
 	# TODO: Deal with possibly aborting if log.error()'s happen too often (search where I've used them - certain number of them within last hour?)? Or exponentially relax (e.g. temporary internet/server outage) and then eventually abort?
 
 	# TODO: Need a command line argument where you can supply batch IDs to forget (e.g. ones that were accidentally deleted from the server, or error out when trying to retrieve/process?) => Would need a mode that 'uncommits' that batch in the task state? Or generally allow on start a flag that says assume no more queue/batches exist and start again? (general hammer against all kinds of problems)
-	# TODO: Need a command line switch to force-process batches containing requests with fatal errors (and whether to retry fatal or not) => Allows the 49999 other requests in the batch to be processed, and allowed the user the chance to manually check what's going on prior to deleting all the files
-
-	# TODO: How to gracefully deal with an entire batch erroring out? Raise a runtime exception as no clue whether data is the problem or wrong limits configured, but not auto-recoverable in any case? Or maybe after 2-3 failed batches raise? Failed push? Failed result?
-	# TODO: Also need a feature to NOT keep retrying requests/samples indefinitely that are just failing (hard because they get reconstructed or might be batched where only 1 of 15 is the failing reason)
 
 	# TODO: wandb (conditional import to not require install if don't need it!)
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
