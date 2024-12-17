@@ -282,7 +282,7 @@ class StateFile:
 		# dryrun = Whether to prevent any saving of state (dry run mode)
 		self.path = os.path.abspath(path)
 		self.name = os.path.basename(self.path)
-		log.info(f"{self.name}: GPT requester state file: {self.path}")
+		log.info(f"GPT requester state file: {self.path}")
 		self.endpoint = endpoint
 		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
@@ -317,19 +317,19 @@ class StateFile:
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
-		log.info(f"{self.name}: Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
+		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
 
 	def save(self, rstack: utils.RevertStack, show_log: bool = True):
 		# rstack = RevertStack to use for the safe reversible saving of the state file
 		if self.dryrun:
 			if show_log:
-				log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches")
+				log.warning(f"{DRYRUN}Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches")
 		else:
 			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
 			if show_log:
-				log.info(f"{self.name}: Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
+				log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
 
 	def unload(self):
 		self.state = None
@@ -423,7 +423,7 @@ class QueueFile:
 		# dryrun = Whether to prevent any saving of the queue file (dry run mode)
 		self.path = os.path.abspath(path)
 		self.name = os.path.basename(self.path)
-		log.info(f"{self.name}: GPT requester queue file: {self.path}")
+		log.info(f"GPT requester queue file: {self.path}")
 		self.endpoint = endpoint
 		self.token_estimator = token_estimator
 		self.token_coster = token_coster
@@ -461,12 +461,12 @@ class QueueFile:
 				token_estimator=self.token_estimator,
 				token_coster=self.token_coster,
 			) for line in file])
-		log.info(f"{self.name}: Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
+		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
 
 	def save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible saving of the queue file
 		if self.dryrun:
-			log.warning(f"{self.name}: {DRYRUN}Did not save GPT requester queue file with {self.pool_queue.queue_len} requests")
+			log.warning(f"{DRYRUN}Did not save GPT requester queue file with {self.pool_queue.queue_len} requests")
 		else:
 			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				for cached_req in self.pool_queue.queue:
@@ -474,7 +474,7 @@ class QueueFile:
 						utils.json_from_dataclass(obj=cached_req.item, file=file, indent=None)
 						file.write('\n')
 				file_size = utils.get_file_size(file)
-			log.info(f"{self.name}: Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
+			log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
 
 	def unload(self):
 		self.pool_queue = None
@@ -624,13 +624,13 @@ class GPTRequester:
 				os.mkdir(self.working_dir)
 				created_working_dir = True
 
-		log.info(f"{self.name_prefix}: Using GPT requester in dir: {self.working_dir}{' [CREATED]' if created_working_dir else ''}")
+		log.info(f"Using GPT requester of prefix '{self.name_prefix}' in dir: {self.working_dir}{' [CREATED]' if created_working_dir else ''}")
 		if not os.path.isdir(self.working_dir):
 			raise FileNotFoundError(f"GPT working directory does not exist: {self.working_dir}")
 
 		self.dryrun = dryrun
 		if self.dryrun:
-			log.warning(f"{self.name_prefix}: {DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
+			log.warning(f"{DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.endpoint = endpoint
@@ -638,12 +638,12 @@ class GPTRequester:
 			self.endpoint = os.environ.get("OPENAI_ENDPOINT")
 		if self.endpoint is None:
 			self.endpoint = DEFAULT_ENDPOINT
-		log.info(f"{self.name_prefix}: Using client base URL '{self.client.base_url}' with endpoint '{self.endpoint}'")
+		log.info(f"Using client base URL '{self.client.base_url}' with endpoint '{self.endpoint}'")
 		if self.client.base_url == 'https://api.openai.com/v1/':
-			log.info(f"{self.name_prefix}: View the OpenAI rate/usage limits: https://platform.openai.com/settings/organization/limits")
-			log.info(f"{self.name_prefix}: Manage OpenAI file storage: https://platform.openai.com/storage")
-			log.info(f"{self.name_prefix}: Manage OpenAI batches: https://platform.openai.com/batches")
-			log.info(f"{self.name_prefix}: Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
+			log.info("View the OpenAI rate/usage limits: https://platform.openai.com/settings/organization/limits")
+			log.info("Manage OpenAI file storage: https://platform.openai.com/storage")
+			log.info("Manage OpenAI batches: https://platform.openai.com/batches")
+			log.info("Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
 
 		self.show_warnings = show_warnings
 		if self.show_warnings < 1:
@@ -651,19 +651,19 @@ class GPTRequester:
 		self.show_errors = show_errors
 		if self.show_errors < 1:
 			raise ValueError(f"Number of errors to show/log must be at least 1: {self.show_errors}")
-		log.info(f"{self.name_prefix}: Showing up to {self.show_warnings} warnings and {self.show_errors} errors explicitly per batch per type")
+		log.info(f"Showing up to {self.show_warnings} warnings and {self.show_errors} errors explicitly per batch per type")
 
 		self.process_failed_batches = process_failed_batches
 		self.retry_fatal_requests = retry_fatal_requests
 		if self.process_failed_batches > 0:
-			log.info(f"{self.name_prefix}: Processing and clearing up to {self.process_failed_batches} failed batches per session")
+			log.info(f"Processing and clearing up to {self.process_failed_batches} failed batches per session")
 		elif self.process_failed_batches == 0:
-			log.info(f"{self.name_prefix}: An exception will be raised if failed batches occur")
+			log.info("An exception will be raised if failed batches occur")
 		else:
-			log.info(f"{self.name_prefix}: Processing and clearing up any failed batches that occur")
+			log.info("Processing and clearing up any failed batches that occur")
 
 		self.auto_parse = auto_parse
-		log.info(f"{self.name_prefix}: Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
+		log.info(f"Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
 
 		self.cost_input_direct_mtoken = cost_input_direct_mtoken
 		self.cost_input_cached_mtoken = cost_input_cached_mtoken
@@ -672,13 +672,13 @@ class GPTRequester:
 		self.cost_output_batch_mtoken = cost_output_batch_mtoken
 		if self.cost_input_direct_mtoken < 0 or self.cost_input_cached_mtoken < 0 or self.cost_input_batch_mtoken < 0 or self.cost_output_direct_mtoken < 0 or self.cost_output_batch_mtoken < 0:
 			raise ValueError(f"Costs cannot be negative: {self.cost_input_direct_mtoken:.3f}, {self.cost_input_cached_mtoken:.3f}, {self.cost_input_batch_mtoken:.3f}, {self.cost_output_direct_mtoken:.3f}, {self.cost_output_batch_mtoken:.3f}")
-		log.info(f"{self.name_prefix}: Costs per input mtoken: Direct {self.cost_input_direct_mtoken:.3f}, Cached {self.cost_input_cached_mtoken:.3f}, Batch {self.cost_input_batch_mtoken:.3f}")
-		log.info(f"{self.name_prefix}: Costs per output mtoken: Direct {self.cost_output_direct_mtoken:.3f}, Batch {self.cost_output_batch_mtoken:.3f}")
+		log.info(f"Costs per input mtoken: Direct {self.cost_input_direct_mtoken:.3f}, Cached {self.cost_input_cached_mtoken:.3f}, Batch {self.cost_input_batch_mtoken:.3f}")
+		log.info(f"Costs per output mtoken: Direct {self.cost_output_direct_mtoken:.3f}, Batch {self.cost_output_batch_mtoken:.3f}")
 
 		self.assumed_completion_ratio = assumed_completion_ratio
 		if not 0.0 <= self.assumed_completion_ratio <= 1.0:
 			raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
-		log.info(f"{self.name_prefix}: Assuming an output token completion ratio of {self.assumed_completion_ratio:.3g}")
+		log.info(f"Assuming an output token completion ratio of {self.assumed_completion_ratio:.3g}")
 
 		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn, assumed_completion_ratio=self.assumed_completion_ratio)
 		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
@@ -745,12 +745,12 @@ class GPTRequester:
 		if self.max_token_safety < 1.0:
 			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety:.3g}")
 
-		log.info(f"{self.name_prefix}: Using safety factors (SF) of {self.max_mb_safety:.3g} for MB size, {self.max_token_safety:.3g} for tokens")
-		log.info(f"{self.name_prefix}: Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens, {self.max_batch_cost:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
-		log.info(f"{self.name_prefix}: Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens, {self.max_session_cost:.3f} assumed cost per session")
-		log.info(f"{self.name_prefix}: Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} assumed cost per task")
+		log.info(f"Using safety factors (SF) of {self.max_mb_safety:.3g} for MB size, {self.max_token_safety:.3g} for tokens")
+		log.info(f"Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens, {self.max_batch_cost:.3f} assumed cost")
+		log.info(f"Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} assumed cost")
+		log.info(f"Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
+		log.info(f"Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens, {self.max_session_cost:.3f} assumed cost per session")
+		log.info(f"Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} assumed cost per task")
 
 		self.warn_predicted_input_factor = warn_predicted_input_factor
 		if self.warn_predicted_input_factor < 1.0:
@@ -764,8 +764,8 @@ class GPTRequester:
 		self.max_pass_failures = max_pass_failures
 		if self.max_pass_failures < 1:
 			raise ValueError(f"Maximum number of pass failures must be at least 1: {self.max_pass_failures}")
-		log.info(f"{self.name_prefix}: Warning on batches that exceed a predicted input tokens factor of {self.warn_predicted_input_factor:.3g} or an assumed completion tokens factor of {self.warn_assumed_completion_factor:.3g}")
-		log.info(f"{self.name_prefix}: Triggering a processing error if {self.max_pass_failures} consecutive batches have a pass ratio less than {self.min_pass_ratio:.3g}")
+		log.info(f"Warning on batches that exceed a predicted input tokens factor of {self.warn_predicted_input_factor:.3g} or an assumed completion tokens factor of {self.warn_assumed_completion_factor:.3g}")
+		log.info(f"Triggering a processing error if {self.max_pass_failures} consecutive batches have a pass ratio less than {self.min_pass_ratio:.3g}")
 
 		self._enter_stack = contextlib.ExitStack()
 		self.type_cache: Optional[utils.SerialTypeCache] = None
@@ -926,7 +926,7 @@ class GPTRequester:
 	# Exit method for the required use of GPTRequester as a context manager
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		if self.P:
-			log.warning(f"{self.name_prefix}: Exiting GPT requester with {len(self.P)} uncommitted requests in the request pool")
+			log.warning(f"Exiting GPT requester with {len(self.P)} uncommitted requests in the request pool")
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	# Local actions to perform on exit
@@ -1003,15 +1003,15 @@ class GPTRequester:
 		pool_queue_tokens_cost = TokensCost().add((cached_req.info.tokens_cost for cached_req in self.P), (cached_req.info.tokens_cost for cached_req in self.Q if cached_req is not None))
 		local_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is None)
 		remote_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is not None)
-		log.info(f"{self.name_prefix}: There are {self.PQ.pool_len} POOLED requests and {self.PQ.queue_len} QUEUED requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: There are {self.num_unpushed_batches()} unpushed LOCAL batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"{self.name_prefix}: TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"There are {self.PQ.pool_len} POOLED requests and {self.PQ.queue_len} QUEUED requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"There are {self.num_unpushed_batches()} unpushed LOCAL batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 		batch_metrics, direct_metrics, all_metrics = self.S.metrics.batch.total, self.S.metrics.direct.total, self.S.metrics.all.total
-		log.info(f"{self.name_prefix}: {batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {batch_metrics.true_cost:.3f} true cost")
-		log.info(f"{self.name_prefix}: {direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {direct_metrics.true_cost:.3f} true cost")
-		log.info(f"{self.name_prefix}: A total of {all_metrics.num_requests} requests have been COMPLETED, entailing {len(all_metrics.models)} models, {len(all_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(all_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := all_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {all_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := all_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {all_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {all_metrics.usage.get('total_tokens', 0)} total tokens, {all_metrics.true_cost:.3f} true cost")
+		log.info(f"{batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {batch_metrics.true_cost:.3f} true cost")
+		log.info(f"{direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {direct_metrics.true_cost:.3f} true cost")
+		log.info(f"A total of {all_metrics.num_requests} requests have been COMPLETED, entailing {len(all_metrics.models)} models, {len(all_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(all_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := all_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {all_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := all_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {all_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {all_metrics.usage.get('total_tokens', 0)} total tokens, {all_metrics.true_cost:.3f} true cost")
 
 	# Create a GPT request item
 	def create_request_item(self, req: GPTRequest) -> GPTRequestItem:
@@ -1118,7 +1118,7 @@ class GPTRequester:
 
 			num_unpushed_batches = self.num_unpushed_batches()
 			if num_unpushed_batches >= self.max_unpushed_batches:
-				log.info(f"{self.name_prefix}: Not batching {sum(1 for cached_req in itertools.islice(self.Q, index, None) if cached_req is not None)} requests left in the request queue as there are already {num_unpushed_batches} unpushed batches (max {self.max_unpushed_batches} allowed)")
+				log.info(f"Not batching {sum(1 for cached_req in itertools.islice(self.Q, index, None) if cached_req is not None)} requests left in the request queue as there are already {num_unpushed_batches} unpushed batches (max {self.max_unpushed_batches} allowed)")
 				break
 
 			batch_index = index
@@ -1193,13 +1193,13 @@ class GPTRequester:
 					self.Q[batch_index:index] = (None,) * (index - batch_index)
 
 					if self.dryrun:
-						log.warning(f"{self.name_prefix}: {DRYRUN}Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
+						log.warning(f"{DRYRUN}Did not create batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 					else:
 						with utils.SafeOpenForWrite(path=batch.local_jsonl, rstack=rstack) as file:
 							file.writelines(batch_reqs)
 							file_size = utils.get_file_size(file)
 						assert file_size == batch.local_jsonl_size
-						log.info(f"{self.name_prefix}: Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
+						log.info(f"Created batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} local batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}] due to reasons: {', '.join(sorted(batch.reasons))}")
 
 					self.validate_state_queue(clean=False)
 					self.queue.save(rstack=rstack)
@@ -1209,9 +1209,9 @@ class GPTRequester:
 				num_created_requests += batch.num_requests
 
 		if num_created > 0:
-			log.info(f"{self.name_prefix}: Created {num_created} batches out of {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
+			log.info(f"Created {num_created} batches out of {num_created_requests} requests, leaving {self.PQ.queue_len} requests in the request queue for the future")
 		else:
-			log.info(f"{self.name_prefix}: The {batch.num_requests} available requests with {utils.format_size_si(batch.local_jsonl_size)}, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost are currently not enough to trigger a batch")
+			log.info(f"The {batch.num_requests} available requests with {utils.format_size_si(batch.local_jsonl_size)}, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost are currently not enough to trigger a batch")
 
 		return self.num_unpushed_batches()
 
@@ -1279,11 +1279,11 @@ class GPTRequester:
 				if not reasons:
 
 					if self.dryrun:
-						log.warning(f"{self.name_prefix}: {DRYRUN}Not pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}")
+						log.warning(f"{DRYRUN}Not pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}")
 						reasons_nopush.add(DRYRUN)
 					else:
 
-						log.info(f"{self.name_prefix}: Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}...")
+						log.info(f"Pushing batch {batch.id} ({os.path.basename(batch.local_jsonl)}) of size {utils.format_size_si(batch.local_jsonl_size)}...")
 
 						def revert_push_stats(task_requests: int, task_tokens_cost: TokensCost, session_requests: int, session_tokens_cost: TokensCost):
 							self.S.task_push_stats.total_requests = task_requests
@@ -1296,7 +1296,7 @@ class GPTRequester:
 							file_object = self.client.files.create(file=open(batch.local_jsonl, 'rb'), purpose='batch')
 							rstack.callback(self.delete_remote_file, file_id=file_object.id)
 							if file_object.bytes != batch.local_jsonl_size:
-								log.warning(f"{self.name_prefix}: Uploaded input JSONL file '{file_object.id}' for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
+								log.warning(f"Uploaded input JSONL file '{file_object.id}' for batch {batch.id} has an unexpected size: {file_object.bytes} vs {batch.local_jsonl_size}")
 
 							# noinspection PyTypeChecker
 							batch_object = self.client.batches.create(
@@ -1328,7 +1328,7 @@ class GPTRequester:
 							self.validate_state_queue(clean=False)
 							self.state.save(rstack=rstack)
 
-							log.info(f"{self.name_prefix}: Pushed batch {batch.id} as '{batch.remote.batch.id}' based on '{batch.remote.file.id}' of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
+							log.info(f"Pushed batch {batch.id} as '{batch.remote.batch.id}' based on '{batch.remote.file.id}' of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
 
 						remote_batches = next_remote_batches
 						remote_requests = next_remote_requests
@@ -1344,12 +1344,12 @@ class GPTRequester:
 		batch_congestion = (num_unpushed_batches >= self.max_unpushed_batches)
 
 		if reasons_nopush:
-			log.info(f"{self.name_prefix}: Reasons encountered not to push certain batches right now: {', '.join(sorted(reasons_nopush))}")
-		log.info(f"{self.name_prefix}: Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
+			log.info(f"Reasons encountered not to push certain batches right now: {', '.join(sorted(reasons_nopush))}")
+		log.info(f"Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
 		if num_pushed > 0:
-			log.info(f"{self.name_prefix}: There are {remote_batches} remote batches with a total of {remote_requests} requests, {utils.format_size_si(remote_size)}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
-			log.info(f"{self.name_prefix}: Session push statistics are now {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
-			log.info(f"{self.name_prefix}: Task push statistics are now {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+			log.info(f"There are {remote_batches} remote batches with a total of {remote_requests} requests, {utils.format_size_si(remote_size)}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
+			log.info(f"Session push statistics are now {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+			log.info(f"Task push statistics are now {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
 
 		return batch_congestion
 
@@ -1357,36 +1357,36 @@ class GPTRequester:
 	def delete_local_file(self, path: str):
 		# path = Local file path to delete
 		if self.dryrun:
-			log.warning(f"{self.name_prefix}: {DRYRUN}Not deleting local file '{path}'")
+			log.warning(f"{DRYRUN}Not deleting local file '{path}'")
 		else:
 			try:
 				os.unlink(path)
 			except Exception as e:  # noqa
-				log.error(f"{self.name_prefix}: Failed to delete local file '{path}' due to {utils.get_class_str(e)}: {e}")
+				log.error(f"Failed to delete local file '{path}' due to {utils.get_class_str(e)}: {e}")
 
 	# Delete a remote file (only log an error if deletion fails, never raise an exception)
 	def delete_remote_file(self, file_id: str):
 		# file_id = The remote file ID to delete
 		if self.dryrun:
-			log.warning(f"{self.name_prefix}: {DRYRUN}Not deleting remote file '{file_id}'")
+			log.warning(f"{DRYRUN}Not deleting remote file '{file_id}'")
 		else:
 			try:
 				deleted_file = self.client.files.delete(file_id=file_id)
 				assert deleted_file.id == file_id, "Remote file ID mismatch during deletion"
 			except Exception as e:  # noqa
-				log.error(f"{self.name_prefix}: Failed to delete remote file '{file_id}' due to {utils.get_class_str(e)}: {e}")
+				log.error(f"Failed to delete remote file '{file_id}' due to {utils.get_class_str(e)}: {e}")
 
 	# Cancel a remote batch (only log an error if cancellation fails, never raise an exception)
 	def cancel_remote_batch(self, batch_id: str):
 		# batch_id = The remote batch ID to cancel
 		if self.dryrun:
-			log.warning(f"{self.name_prefix}: {DRYRUN}Not canceling remote batch '{batch_id}'")
+			log.warning(f"{DRYRUN}Not canceling remote batch '{batch_id}'")
 		else:
 			try:
 				cancelled_batch = self.client.batches.cancel(batch_id=batch_id)
 				assert cancelled_batch.id == batch_id, "Remote batch ID mismatch during cancellation"
 			except Exception as e:  # noqa
-				log.error(f"{self.name_prefix}: Failed to cancel remote batch '{batch_id}' due to {utils.get_class_str(e)}: {e}")
+				log.error(f"Failed to cancel remote batch '{batch_id}' due to {utils.get_class_str(e)}: {e}")
 
 	# Retrieve the number of unpushed local batches
 	def num_unpushed_batches(self) -> int:
@@ -1432,13 +1432,13 @@ class GPTRequester:
 									break
 					except (openai.OpenAIError, ValueError) as e:
 						utils.print_clear_line()
-						log.error(f"{self.name_prefix}: Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
+						log.error(f"Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
 
 		if status_updated:
 			if status_changed or log_save:
 				utils.print_clear_line()
 			if status_changed:
-				log.info(f"{self.name_prefix}: Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
+				log.info(f"Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
 			with utils.AtomicRevertStack() as rstack:
 				self.validate_state_queue(clean=False)
 				self.state.save(rstack=rstack, show_log=log_save)
@@ -1472,10 +1472,10 @@ class GPTRequester:
 				num_status_updates += 1
 			num_unfinished_batches = self.num_unfinished_batches()
 			if self.num_finished_batches() > 0 or num_unfinished_batches <= 0:
-				utils.print_in_place(f"{self.name_prefix}: Waited {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
+				utils.print_in_place(f"Waited {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
 				return
 			time.sleep((start_time - time.perf_counter()) % self.remote_update_interval)
-			print_str = f"{self.name_prefix}: Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates... "
+			print_str = f"Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates... "
 			if print_str != printed_str:
 				utils.print_in_place(print_str)
 				printed_str = print_str
@@ -1499,25 +1499,25 @@ class GPTRequester:
 			if batch.remote is not None and batch.remote.finished:
 
 				if self.dryrun:
-					log.warning(f"{self.name_prefix}: {DRYRUN}Not processing finished batch {batch.id} ({batch.remote.file.id}) containing {batch.num_requests} requests")
+					log.warning(f"{DRYRUN}Not processing finished batch {batch.id} ({batch.remote.file.id}) containing {batch.num_requests} requests")
 				else:
 
-					log.info(f"{self.name_prefix}: Processing finished batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests...")
+					log.info(f"Processing finished batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests...")
 
 					raise_if_batch_failed = self.session_processed_failed_batches >= self.process_failed_batches >= 0
 					batch_failed = False
 
 					batch_errors: list[openai.types.BatchError] = batch.remote.batch.errors.data if batch.remote.batch.errors is not None and batch.remote.batch.errors.data is not None else []
 					if batch.remote.batch.status == 'failed':
-						log.error(f"{self.name_prefix}: Batch {batch.id} failed with errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
+						log.error(f"Batch {batch.id} failed with errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
 						if raise_if_batch_failed:
 							delayed_raise.add(msg=f"Batch status is '{batch.remote.batch.status}'")  # [DELAYED RAISE]
 						batch_failed = True
 					elif batch.remote.batch.status != 'completed' or batch_errors:
 						# [COVERED] If this occurs then we just log an error, and continue trying to parse the batch anyway and deal with any errors that we encounter doing that, because that's the only thing that actually matters (e.g. expired and cancelled batches can still have valid results)
-						(log.error if batch_errors else log.warning)(f"{self.name_prefix}: Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
+						(log.error if batch_errors else log.warning)(f"Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
 
-					log.info(f"{self.name_prefix}: Loading batch {batch.id} input JSONL: {batch.local_jsonl}")
+					log.info(f"Loading batch {batch.id} input JSONL: {batch.local_jsonl}")
 					req_payload_map: dict[int, tuple[int, dict[str, Any]]] = {}  # Maps: Request ID --> (Request JSONL size, Request payload)
 					with open(batch.local_jsonl, 'rb') as file:
 						file_size = utils.get_file_size(file)
@@ -1539,7 +1539,7 @@ class GPTRequester:
 						raise ValueError(f"Input JSONL does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(req_payload_map.keys() ^ batch.request_info.keys())}")
 					elif not file_size == total_line_size == batch.local_jsonl_size:
 						raise ValueError(f"Input JSONL has unexpected file size: {file_size} vs {total_line_size} vs {batch.local_jsonl_size}")
-					log.info(f"{self.name_prefix}: Loaded {batch.num_requests} requests of endpoint '{self.endpoint}' from batch {batch.id} input JSONL of size {utils.format_size_si(batch.local_jsonl_size)}")
+					log.info(f"Loaded {batch.num_requests} requests of endpoint '{self.endpoint}' from batch {batch.id} input JSONL of size {utils.format_size_si(batch.local_jsonl_size)}")
 
 					result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
 					warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
@@ -1553,7 +1553,7 @@ class GPTRequester:
 						try:
 							file_content = self.client.files.content(file_id=remote_file_id)
 						except openai.OpenAIError as e:
-							log.error(f"{self.name_prefix}: Failed to retrieve remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
+							log.error(f"Failed to retrieve remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
 							continue  # [COVERED] If the file contained requests, a request IDs mismatch will later occur (even if this is just a connectivity issue, there is not really much useful work that can be done at all without connectivity, so it's okay to error out)
 
 						for line_num, line in enumerate(file_content.text.splitlines(), 1):
@@ -1564,28 +1564,28 @@ class GPTRequester:
 							try:
 								request_output = json.loads(line)
 							except json.JSONDecodeError as e:
-								err_line_json.log(f"{self.name_prefix}: Failed to parse line {line_num} to JSON in remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
+								err_line_json.log(f"Failed to parse line {line_num} to JSON in remote file '{remote_file_id}' for batch {batch.id} with {utils.get_class_str(e)}: {e}")
 								continue  # [DELAYED RAISE]
 
 							if 'custom_id' not in request_output or 'error' not in request_output or 'response' not in request_output:
-								err_req_out_keys.log(f"{self.name_prefix}: Request output does not have the expected keys on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_out_keys.log(f"Request output does not have the expected keys on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 
 							custom_id = request_output['custom_id']
 							if isinstance(custom_id, str) and (match := re.fullmatch(r'id-([0-9]+)', custom_id)):
 								req_id = int(match.group(1))
 							else:
-								err_req_id_fail.log(f"{self.name_prefix}: Failed to parse the request ID from line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_id_fail.log(f"Failed to parse the request ID from line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 
 							if req_id not in req_payload_map or req_id not in batch.request_info:
-								err_req_id_bad.log(f"{self.name_prefix}: Unexpected request ID {req_id} in line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_id_bad.log(f"Unexpected request ID {req_id} in line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 							req_jsonl_size, req_payload = req_payload_map[req_id]
 							req_info = batch.request_info[req_id]
 
 							if req_id in result_info_map:
-								err_req_id_dupl.log(f"{self.name_prefix}: Encountered duplicate request ID {req_id} on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
+								err_req_id_dupl.log(f"Encountered duplicate request ID {req_id} on line {line_num} of remote file '{remote_file_id}' for batch {batch.id}")
 								continue  # [DELAYED RAISE]
 
 							resp_info = None
@@ -1707,10 +1707,10 @@ class GPTRequester:
 								err_info = ErrorInfo(fatal=request_error_code not in RETRYABLE_ERROR_CODES, type='RequestError', subtype=request_error_code, data=request_error_message, msg=f"Request error {request_error_code}: {request_error_message}")
 
 							for warn_info in warn_infos:
-								warn_resp.log(f"{self.name_prefix}: Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
+								warn_resp.log(f"Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
 
 							if err_info is not None:
-								err_msg = f"{self.name_prefix}: Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
+								err_msg = f"Batch {batch.id} remote file '{remote_file_id}' line {line_num} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
 								if err_info.fatal:
 									err_resp_fatal.log(err_msg)
 									if raise_if_batch_failed:
@@ -1731,14 +1731,14 @@ class GPTRequester:
 								retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests),
 							)
 
-					warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further warnings for batch {batch.id} (total {num_total} warnings)")
-					err_line_json.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Failed to parse a further {num_omitted} lines to JSON for batch {batch.id} (total {num_total} errors)")
-					err_req_out_keys.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: {num_omitted} further request outputs do not have the expected keys for batch {batch.id} (total {num_total} errors)")
-					err_req_id_fail.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Failed to parse the request ID from {num_omitted} further lines for batch {batch.id} (total {num_total} errors)")
-					err_req_id_bad.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Encountered {num_omitted} further unexpected request IDs for batch {batch.id} (total {num_total} unexpected)")
-					err_req_id_dupl.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Encountered {num_omitted} further duplicate request IDs for batch {batch.id} (total {num_total} duplicates)")
-					err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further retryable errors for batch {batch.id} (total {num_total} errors)")
-					err_resp_fatal.finalize(msg_fn=lambda num_omitted, num_total: f"{self.name_prefix}: Got {num_omitted} further fatal errors for batch {batch.id} (total {num_total} errors)")
+					warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further warnings for batch {batch.id} (total {num_total} warnings)")
+					err_line_json.finalize(msg_fn=lambda num_omitted, num_total: f"Failed to parse a further {num_omitted} lines to JSON for batch {batch.id} (total {num_total} errors)")
+					err_req_out_keys.finalize(msg_fn=lambda num_omitted, num_total: f"{num_omitted} further request outputs do not have the expected keys for batch {batch.id} (total {num_total} errors)")
+					err_req_id_fail.finalize(msg_fn=lambda num_omitted, num_total: f"Failed to parse the request ID from {num_omitted} further lines for batch {batch.id} (total {num_total} errors)")
+					err_req_id_bad.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further unexpected request IDs for batch {batch.id} (total {num_total} unexpected)")
+					err_req_id_dupl.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further duplicate request IDs for batch {batch.id} (total {num_total} duplicates)")
+					err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further retryable errors for batch {batch.id} (total {num_total} errors)")
+					err_resp_fatal.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further fatal errors for batch {batch.id} (total {num_total} errors)")
 
 					if raise_if_batch_failed:
 						delayed_raise.add(msg="Failed to parse output/error file line to JSON", count=err_line_json.num_msgs)
@@ -1769,14 +1769,14 @@ class GPTRequester:
 					batch_response_tokens = batch_completion_tokens - batch_reasoning_tokens
 					batch_total_tokens = batch_usage.get('total_tokens', 0)
 					batch_true_cost = self.token_coster.cost(input_batch=batch_input_tokens, output_batch=batch_completion_tokens)
-					log.info(f"{self.name_prefix}: Batch {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_cost:.3f} true cost (predicted {batch_predicted_cost:.3f})")
+					log.info(f"Batch {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_cost:.3f} true cost (predicted {batch_predicted_cost:.3f})")
 					if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
-						log.warning(f"{self.name_prefix}: Batch {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
+						log.warning(f"Batch {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
 					if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
-						log.warning(f"{self.name_prefix}: Batch {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens")
+						log.warning(f"Batch {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens")
 
 					if result_info_map.keys() != batch.request_info.keys():
-						log.error(f"{self.name_prefix}: Batch {batch.id} response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
+						log.error(f"Batch {batch.id} response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
 						if raise_if_batch_failed:
 							delayed_raise.add(msg="Batch response does not contain exactly the expected request IDs")  # [DELAYED RAISE]
 						batch_failed = True
@@ -1843,7 +1843,7 @@ class GPTRequester:
 						pass_ratio=pass_ratio,
 					)
 
-					log.info(f"{self.name_prefix}: Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) for {result_stats.num_requests} requests = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
+					log.info(f"Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) for {result_stats.num_requests} requests = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
 					assert result_stats.num_requests == len(batch.request_info) == len(result_info_map)
 					assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
 					assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
@@ -1851,16 +1851,16 @@ class GPTRequester:
 					assert result_stats.num_fatal >= result_stats.num_missing
 
 					if result_stats.num_cancelled != 0:
-						log.error(f"{self.name_prefix}: Batch {batch.id} response contains {result_stats.num_cancelled} cancelled requests")
+						log.error(f"Batch {batch.id} response contains {result_stats.num_cancelled} cancelled requests")
 						if raise_if_batch_failed:
 							delayed_raise.add(msg="Batch response contains cancelled requests")  # [DELAYED RAISE]
 						batch_failed = True
 
 					if delayed_raise.have_section_errors():
-						log.error(f"{self.name_prefix}: Aborting processing of finished batch {batch.id} ({batch.remote.batch.id}) as errors were encountered (leaving batch as it was)")
+						log.error(f"Aborting processing of finished batch {batch.id} ({batch.remote.batch.id}) as errors were encountered (leaving batch as it was)")
 						continue  # [DELAYED RAISE]
 					elif batch_failed:
-						log.warning(f"{self.name_prefix}: Processing finished batch {batch.id} ({batch.remote.batch.id}) even though the batch at least partially failed")
+						log.warning(f"Processing finished batch {batch.id} ({batch.remote.batch.id}) even though the batch at least partially failed")
 
 					batch_metrics_succeeded = RequestMetrics()
 					batch_metrics_failed = RequestMetrics()
@@ -1937,19 +1937,18 @@ class GPTRequester:
 							self.delete_remote_file(file_id=batch.remote.file.id)
 						self.delete_local_file(path=batch.local_jsonl)
 
-						log.info(f"{self.name_prefix}: Finished processing batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests")
+						log.info(f"Finished processing batch {batch.id} ({batch.remote.batch.id}) containing {batch.num_requests} requests")
 
 					if self.S.num_pass_failures >= self.max_pass_failures:
-						log.error(f"{self.name_prefix}: Have encountered {self.S.num_pass_failures} consecutive batch pass failures (max allowed {self.max_pass_failures})")
+						log.error(f"Have encountered {self.S.num_pass_failures} consecutive batch pass failures (max allowed {self.max_pass_failures})")
 						delayed_raise.add(msg="Number of consecutive batch pass failures has reached limit")  # [DELAYED RAISE]
 
 					if batch_failed:
 						self.session_processed_failed_batches += 1
-						log.warning(f"{self.name_prefix}: Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
+						log.warning(f"Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-	# TODO: Remove "char_codes: " and SIMILAR from ALL logs (ADD it to FIRST log - with prefix BLAH)
 	# TODO: The DEFAULT 'retry' should already take into consideration max_retries, BUT this can be overridden by task as final authority. That way requester deals with boilerplate counting YET task knows exactly whether a retry will happen (up to reversibility) and can success/ongoing/fail a sample appropriately
 	# TODO: Task manager output file and such
 	# TODO: Add a 'clear/wipe/forget all ongoing' NUKE option that in both TASK and REQUESTER wipes and cleans up all pool/queue/local-batches/remote-batches/num_pass_failures without processing any of it (there is an OPTION to also un-fail all task samples that have permanently failed so far - wipe_failed? Ends up with committed == succeeded and failed is empty)
