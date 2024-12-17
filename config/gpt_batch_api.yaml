@@ -43,6 +43,8 @@ show_errors: 25
 process_failed_batches: 0
 # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
 retry_fatal_requests: False
+# Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)
+max_retries: 2
 # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 auto_parse: True
 

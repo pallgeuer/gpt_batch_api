@@ -344,9 +344,10 @@ class DelayKeyboardInterrupt:
 		self.interrupted = False
 		self.original_handler = None
 
-	def __enter__(self):
+	def __enter__(self) -> Self:
 		self.interrupted = False
 		self.original_handler = signal.signal(signal.SIGINT, self.sigint_handler)
+		return self
 
 	# noinspection PyUnusedLocal
 	def sigint_handler(self, signum: int, frame: Optional[FrameType]):

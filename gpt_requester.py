@@ -52,6 +52,7 @@ logging.getLogger('openai').setLevel(logging.WARNING)
 class GPTRequest:
 	payload: dict[str, Any]                # Request payload (JSON-compatible OpenAI request after auto-parsing) => Is batched into JSONL files and uploaded to OpenAI for processing
 	meta: Optional[dict[str, Any]] = None  # Optional custom metadata to associate with this request (JSON-compatible) => Is batched and stored in the state file while OpenAI is processing the payloads, and is returned alongside the response
+	retry_num: int = 0                     # Retry number of the request (e.g. 2 => This request is the second retry, and thereby the third attempt at this request)
 
 # Tokens and cost class
 @dataclasses.dataclass
@@ -145,6 +146,7 @@ class QueueState:
 @dataclasses.dataclass(frozen=True)
 class RequestInfo:
 	meta: Optional[dict[str, Any]]        # Optional custom metadata that is associated with this request (JSON-compatible)
+	retry_num: int                        # Retry number of the request (e.g. 2 => This request is the second retry, and thereby the third attempt at this request)
 	tokens_cost: TokensCost               # The approximate token count and cost of the request payload
 	parse_info: Optional[dict[str, Any]]  # Data required for or associated with auto-parsing of the request
 
@@ -154,25 +156,6 @@ class RemoteBatchState:
 	file: openai.types.FileObject  # Uploaded input JSONL file object
 	batch: openai.types.Batch      # Batch status as per the last time the server was checked (this is not updated anymore once the batch status is for the first time in one of the finished states)
 	finished: bool                 # Whether the batch is known to have finished on the remote server by now (status as per the last time the server was checked, updated whenever status is updated)
-
-# Batch state class
-@dataclasses.dataclass
-class BatchState:
-	id: int = 0                                                                     # Unique monotonic ID corresponding to the batch
-	local_jsonl: str = ''                                                           # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
-	local_jsonl_size: int = 0                                                       # Number of bytes in the local JSONL batch input file
-	num_requests: int = 0                                                           # Number of requests in the batch
-	request_info: dict[int, RequestInfo] = dataclasses.field(default_factory=dict)  # The extra information pertaining to each request
-	tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)         # The total approximate token count and cost across all requests in the batch
-	full_batch: bool = False                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
-	reasons: list[str] = dataclasses.field(default_factory=list)                    # String reasons of what triggered the formation of the batch
-	remote: Optional[RemoteBatchState] = None                                       # Remote state of the batch once it has been pushed
-
-# Push stats class
-@dataclasses.dataclass
-class PushStats:
-	total_requests: int = 0                                                        # Total number of requests pushed
-	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)  # Total token count and cost pushed
 
 # Request metrics class
 @dataclasses.dataclass
@@ -258,6 +241,27 @@ class Metrics:
 	batch: APIMetrics = dataclasses.field(default_factory=APIMetrics)   # Metrics associated with completed batch API requests
 	all: APIMetrics = dataclasses.field(default_factory=APIMetrics)     # Total metrics of completed requests across all APIs
 
+# Batch state class
+@dataclasses.dataclass(order=True)
+class BatchState:
+	id: int = 0                                                                     # Unique monotonic ID corresponding to the batch
+	local_jsonl: str = ''                                                           # Path of the generated local JSONL batch input file (requests are ordered by ascending request ID)
+	local_jsonl_size: int = 0                                                       # Number of bytes in the local JSONL batch input file
+	num_requests: int = 0                                                           # Number of requests in the batch
+	request_info: dict[int, RequestInfo] = dataclasses.field(default_factory=dict)  # The extra information pertaining to each request
+	tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)         # The total approximate token count and cost across all requests in the batch
+	full_batch: bool = False                                                        # Whether this is a full batch, i.e. some threshold was reached that triggered this batch to be formed, as opposed to the batch being forced
+	reasons: list[str] = dataclasses.field(default_factory=list)                    # String reasons of what triggered the formation of the batch
+	remote: Optional[RemoteBatchState] = None                                       # Remote state of the batch once it has been pushed
+	true_tokens_cost: Optional[TokensCost] = None                                   # True total token count and cost across all responded requests in the batch (only available once batch has finished and been processed)
+	metrics: Optional[APIMetrics] = None                                            # True metrics associated with the batch (only available once batch has finished and been processed)
+
+# Push stats class
+@dataclasses.dataclass
+class PushStats:
+	total_requests: int = 0                                                        # Total number of requests pushed
+	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)  # Total token count and cost pushed
+
 # State class
 @dataclasses.dataclass
 class State:
@@ -339,7 +343,7 @@ class StateFile:
 #
 
 # GPT request item class (each line of the JSONL queue file corresponds to one of these items)
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, order=True)
 class GPTRequestItem:
 	id: int                               # Unique monotonic ID corresponding to the GPT request
 	req: GPTRequest                       # The actual GPT request
@@ -353,7 +357,7 @@ class GPTRequestInfo:
 	tokens_cost: TokensCost  # The approximate token count and cost of the request payload
 
 # Cached GPT request class
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, order=True)
 class CachedGPTRequest:
 
 	item: GPTRequestItem  # GPT request item (backed by the queue file)
@@ -510,7 +514,8 @@ class ResultInfo:
 	resp_info: Optional[ResponseInfo]  # Response information (if available, at least one of resp_info or err_info always exists)
 	err_info: Optional[ErrorInfo]      # Error information (if errored, at least one of resp_info or err_info always exists)
 	warn_infos: list[ErrorInfo]        # Warning information (if warnings occurred)
-	retry: bool                        # Whether the request should be retried as something retryable went wrong
+	retry_counts: bool                 # Whether a retry of this request counts towards the maximum retry count (e.g. by default a retry due to batch cancellation or expiration does not count as a retry)
+	retry: bool                        # Whether the request should be retried (as something retryable went wrong)
 
 # Result statistics class
 @dataclasses.dataclass(frozen=True)
@@ -574,6 +579,7 @@ class GPTRequester:
 		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
 		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
 		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
+		max_retries: int = 2,                                 # Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)
 		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 
 		cost_input_direct_mtoken: float = 2.50,               # The cost per million direct input tokens (1M tokens ~ 750K words)
@@ -661,6 +667,14 @@ class GPTRequester:
 			log.info("An exception will be raised if failed batches occur")
 		else:
 			log.info("Processing and clearing up any failed batches that occur")
+
+		self.max_retries = max_retries
+		if self.max_retries > 0:
+			log.info(f"Allowing up to {self.max_retries} retries by default for each request")
+		elif self.max_retries == 0:
+			log.info("Request retrying is disabled by default")
+		else:
+			raise ValueError(f"Maximum number of retries cannot be negative: {self.max_retries}")
 
 		self.auto_parse = auto_parse
 		log.info(f"Auto-parse is {'enabled' if self.auto_parse else 'disabled'}")
@@ -867,6 +881,7 @@ class GPTRequester:
 		add_argument(name='show_errors', type=int, metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
 		add_argument(name='process_failed_batches', type=int, metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
 		add_argument(name='retry_fatal_requests', type=bool, help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
+		add_argument(name='max_retries', type=int, metavar='NUM', help="Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)")
 		if include_auto_parse:
 			add_argument(name='auto_parse', type=bool, help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
 
@@ -962,6 +977,8 @@ class GPTRequester:
 			if batch.remote is not None:
 				if batch.remote.batch.input_file_id != batch.remote.file.id:
 					raise ValueError(f"Batch file ID is not consistent: {batch.remote.batch.input_file_id} vs {batch.remote.file.id}")
+			if batch.true_tokens_cost is not None or batch.metrics is not None:
+				raise ValueError(f"Batch {batch.id} unexpectedly has non-None true cost and/or metrics")
 		if not utils.is_ascending((batch.id for batch in self.S.batches), strict=True):
 			raise ValueError(f"The batch IDs are not strictly ascending: {list(batch.id for batch in self.S.batches)}")
 
@@ -976,6 +993,8 @@ class GPTRequester:
 		for batch in self.S.batch_history:
 			if batch.request_info:
 				raise ValueError(f"The request IDs in historical batch {batch.id} were not cleared")
+			if batch.true_tokens_cost is None or batch.metrics is None:
+				raise ValueError(f"Historical batch {batch.id} does not have true cost and metrics")
 		batch_id_history = [batch.id for batch in self.S.batch_history]
 		if not utils.is_ascending(batch_id_history, strict=True):
 			raise ValueError(f"The batch IDs in the batch history are not strictly ascending: {batch_id_history}")
@@ -1066,13 +1085,23 @@ class GPTRequester:
 
 	# Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
 	@contextlib.contextmanager
-	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None) -> ContextManager[tuple[utils.RevertStack, list[CachedGPTRequest]]]:
+	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, rstack: Optional[utils.RevertStack] = None) -> ContextManager[tuple[utils.RevertStack, list[CachedGPTRequest]]]:
 		# reqs = Optional requests to add to the request pool immediately prior to committing
+		# rstack = Optional RevertStack to use instead of creating and entering a new one internally (passing a RevertStack also ensures the adding of requests is reversible)
 		# The context manager returns the currently active RevertStack and the list of committed cached GPT requests
-		# The body of the context manager is executed within an AtomicRevertStack (a RevertStack that is not interruptible by a keyboard interrupt) that must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
+		# The body of the context manager is executed within DelayKeyboardInterrupt and RevertStack context managers, the latter of which must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
 		# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far (given by a list[CachedGPTRequest]) do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be immediately keyboard interrupted (or crash)
 
 		if reqs is not None:
+
+			if rstack is not None:
+				def revert_pool(exp_max_request_id: int, max_request_id: int, P: list[CachedGPTRequest]):
+					# Note: The only thing that isn't completely reverted is that add_request() potentially adds types to self.type_cache
+					self.P[:] = P
+					if self.max_request_id == exp_max_request_id:
+						self.max_request_id = max_request_id
+				rstack.callback(revert_pool, exp_max_request_id=self.max_request_id + (1 if isinstance(reqs, GPTRequest) else len(reqs)), max_request_id=self.max_request_id, P=self.P.copy())  # noqa
+
 			if isinstance(reqs, GPTRequest):
 				self.add_request(reqs)
 			else:
@@ -1086,7 +1115,8 @@ class GPTRequester:
 			for field, value in queue_state_dict.items():
 				setattr(self.S.queue, field, value)
 
-		with utils.AtomicRevertStack() as rstack:
+		cm_rstack = utils.RevertStack() if rstack is None else contextlib.nullcontext(enter_result=rstack)
+		with utils.DelayKeyboardInterrupt(), cm_rstack as rstack:
 			cached_reqs = self.P.copy()
 			if self.P or any(cached_req is None for cached_req in self.Q):
 				rstack.callback(revert_queue, P=cached_reqs, Q=self.Q.copy())
@@ -1157,7 +1187,7 @@ class GPTRequester:
 					batch.local_jsonl_size = next_local_jsonl_size
 					batch.num_requests = next_num_requests
 					assert req_id not in batch.request_info and cached_req.info.tokens_cost.is_valid()
-					batch.request_info[req_id] = RequestInfo(meta=cached_req.item.req.meta, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
+					batch.request_info[req_id] = RequestInfo(meta=cached_req.item.req.meta, retry_num=cached_req.item.req.retry_num, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
 					batch.tokens_cost = next_tokens_cost
 
 				index += 1
@@ -1186,7 +1216,7 @@ class GPTRequester:
 					batch.id = self.S.max_batch_id
 					batch.local_jsonl = os.path.join(self.working_dir, f"{self.name_prefix}_batch{batch.id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jsonl")
 
-					self.S.batches.append(batch)
+					self.S.batches.append(batch)  # Note: This is guaranteed to preserve ordering by ascending batch ID as the new batch ID is higher than any used so far
 					for req_id, req_info in batch.request_info.items():
 						assert self.S.queue.request_id_meta[req_id] == req_info.meta
 						del self.S.queue.request_id_meta[req_id]
@@ -1720,6 +1750,7 @@ class GPTRequester:
 									err_resp_retry.log(err_msg)  # [RETRYABLE]
 
 							assert resp_info is not None or err_info is not None
+							retry_counts = not (err_info is not None and err_info.type == 'RequestError' and err_info.subtype in ('batch_cancelled', 'batch_expired'))
 							result_info_map[req_id] = ResultInfo(
 								req_id=req_id,
 								req_jsonl_size=req_jsonl_size,
@@ -1728,7 +1759,8 @@ class GPTRequester:
 								resp_info=resp_info,
 								err_info=err_info,
 								warn_infos=warn_infos,
-								retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests),
+								retry_counts=retry_counts,
+								retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests) and (req_info.retry_num < self.max_retries or not retry_counts),
 							)
 
 					warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further warnings for batch {batch.id} (total {num_total} warnings)")
@@ -1768,8 +1800,15 @@ class GPTRequester:
 					batch_reasoning_tokens = batch_usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0)
 					batch_response_tokens = batch_completion_tokens - batch_reasoning_tokens
 					batch_total_tokens = batch_usage.get('total_tokens', 0)
-					batch_true_cost = self.token_coster.cost(input_batch=batch_input_tokens, output_batch=batch_completion_tokens)
-					log.info(f"Batch {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_cost:.3f} true cost (predicted {batch_predicted_cost:.3f})")
+					batch_true_tokens_cost = TokensCost(
+						input_tokens=batch_input_tokens,
+						output_tokens=batch_completion_tokens,
+						cost_input_direct=self.token_coster.input_cost(direct=batch_input_tokens),
+						cost_input_batch=self.token_coster.input_cost(batch=batch_input_tokens),
+						cost_output_direct=self.token_coster.output_cost(direct=batch_completion_tokens),
+						cost_output_batch=self.token_coster.output_cost(batch=batch_completion_tokens),
+					)
+					log.info(f"Batch {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_tokens_cost.cost_batch:.3f} true cost (predicted {batch_predicted_cost:.3f})")
 					if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
 						log.warning(f"Batch {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
 					if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
@@ -1793,7 +1832,8 @@ class GPTRequester:
 								resp_info=None,
 								err_info=ErrorInfo(fatal=True, type='ResponseError', subtype='Missing', msg='Response is missing'),
 								warn_infos=[],
-								retry=self.retry_fatal_requests,
+								retry_counts=True,
+								retry=self.retry_fatal_requests and req_info.retry_num < self.max_retries,
 							)
 					assert result_info_map.keys() == batch.request_info.keys()
 
@@ -1868,11 +1908,11 @@ class GPTRequester:
 						batch_metrics = (batch_metrics_succeeded if info.resp_info is not None and info.err_info is None and not info.warn_infos else batch_metrics_failed)
 						batch_metrics.num_requests += 1
 						batch_metrics.local_jsonl_size += info.req_jsonl_size
-						if info.resp_info is not None:
+						if info.resp_info is not None:  # Note: By definition always true for succeeded requests
 							batch_metrics.models[info.resp_info.model] += 1
 							batch_metrics.system_fingerprints[info.resp_info.system_fingerprint] += 1
 							RequestMetrics.usage_iadd(self_usage=batch_metrics.usage, other_usage=info.resp_info.usage)
-							batch_metrics.true_cost += self.token_coster.cost(input_batch=batch_usage.get('prompt_tokens', 0), output_batch=batch_usage.get('completion_tokens', 0))
+							batch_metrics.true_cost += self.token_coster.cost(input_batch=info.resp_info.usage.get('prompt_tokens', 0), output_batch=info.resp_info.usage.get('completion_tokens', 0))
 
 					result = BatchResult(
 						batch=batch,
@@ -1883,19 +1923,29 @@ class GPTRequester:
 						metrics_failed=batch_metrics_failed,
 					)
 
-					def revert_state(batches: list[BatchState], request_info: dict[int, RequestInfo], batch_history: list[BatchState], api_metrics_batch: APIMetrics, api_metrics_all: APIMetrics, num_pass_failures: int):
+					def revert_state(
+						batches: list[BatchState],
+						request_info: dict[int, RequestInfo],
+						batch_history: list[BatchState],
+						api_metrics_batch: APIMetrics,
+						api_metrics_all: APIMetrics,
+						num_pass_failures: int,
+					):
 						self.S.num_pass_failures = num_pass_failures
 						self.S.metrics.all = api_metrics_all
 						self.S.metrics.batch = api_metrics_batch
 						self.S.batch_history[:] = batch_history
+						batch.metrics = None
+						batch.true_tokens_cost = None
 						batch.request_info = request_info
 						self.S.batches[:] = batches
 
+					assert batch.true_tokens_cost is None and batch.metrics is None
 					with utils.DelayKeyboardInterrupt():
 
 						with utils.RevertStack() as rstack:
 
-							yield rstack, result  # Note: Task is permitted to update result.info[REQID].retry (boolean) to reflect whether a request can/should be retried or not if possible
+							yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
 							rstack.callback(
 								revert_state,
@@ -1909,10 +1959,12 @@ class GPTRequester:
 
 							self.S.batches.remove(batch)
 							batch.request_info = {}
+							batch.true_tokens_cost = batch_true_tokens_cost
+							batch.metrics = APIMetrics()
 							self.S.batch_history.append(batch)
 							self.S.batch_history.sort()
 
-							for api_metrics in (self.S.metrics.batch, self.S.metrics.all):
+							for api_metrics in (batch.metrics, self.S.metrics.batch, self.S.metrics.all):
 								api_metrics.num_api_calls += 1
 								api_metrics.succeeded.add_metrics(result.metrics_succeeded)
 								api_metrics.failed.add_metrics(result.metrics_failed)
@@ -1924,10 +1976,28 @@ class GPTRequester:
 								else:
 									self.S.num_pass_failures = 0
 
-							# TODO: Retry exactly the requests for which result.info[REQID].retry is truthy (note that result.info is guaranteed to contain exactly all requests in the batch) (need to save queue as well? Want to do that AFTER validation though?)
+							retry_reqs = [GPTRequest(
+								payload=info.req_payload,
+								meta=info.req_info.meta,
+								retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
+							) for info in result_info_map.values() if info.retry]
 
-							self.validate_state_queue(clean=False)
-							self.state.save(rstack=rstack)
+							if retry_reqs:
+								log.info(f"{len(retry_reqs)} requests need to be retried and will be re-committed to the request queue...")
+								with self.commit_requests(reqs=retry_reqs, rstack=rstack) as (_, cached_reqs):
+									assert len(cached_reqs) >= len(retry_reqs) > 0  # Note: There will always be something to commit and thus state validation and saving of the queue and state files will have happened internally
+								if len(cached_reqs) == len(retry_reqs):
+									log.info(f"Committed {len(retry_reqs)} retried requests to the request queue")
+								else:
+									log.info(f"Committed {len(cached_reqs) - len(retry_reqs)} existing pooled requests and {len(retry_reqs)} retried requests to the request queue")
+							else:
+								self.validate_state_queue(clean=False)
+								self.state.save(rstack=rstack)
+
+							if batch_failed:
+								rstack.callback(setattr, self, 'session_processed_failed_batches', self.session_processed_failed_batches)
+								self.session_processed_failed_batches += 1
+								log.warning(f"Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
 
 						if batch.remote.batch.error_file_id is not None:
 							self.delete_remote_file(file_id=batch.remote.batch.error_file_id)
@@ -1943,13 +2013,8 @@ class GPTRequester:
 						log.error(f"Have encountered {self.S.num_pass_failures} consecutive batch pass failures (max allowed {self.max_pass_failures})")
 						delayed_raise.add(msg="Number of consecutive batch pass failures has reached limit")  # [DELAYED RAISE]
 
-					if batch_failed:
-						self.session_processed_failed_batches += 1
-						log.warning(f"Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
-
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-	# TODO: The DEFAULT 'retry' should already take into consideration max_retries, BUT this can be overridden by task as final authority. That way requester deals with boilerplate counting YET task knows exactly whether a retry will happen (up to reversibility) and can success/ongoing/fail a sample appropriately
 	# TODO: Task manager output file and such
 	# TODO: Add a 'clear/wipe/forget all ongoing' NUKE option that in both TASK and REQUESTER wipes and cleans up all pool/queue/local-batches/remote-batches/num_pass_failures without processing any of it (there is an OPTION to also un-fail all task samples that have permanently failed so far - wipe_failed? Ends up with committed == succeeded and failed is empty)
 

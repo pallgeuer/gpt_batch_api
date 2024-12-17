@@ -216,7 +216,7 @@ class TaskManager:
 		while True:
 
 			# Process all finished remote batches (nullifies then ensures condition F, nullifies conditions M and C), and update the task state (nullifies condition G)
-			# TODO: Requests may internally be auto-retried (if it occurs, temporarily nullifies condition P then re-ensures it and nullifies conditions Q and B)
+			# Requests may internally be auto-retried (if it occurs, temporarily nullifies condition P then re-ensures it and nullifies conditions Q and B)
 			self.process_batches()
 
 			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
@@ -342,7 +342,8 @@ class TaskManager:
 		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)
 		# TODO: Log how many samples errored for whatever reasons (be specific), and how many were internally auto-retried by GPT requester
 
-		# TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary by writing to result.info[REQID].retry
+		# TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary by writing to result.info[REQID].retry/retry_counts (both boolean)
+		# TODO: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 		for rstack, result in self.GR.process_batches():
 			print("BLAH")  # TODO: TEMP
 
