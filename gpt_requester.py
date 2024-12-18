@@ -511,8 +511,8 @@ class ResultInfo:
 	req_jsonl_size: int                # Request JSONL size (bytes)
 	req_payload: dict[str, Any]        # Request payload (JSON-loaded)
 	req_info: RequestInfo              # Request information
-	resp_info: Optional[ResponseInfo]  # Response information (if available, at least one of resp_info or err_info always exists)
-	err_info: Optional[ErrorInfo]      # Error information (if errored, at least one of resp_info or err_info always exists)
+	resp_info: Optional[ResponseInfo]  # Response information (if available / at least one of resp_info or err_info always exists)
+	err_info: Optional[ErrorInfo]      # Error information (if errored / at least one of resp_info or err_info always exists)
 	warn_infos: list[ErrorInfo]        # Warning information (if warnings occurred)
 	retry_counts: bool                 # Whether a retry of this request counts towards the maximum retry count (e.g. by default a retry due to batch cancellation or expiration does not count as a retry)
 	retry: bool                        # Whether the request should be retried (as something retryable went wrong)
