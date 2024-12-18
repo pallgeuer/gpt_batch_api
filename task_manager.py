@@ -22,8 +22,8 @@ class TaskState:
 	committed_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples committed so far (arbitrary JSON-compatible key-value store)
 	committed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the samples committed so far (maps sample keys to corresponding JSON-compatible data)
 	responded_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples that have received a response so far (arbitrary JSON-compatible key-value store)
-	failed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)     # Sample-level information about the committed samples that have received a response so far and failed (maps sample keys to corresponding JSON-compatible data)
-	succeeded_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the committed samples that have received a response so far and succeeded (maps sample keys to corresponding JSON-compatible data)
+	failed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)     # Sample-level information about the committed samples that have received a response so far and failed (maps sample keys to corresponding JSON-compatible data, keys MUST be a non-strict subset of committed_samples at all times)
+	succeeded_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the committed samples that have received a response so far and succeeded (maps sample keys to corresponding JSON-compatible data, keys MUST be a non-strict subset of committed_samples at all times)
 
 # Task state file class
 class TaskStateFile:
@@ -369,9 +369,10 @@ class TaskManager:
 		# The following information is available for each ResultInfo instance 'info':
 		#   - The input request payload (info.req_payload: dict[str, Any]) and metadata (info.req_info.meta: Optional[dict[str, Any]])
 		#   - If a response was received for the request (info.resp_info is not None), the response in Python class/parsed format (info.resp_info.payload: openai.types.chat.ChatCompletion/ParsedChatCompletion or similar depending on auto-parse and endpoint)
-		#   - If an error occurred with the request and/or response (info.err_info is not None), the error (info.err_info: ErrorInfo)
+		#   - If an error occurred with the request and/or response (info.err_info is not None), the error (info.err_info: ErrorInfo) => At least one of info.err_info and info.resp_info will always be non-None
 		#   - If warnings occurred while processing the response, the warnings (info.warn_infos: list[ErrorInfo])---warnings occur for example if multiple completion choices are requested and some choices fail somehow while others don't
 		#   - Whether the request will be retried (info.retry: bool) and whether the current result counts towards the retry number (info.retry_counts: bool / e.g. batch cancellation or expiry by default does not count)
+		#   - The default (on entering this method) value of info.retry is never True if there is no error present (info.err_info is None)
 		#   - The field info.retry can be MODIFIED in this method to set whether the request will get retried (e.g. because of a task-specific parsing or value failure)
 		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general
 		# Statistics like the remote batch completion duration, request pass ratio, and number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats).
