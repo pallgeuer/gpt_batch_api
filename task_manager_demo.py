@@ -57,7 +57,7 @@ class CharCodesTask(task_manager.TaskManager):
 
 	@dataclasses.dataclass
 	class Output:
-		chars: dict[str, CharCodesTask.UnicodeCharacterInfo]  # Map of all characters to their produced output character information
+		chars: dict[str, CharCodesTask.UnicodeCharacterInfo] = dataclasses.field(default_factory=dict)  # Map of all characters to their produced output character information
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
 		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)

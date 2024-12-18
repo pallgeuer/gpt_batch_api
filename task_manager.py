@@ -172,7 +172,6 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 				except FileNotFoundError:
 					self.create(rstack=rstack)
 				assert self.data is not None
-				self.validate()
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
 		return self
