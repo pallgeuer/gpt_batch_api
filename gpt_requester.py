@@ -1069,19 +1069,21 @@ class GPTRequester:
 		return GPTRequestItem(id=self.max_request_id, req=req, parse_info=parse_info)
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
-	def add_request(self, req: GPTRequest):
+	def add_request(self, req: GPTRequest) -> int:
 		# req = The request to add to the request pool
+		# Returns the associated unique request ID
 		# Be careful not to inadvertently modify any part of req after adding the request (e.g. the meta/payload or any part of it)
 		item = self.create_request_item(req=req)
 		cached_req = CachedGPTRequest.from_item(item=item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
 		self.P.append(cached_req)
+		return cached_req.item.id
 
 	# Add multiple requests to the request pool without committing them to the request queue just yet (the requests will be committed in the next call to commit_requests())
 	# Note that reqs can also for convenience be a generator that executes some loop over source samples and yields instances of GPTRequest
-	def add_requests(self, reqs: Iterable[GPTRequest]):
+	def add_requests(self, reqs: Iterable[GPTRequest]) -> list[int]:
 		# reqs = The requests to add to the request pool
-		for req in reqs:
-			self.add_request(req)
+		# Returns a list of the associated unique request IDs
+		return [self.add_request(req) for req in reqs]
 
 	# Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
 	@contextlib.contextmanager
