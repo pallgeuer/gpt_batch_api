@@ -1922,7 +1922,7 @@ class GPTRequester:
 						info=dict(sorted(result_info_map.items())),
 						stats=result_stats,
 					)
-					assert all(req_id == info.req_id for req_id, info in result.info.items())
+					assert all(req_id == info.req_id and not (info.err_info is None and info.retry) for req_id, info in result.info.items())
 
 					def revert_metrics(api_metrics_batch: APIMetrics, api_metrics_all: APIMetrics):
 						self.S.metrics.all = api_metrics_all
