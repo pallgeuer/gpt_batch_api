@@ -541,8 +541,6 @@ class BatchResult:
 	errors: list[openai.types.BatchError]  # List of any encountered batch errors
 	info: dict[int, ResultInfo]            # Result information for each request ID in the batch (in ascending request ID order, guaranteed to be for exactly all requests in the batch)
 	stats: ResultStats                     # Result statistics
-	metrics_succeeded: RequestMetrics      # Combined metrics for all succeeded requests
-	metrics_failed: RequestMetrics         # Combined metrics for all failed requests
 
 #
 # GPT requester
@@ -1512,7 +1510,7 @@ class GPTRequester:
 				utils.print_in_place(print_str)
 				printed_str = print_str
 
-	# Process any finished remote batches (unless dry run)
+	# Process and clean up after any finished remote batches (unless dry run)
 	def process_batches(self) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
 		# This method is implemented as a generator that returns the results for one batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
@@ -1523,6 +1521,8 @@ class GPTRequester:
 		#   [RETRYABLE] = The given situation is retryable and thus only needs to be remembered as such
 
 		self.update_remote_batch_state(only_check_finished=False, log_save=True)  # Does not do much in case of dry run
+		if (num_finished_batches := self.num_finished_batches()) > 0:
+			log.info(f"There are {self.num_unfinished_batches()} unfinished and {num_finished_batches} finished REMOTE batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)} and {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and batch.remote.finished)} requests respectively")
 
 		delayed_raise = utils.DelayedRaise()
 		for batch in self.S.batches.copy():
@@ -1921,57 +1921,42 @@ class GPTRequester:
 						errors=batch_errors,
 						info=dict(sorted(result_info_map.items())),
 						stats=result_stats,
-						metrics_succeeded=batch_metrics_succeeded,
-						metrics_failed=batch_metrics_failed,
 					)
+					assert all(req_id == info.req_id for req_id, info in result.info.items())
 
-					def revert_state(
-						batches: list[BatchState],
-						request_info: dict[int, RequestInfo],
-						batch_history: list[BatchState],
-						api_metrics_batch: APIMetrics,
-						api_metrics_all: APIMetrics,
-						num_pass_failures: int,
-					):
-						self.S.num_pass_failures = num_pass_failures
+					def revert_metrics(api_metrics_batch: APIMetrics, api_metrics_all: APIMetrics):
 						self.S.metrics.all = api_metrics_all
 						self.S.metrics.batch = api_metrics_batch
-						self.S.batch_history[:] = batch_history
 						batch.metrics = None
 						batch.true_tokens_cost = None
-						batch.request_info = request_info
-						self.S.batches[:] = batches
-
 					assert batch.true_tokens_cost is None and batch.metrics is None
-					with utils.DelayKeyboardInterrupt():
+
+					def revert_state(request_info: dict[int, RequestInfo], batches: list[BatchState], batch_history: list[BatchState], num_pass_failures: int):
+						self.S.num_pass_failures = num_pass_failures
+						self.S.batch_history[:] = batch_history
+						self.S.batches[:] = batches
+						batch.request_info = request_info
+
+					with utils.DelayKeyboardInterrupt():  # TODO: When unwound to here, manually trigger SAVEs and verify that files are STILL perfectly original (tests RAM state after unwinding, as files are just brute-replaced)
 
 						with utils.RevertStack() as rstack:
 
-							yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
-
-							rstack.callback(
-								revert_state,
-								batches=self.S.batches.copy(),
-								request_info=batch.request_info,
-								batch_history=self.S.batch_history.copy(),
-								api_metrics_batch=copy.deepcopy(self.S.metrics.batch),
-								api_metrics_all=copy.deepcopy(self.S.metrics.all),
-								num_pass_failures=self.S.num_pass_failures,
-							)
-
-							self.S.batches.remove(batch)
-							batch.request_info = {}
+							rstack.callback(revert_metrics, api_metrics_batch=copy.deepcopy(self.S.metrics.batch), api_metrics_all=copy.deepcopy(self.S.metrics.all))
 							batch.true_tokens_cost = batch_true_tokens_cost
 							batch.metrics = APIMetrics()
-							self.S.batch_history.append(batch)
-							self.S.batch_history.sort()
-
 							for api_metrics in (batch.metrics, self.S.metrics.batch, self.S.metrics.all):
 								api_metrics.num_api_calls += 1
-								api_metrics.succeeded.add_metrics(result.metrics_succeeded)
-								api_metrics.failed.add_metrics(result.metrics_failed)
-								api_metrics.total.add_metrics(result.metrics_succeeded, result.metrics_failed)
+								api_metrics.succeeded.add_metrics(batch_metrics_succeeded)
+								api_metrics.failed.add_metrics(batch_metrics_failed)
+								api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
 
+							yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
+
+							rstack.callback(revert_state, request_info=batch.request_info, batches=self.S.batches.copy(), batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
+							batch.request_info = {}
+							self.S.batches.remove(batch)
+							self.S.batch_history.append(batch)
+							self.S.batch_history.sort()
 							if not batch_failed:  # Note: Failed batches that are explicitly being allowed to clear out should not count towards pass failure, as otherwise clearing out failed batches would almost always lead to a pass failure, which is not the point
 								if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
 									self.S.num_pass_failures += 1
