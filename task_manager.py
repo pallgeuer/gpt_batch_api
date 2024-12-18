@@ -1,14 +1,20 @@
 # Task manager (wraps a GPT requester to include sample generation and output file management)
 
 # Imports
+from __future__ import annotations
 import os
 import copy
 import json
+import functools
 import contextlib
 import dataclasses
-from typing import Any, Optional, Self
+import typing
+from typing import Any, Optional, Self, Type, Callable, Generic
 from .logger import log
 from . import gpt_requester, utils
+
+# Type variables
+DataclassT = typing.TypeVar('DataclassT')
 
 #
 # Task state file
@@ -96,6 +102,112 @@ class TaskStateFile:
 		self.state = None
 
 #
+# Task output file
+#
+
+# Task output file class
+class TaskOutputFile:
+
+	def __init__(self, path_base: str, dryrun: bool):
+		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
+		# dryrun = Whether to prevent any saving of output (dry run mode)
+		self.path_base = os.path.abspath(path_base)
+		self.dryrun = dryrun
+		self.data = None
+
+	def __enter__(self) -> Self:
+		# Load/create the task output file and set/initialise self.data (must be mutable or None)
+		raise NotImplementedError
+
+	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+		# Unload the task output file (don't automatically just save the task output file here - it is the responsibility of the user of the class to explicitly call save() when required)
+		raise NotImplementedError
+
+	def validate(self):
+		# Assuming the class is entered, perform any possible validations on the data and raise a ValueError for any failures
+		pass
+
+	def create(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible creation of the task output file
+		raise NotImplementedError
+
+	def load(self):
+		raise NotImplementedError
+
+	def save(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible saving of the task output file
+		raise NotImplementedError
+
+	def unload(self):
+		self.data = None
+
+# Dataclass output file class
+class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
+
+	data: Optional[DataclassT]
+
+	@staticmethod
+	def of(*, cls: Type[DataclassT]) -> Callable[[str, bool], DataclassOutputFile]:
+		# cls = Dataclass type to use (must be instantiatable without arguments)
+		# Returns a factory function suitable for passing as output_factory to TaskManager
+		return functools.partial(DataclassOutputFile, cls=cls)
+
+	def __init__(self, path_base: str, dryrun: bool, *, cls: Type[DataclassT]):
+		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
+		# dryrun = Whether to prevent any saving of output (dry run mode)
+		# cls = Dataclass type to use (must be instantiatable without arguments)
+		super().__init__(path_base=path_base, dryrun=dryrun)
+		self.cls = cls
+		self.path = f'{self.path_base}.json'
+		self.name = os.path.basename(self.path)
+		log.info(f"Task output file: {self.path}")
+		self._enter_stack = contextlib.ExitStack()
+
+	def __enter__(self) -> Self:
+		with self._enter_stack as enter_stack:
+			with utils.AtomicRevertStack() as rstack:
+				enter_stack.callback(self.unload)
+				try:
+					self.load()
+				except FileNotFoundError:
+					self.create(rstack=rstack)
+				assert self.data is not None
+				self.validate()
+			self._enter_stack = enter_stack.pop_all()
+		assert self._enter_stack is not enter_stack
+		return self
+
+	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
+
+	def validate(self):
+		if not isinstance(self.data, self.cls):  # noqa
+			raise ValueError(f"Data is of unexpected type: {utils.get_class_str(type(self.data))} vs {utils.get_class_str(self.cls)}")
+
+	def create(self, rstack: utils.RevertStack):
+		self.data = self.cls()
+		self.save(rstack=rstack)
+
+	def load(self):
+		with open(self.path, 'r', encoding='utf-8') as file:
+			file_size = utils.get_file_size(file)
+			self.data = utils.dataclass_from_json(cls=self.cls, json_data=file)
+		log.info(f"Loaded task output file with {self.status_str()} ({utils.format_size_iec(file_size)})")
+
+	def save(self, rstack: utils.RevertStack):
+		if self.dryrun:
+			log.warning(f"{gpt_requester.DRYRUN}Did not save task output file with {self.status_str()}")
+		else:
+			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
+				utils.json_from_dataclass(obj=self.data, file=file)
+				file_size = utils.get_file_size(file)
+			log.info(f"Saved task output file with {self.status_str()} ({utils.format_size_iec(file_size)})")
+
+	def status_str(self) -> str:
+		# Returns a string summarizing the data status for logging purposes (intended to be overridden by subclasses, "... task output file with STATUS_STR")
+		return f"{len(dataclasses.fields(self.data))} fields"
+
+#
 # Task manager class
 #
 
@@ -119,21 +231,24 @@ class TaskManager:
 	# Construct a task manager to make use of the OpenAI Batch API to process samples
 	def __init__(
 		self,
-		task_dir: str,                               # Path to the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
-		name_prefix: str,                            # Name prefix to use for all files created in the task working directory (e.g. 'my_task')
-		*,                                           # Keyword arguments only beyond here
-		reinit_meta: bool = False,                   # Whether to force a reinitialisation of the task state meta field even if the task state file already exists
-		init_meta: Optional[dict[str, Any]] = None,  # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
-		**gpt_requester_kwargs,                      # Keyword arguments to be passed on to the internal GPTRequester instance
+		task_dir: str,                                          # Path to the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
+		name_prefix: str,                                       # Name prefix to use for all files created in the task working directory (e.g. 'my_task')
+		output_factory: Callable[[str, bool], TaskOutputFile],  # Factory callable to create the required task output file instance (str argument is the required output file path base, e.g. /path/to/NAME_PREFIX_output, bool argument is whether dry run mode is active)
+		*,                                                      # Keyword arguments only beyond here
+		reinit_meta: bool = False,                              # Whether to force a reinitialisation of the task state meta field even if the task state file already exists
+		init_meta: Optional[dict[str, Any]] = None,             # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
+		**gpt_requester_kwargs,                                 # Keyword arguments to be passed on to the internal GPTRequester instance
 	):
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
 		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta, dryrun=self.GR.dryrun)
+		self.output = output_factory(os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_output"), self.GR.dryrun)  # Arguments: path_base (str), dryrun (bool)
 
 		self._enter_stack = contextlib.ExitStack()
-		self.T: Optional[TaskState] = None
 		self.step_num: Optional[int] = None
 		self.generating = False
+		self.T: Optional[TaskState] = None
+		self.D: Optional[Any] = None
 
 	# Run the task manager to completion
 	def run(self):
@@ -172,6 +287,9 @@ class TaskManager:
 			enter_stack.enter_context(self.task)
 			self.T = self.task.state
 			self.validate_state()
+			enter_stack.enter_context(self.output)
+			self.D = self.output.data
+			self.output.validate()
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
 		return self
@@ -182,7 +300,7 @@ class TaskManager:
 
 	# Local actions to perform on exit
 	def on_exit(self):
-		self.T = self.step_num = None
+		self.step_num = self.T = self.D = None
 		self.generating = False
 
 	# Validate that there are no obvious issues with the current state
@@ -354,14 +472,19 @@ class TaskManager:
 		# Returns the current number of unfinished remote batches (after the remote batch status updates)
 		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history.
 		for rstack, result in self.GR.process_batches():
-			self.process_batch_result(result=result, rstack=rstack)
+			if self.process_batch_result(result=result, rstack=rstack):
+				self.validate_state()
+				self.output.validate()
+				self.task.save(rstack=rstack)
+				self.output.save(rstack=rstack)
 		assert self.GR.num_finished_batches() <= 0  # Condition F
 		return self.GR.num_unfinished_batches()
 
 	# Process a batch result and accordingly update the task state and output files (must be a perfectly reversible operation managed by the RevertStack rstack)
-	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack):
+	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 		# result => The result of a batch
 		# rstack => A RevertStack so that the actions of this method are perfectly reversible in the case of an exception
+		# Returns whether the task state or output was modified and thus that both need to be saved
 		#
 		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState).
 		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts.
@@ -377,6 +500,4 @@ class TaskManager:
 		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general
 		# Statistics like the remote batch completion duration, request pass ratio, and number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats).
 		raise NotImplementedError
-
-	# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 # EOF

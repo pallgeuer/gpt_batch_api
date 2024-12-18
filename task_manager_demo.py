@@ -8,6 +8,7 @@ import enum
 import logging
 import argparse
 import functools
+import dataclasses
 from typing import Sequence, Optional, Any
 import pydantic
 import openai.types.chat as openai_chat
@@ -15,7 +16,7 @@ from . import gpt_requester, task_manager, utils
 
 # TODO: Add any new demos to gpt_batch_api/commands.txt
 # TODO: Demo a basic single opinion/single stage text writing task with simple JSON output
-# TODO: Demo a multi-opinion task
+# TODO: Demo a multi-opinion task (classify emotion of utterances a la MELD or IEMOCAP categories, just hardcode 25 utterances that you generate with ChatGPT)
 # TODO: Demo a multi-stage task (continuing the conversation after first response)
 # TODO: One demo should have chunked JSONL output (size- and/or line-limited possible)
 # TODO: At least one demo should use structured outputs, and at least one shouldn't
@@ -27,6 +28,7 @@ from . import gpt_requester, task_manager, utils
 # TODO: State what the unicode character is, give a one sentence description of what the symbol represents and where it comes from, give a sample sentence including the character at least once (if not included then this is a 'parse error' situation, i.e. soft fail)
 # TODO: _task.json file for storing basically information about what you've already processed (must be hashable after lists are converted to tuples and dicts are converted to tuples of items?)
 # TODO: _output.json OR _data_001.jsonl file for storing the ACTUAL output/processed response data (NOT needed to determine what samples are needed in future)
+# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 
 #
 # Demo: Character codes
@@ -53,12 +55,17 @@ class CharCodesTask(task_manager.TaskManager):
 		description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
 		sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words in the sentence).")
 
+	@dataclasses.dataclass
+	class Output:
+		chars: dict[str, CharCodesTask.UnicodeCharacterInfo]  # Map of all characters to their produced output character information
+
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
 		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
 		gpt_requester_kwargs.update(endpoint=cfg.chat_endpoint)
 		super().__init__(
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
+			output_factory=task_manager.DataclassOutputFile.of(cls=CharCodesTask.Output),
 			reinit_meta=cfg.reinit_meta,
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
@@ -111,12 +118,36 @@ class CharCodesTask(task_manager.TaskManager):
 		assert len(sample_keys) == len(cached_reqs)
 		return sample_keys
 
-	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack):
+	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 
 		CHOICE = 0
+		char_mismatch = utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors)
+		sample_keys_succeeded = set()
+		sample_keys_failed = set()
+		sample_chars = set()
 
-		# TODO: REVERSIBLE
+		@rstack.callback
+		def revert_sample_state():
+			for skey in sample_keys_succeeded:
+				self.T.succeeded_samples.pop(skey, None)
+			for skey in sample_keys_failed:
+				self.T.failed_samples.pop(skey, None)
+			for schar in sample_chars:
+				self.D.chars.pop(schar, None)
+
 		for info in result.info.values():
+
+			info: gpt_requester.ResultInfo
+
+			sample_key = info.req_info.meta['sample_key']
+			if sample_key in self.T.succeeded_samples:
+				raise ValueError(f"Sample key '{sample_key}' unexpectedly already exists in succeeded samples task state")
+			elif sample_key in self.T.failed_samples:
+				raise ValueError(f"Sample key '{sample_key}' unexpectedly already exists in failed samples task state")
+
+			sample_char = info.req_info.meta['char']
+			if sample_char in self.D.chars:
+				raise ValueError(f"Sample character '{sample_char}' unexpectedly already exists in task output")
 
 			char_info: Optional[CharCodesTask.UnicodeCharacterInfo] = None
 			if info.resp_info is not None:
@@ -128,23 +159,24 @@ class CharCodesTask(task_manager.TaskManager):
 						if isinstance(parsed, CharCodesTask.UnicodeCharacterInfo):
 							char_info = parsed
 
-			sample_key = info.req_info.meta['sample_key']
 			warn_infos_choice = [warn_info for warn_info in info.warn_infos if not (warn_info.type == 'MessageChoice' and warn_info.data != CHOICE)]
-
 			if char_info is not None and info.err_info is None and not warn_infos_choice:
 				assert not info.retry
-				if sample_key in self.T.succeeded_samples:
-					raise ValueError(f"Successful sample key '{sample_key}' unexpectedly already exists in succeeded samples task state")
-				elif sample_key in self.T.failed_samples:
-					raise ValueError(f"Successful sample key '{sample_key}' unexpectedly already exists in failed samples task state")
-				self.T.succeeded_samples[sample_key] = None
-				# TODO: DO SOMETHING WITH char_info TO UPDATE OUTPUT FILE
+				if char_info.character == sample_char:
+					sample_keys_succeeded.add(sample_key)
+					self.T.succeeded_samples[sample_key] = None
+					sample_chars.add(sample_char)
+					self.D.chars[sample_char] = char_info
+				else:
+					char_mismatch.log(f"Batch {result.batch.id} request ID {info.req_id} had a character mismatch: Got '{char_info.character}' instead of '{sample_char}'")
+					info.retry = True
 			elif not info.retry:
-				if sample_key in self.T.succeeded_samples:
-					raise ValueError(f"Failed sample key '{sample_key}' unexpectedly already exists in succeeded samples task state")
-				elif sample_key in self.T.failed_samples:
-					raise ValueError(f"Failed sample key '{sample_key}' unexpectedly already exists in failed samples task state")
+				sample_keys_failed.add(sample_key)
 				self.T.failed_samples[sample_key] = None
+
+		char_mismatch.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further character mismatches (total {num_total} occurrences)")
+
+		return bool(sample_keys_succeeded) or bool(sample_keys_failed)
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
 def demo_char_codes(cfg: utils.Config, task_dir: str):
@@ -196,11 +228,6 @@ class ColorFormatter(logging.Formatter):
 # Main function
 def main():
 
-	stream_handler = logging.StreamHandler(sys.stdout)
-	stream_handler.set_name('console')
-	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
-	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
-
 	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.", add_help=False, formatter_class=functools.partial(argparse.HelpFormatter, max_help_position=36))
 	parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='Show this help message and exit')
 	parser.add_argument('--task', type=str, required=True, help='Which task to run (e.g. char_codes)')
@@ -230,5 +257,12 @@ def main():
 
 # Run main function
 if __name__ == "__main__":
+
+	stream_handler = logging.StreamHandler(sys.stdout)
+	stream_handler.set_name('console')
+	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
+	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
+	log = logging.getLogger()
+
 	main()
 # EOF
