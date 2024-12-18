@@ -102,13 +102,16 @@ class CharCodesTask(task_manager.TaskManager):
 
 		return True
 
+	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
+		self.T.committed_samples[cached_req.item.req.meta['sample_key']] = None
+
 	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:
 		sample_keys = {cached_req.item.req.meta['sample_key'] for cached_req in cached_reqs}
 		assert len(sample_keys) == len(cached_reqs)
 		return sample_keys
 
-	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
-		self.T.committed_samples[cached_req.item.req.meta['sample_key']] = None
+	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack):
+		pass  # TODO: IMPLEMENT
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
 def demo_char_codes(cfg: utils.Config, task_dir: str):

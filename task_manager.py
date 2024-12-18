@@ -1,4 +1,4 @@
-# Task manager (wraps a GPT requester to include the sample generation side of the pipeline as well)
+# Task manager (wraps a GPT requester to include sample generation and output file management)
 
 # Imports
 import os
@@ -101,6 +101,20 @@ class TaskStateFile:
 
 # Task manager class
 class TaskManager:
+
+	# This abstract base class manages a gpt_requester.GPTRequester instance to complete a certain custom task. Task progress is stored in a task state file as well as a task output file.
+	# This is in addition to the files stored by gpt_requester.GPTRequester, and the task files are also only updated when the gpt_requester.GPTRequester has its lock file locked.
+	#
+	# In order to use this class, subclass it for a particular task and implement/override:
+	#   - __init__(cfg: utils.Config) => Customize a call to super().__init__(..., **gpt_requester_kwargs) based on an attribute-based cfg (coming from either Python argparse or Hydra, see below) where gpt_requester_kwargs comes from gpt_requester.GPTRequester.get_kwargs(cfg)
+	#   - generate_requests()         => Implement request generation based on current task state
+	#   - commit_cached_request()     => Update the committed_meta/committed_samples task state to reflect that a particular request has been committed
+	#   - cached_request_keys()       => Extract from a list of requests a set of sample keys that is enough to cover all possible changes to the committed_samples task state when later supplying these requests to commit_cached_request()
+	#   - process_batch_result()      => Process a batch result and accordingly update the task state and output files (must be a perfectly reversible operation)
+	#
+	# In order to conveniently provide relevant command line arguments, use either:
+	#   - gpt_requester.GPTRequester.configure_argparse() => Python argparse
+	#   - config/gpt_batch_api.yaml                       => Hydra configuration parameters YAML
 
 	# Construct a task manager to make use of the OpenAI Batch API to process samples
 	def __init__(
@@ -324,30 +338,44 @@ class TaskManager:
 
 		return batch_congestion
 
+	# Update the committed_meta/committed_samples task state to reflect that a particular CachedGPTRequest has been committed
+	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
+		# cached_req = CachedGPTRequest that has been committed
+		raise NotImplementedError
+
 	# Extract from a list of CachedGPTRequest's a set of sample keys that is enough to cover all possible changes to the committed_samples task state when supplying these CachedGPTRequest's to commit_cached_request()
 	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:  # noqa
 		# cached_reqs = List of CachedGPTRequest's to extract all relevant sample key strings from
 		# Return a set of sample key strings (the set or superset of sample key strings that will be modified by commit_cached_request()), or None (caller must assume all sample keys could be modified)
 		return None
 
-	# Update the committed_meta/committed_samples task state to reflect that a particular CachedGPTRequest has been committed
-	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
-		# cached_req = CachedGPTRequest that has been committed
-		raise NotImplementedError
-
-	# TODO: Calls some abstract methods to do the task-specific processing
-	def process_batches(self):
-		# TODO: DOC
-
-		# TODO: Use logging (e.g. to display how many batches are current being remotely processed and how many of those are ready to process)
-		# TODO: Log how many samples errored for whatever reasons (be specific), and how many were internally auto-retried by GPT requester
-
-		# TODO: The yield is part of the reversible process and should update the task state AND task-specific output file BUT should also be able to say that a RETRY is necessary by writing to result.info[REQID].retry/retry_counts (both boolean)
-		# TODO: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
+	# Process and clean up after any finished remote batches
+	def process_batches(self) -> int:
+		# Returns the current number of unfinished remote batches (after the remote batch status updates)
+		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history.
 		for rstack, result in self.GR.process_batches():
-			print("BLAH")  # TODO: TEMP
+			self.process_batch_result(result=result, rstack=rstack)
+		assert self.GR.num_finished_batches() <= 0  # Condition F
+		return self.GR.num_unfinished_batches()
 
-		assert self.GR.num_finished_batches() <= 0
+	# Process a batch result and accordingly update the task state and output files (must be a perfectly reversible operation managed by the RevertStack rstack)
+	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack):
+		# result => The result of a batch
+		# rstack => A RevertStack so that the actions of this method are perfectly reversible in the case of an exception
+		#
+		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState).
+		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts.
+		# The main results/responses to process are the values of the result.info dict, which maps request IDs (int, returned from self.GR.add_request() / self.GR.add_requests()) to ResultInfo instances.
+		# The following information is available for each ResultInfo instance 'info':
+		#   - The input request payload (info.req_payload: dict[str, Any]) and metadata (info.req_info.meta: Optional[dict[str, Any]])
+		#   - If a response was received for the request (info.resp_info is not None), the response in Python class/parsed format (info.resp_info.payload: openai.types.chat.ChatCompletion/ParsedChatCompletion or similar depending on auto-parse and endpoint)
+		#   - If an error occurred with the request and/or response (info.err_info is not None), the error (info.err_info: ErrorInfo)
+		#   - If warnings occurred while processing the response, the warnings (info.warn_infos: list[ErrorInfo])---warnings occur for example if multiple completion choices are requested and some choices fail somehow while others don't
+		#   - Whether the request will be retried (info.retry: bool) and whether the current result counts towards the retry number (info.retry_counts: bool / e.g. batch cancellation or expiry by default does not count)
+		#   - The field info.retry can be MODIFIED in this method to set whether the request will get retried (e.g. because of a task-specific parsing or value failure)
+		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general
+		# Statistics like the remote batch completion duration, request pass ratio, and number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats).
+		raise NotImplementedError
 
 	# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
 # EOF
