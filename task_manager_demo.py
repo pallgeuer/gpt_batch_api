@@ -10,6 +10,7 @@ import argparse
 import functools
 from typing import Sequence, Optional, Any
 import pydantic
+import openai.types.chat as openai_chat
 from . import gpt_requester, task_manager, utils
 
 # TODO: Add any new demos to gpt_batch_api/commands.txt
@@ -111,7 +112,39 @@ class CharCodesTask(task_manager.TaskManager):
 		return sample_keys
 
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack):
-		pass  # TODO: IMPLEMENT
+
+		CHOICE = 0
+
+		# TODO: REVERSIBLE
+		for info in result.info.values():
+
+			char_info: Optional[CharCodesTask.UnicodeCharacterInfo] = None
+			if info.resp_info is not None:
+				resp_payload = info.resp_info.payload
+				if isinstance(resp_payload, openai_chat.ParsedChatCompletion):
+					choices = resp_payload.choices
+					if len(choices) > CHOICE >= 0:
+						parsed = choices[CHOICE].message.parsed
+						if isinstance(parsed, CharCodesTask.UnicodeCharacterInfo):
+							char_info = parsed
+
+			sample_key = info.req_info.meta['sample_key']
+			warn_infos_choice = [warn_info for warn_info in info.warn_infos if not (warn_info.type == 'MessageChoice' and warn_info.data != CHOICE)]
+
+			if char_info is not None and info.err_info is None and not warn_infos_choice:
+				assert not info.retry
+				if sample_key in self.T.succeeded_samples:
+					raise ValueError(f"Successful sample key '{sample_key}' unexpectedly already exists in succeeded samples task state")
+				elif sample_key in self.T.failed_samples:
+					raise ValueError(f"Successful sample key '{sample_key}' unexpectedly already exists in failed samples task state")
+				self.T.succeeded_samples[sample_key] = None
+				# TODO: DO SOMETHING WITH char_info TO UPDATE OUTPUT FILE
+			elif not info.retry:
+				if sample_key in self.T.succeeded_samples:
+					raise ValueError(f"Failed sample key '{sample_key}' unexpectedly already exists in succeeded samples task state")
+				elif sample_key in self.T.failed_samples:
+					raise ValueError(f"Failed sample key '{sample_key}' unexpectedly already exists in failed samples task state")
+				self.T.failed_samples[sample_key] = None
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
 def demo_char_codes(cfg: utils.Config, task_dir: str):
