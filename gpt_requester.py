@@ -1706,14 +1706,14 @@ class GPTRequester:
 											for c, choice in enumerate(resp_payload.choices):
 												if choice.finish_reason not in FINISH_REASONS_ALL:
 													if err_info is None or not err_info.fatal:
-														err_info = ErrorInfo(fatal=True, type='MessageChoices', subtype='FinishReason', data=choice.finish_reason, msg=f"Choice {c} has the unrecognized finish reason '{choice.finish_reason}'")
+														err_info = ErrorInfo(fatal=True, type='MessageChoice', subtype='FinishReason', data=c, msg=f"Choice {c} has the unrecognized finish reason '{choice.finish_reason}'")
 												elif choice.finish_reason not in FINISH_REASONS_NOCONTENT and choice.message.content is None and choice.message.refusal is None and choice.message.audio is None:
 													if err_info is None or not err_info.fatal:
-														err_info = ErrorInfo(fatal=True, type='MessageChoices', subtype='NoContent', msg=f"Choice {c} has no content")
+														err_info = ErrorInfo(fatal=True, type='MessageChoice', subtype='NoContent', data=c, msg=f"Choice {c} has no content")
 												elif choice.message.refusal is not None:
-													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoices', subtype='Refusal', data=choice.message.refusal, msg=f"Choice {c} got refusal message: {choice.message.refusal}"))
+													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoice', subtype='Refusal', data=c, msg=f"Choice {c} got refusal message: {choice.message.refusal}"))
 												elif choice.finish_reason in FINISH_REASONS_FAILED:
-													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoices', subtype='FinishReason', data=choice.finish_reason, msg=f"Choice {c} has the failed finish reason '{choice.finish_reason}'"))
+													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoice', subtype='FinishReason', data=c, msg=f"Choice {c} has the failed finish reason '{choice.finish_reason}'"))
 												else:
 													valid_choice = True
 											if resp_payload.choices and not valid_choice and err_info is None:
