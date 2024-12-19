@@ -62,9 +62,15 @@ class CharCodesData:
 
 # Character codes file class
 class CharCodesFile(task_manager.DataclassOutputFile):
+
+	Dataclass = CharCodesData
+
+	def pre_save(self, rstack: utils.RevertStack):
+		rstack.callback(setattr, self.data, 'chars', self.data.chars)
+		self.data.chars = dict(sorted(self.data.chars.items()))
+
 	def status_str(self) -> str:
 		return f"{len(self.data.chars)} chars"
-	Dataclass = CharCodesData
 
 # Character codes task class
 class CharCodesTask(task_manager.TaskManager):

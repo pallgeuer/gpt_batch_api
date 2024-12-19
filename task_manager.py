@@ -136,6 +136,7 @@ class TaskOutputFile:
 
 	def save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible saving of the task output file
+		# It is permitted to make changes to self.data (e.g. sorting keys of a dictionary or so) just prior to saving, as long as it is reversible (rstack)
 		raise NotImplementedError
 
 	def unload(self):
@@ -205,12 +206,18 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 			self.data = utils.dataclass_from_json(cls=self.data_cls, json_data=file)
 		log.info(f"Loaded task output file with {self.status_str()} ({utils.format_size_iec(file_size)})")
 
+	def pre_save(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use to make any changes to the data reversible
+		# This method can be overridden to perform changes to self.data immediately prior to each save (e.g. sorting keys of a dictionary or so)
+		pass
+
 	def save(self, rstack: utils.RevertStack):
 		if self.read_only:
 			raise RuntimeError("Cannot save dataclass output file in read-only mode")
 		elif self.dryrun:
 			log.warning(f"{gpt_requester.DRYRUN}Did not save task output file with {self.status_str()}")
 		else:
+			self.pre_save(rstack=rstack)
 			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				utils.json_from_dataclass(obj=self.data, file=file)
 				file_size = utils.get_file_size(file)
