@@ -53,7 +53,7 @@ class UnicodeCharacterInfo(pydantic.BaseModel):
 	character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (a string containing only the single literal character).")
 	type: UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.", strict=False)
 	description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
-	sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words in the sentence).")
+	sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the EXACT case-sensitive unicode character codepoint at least TWICE.")
 
 # Character codes data class
 @dataclasses.dataclass
