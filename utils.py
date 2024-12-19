@@ -289,7 +289,7 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 		elif issubclass(generic_typ, pydantic.BaseModel):
 			if not (isinstance(data, dict) and all(isinstance(key, str) for key in data.keys())):
 				raise TypeError(f"Invalid dict data for conversion to pydantic model {get_class_str(generic_typ)}: {data}")
-			ret = generic_typ.model_validate(data, strict=True)
+			ret = generic_typ.model_validate(data, strict=None if json_mode else True)
 		elif not isinstance(data, generic_typ):
 			raise TypeError(f"Expected type {get_type_str(typ)} with generic type {get_class_str(generic_typ)} but got class {get_class_str(data)}: {data}")
 		elif typ in dataclasses._ATOMIC_TYPES:  # noqa

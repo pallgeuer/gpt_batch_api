@@ -49,8 +49,9 @@ class UnicodeCharacterType(str, enum.Enum):
 
 # Unicode character information class
 class UnicodeCharacterInfo(pydantic.BaseModel):
+	model_config = pydantic.ConfigDict(strict=True)
 	character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (a string containing only the single literal character).")
-	type: UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.")
+	type: UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.", strict=False)
 	description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
 	sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words in the sentence).")
 
