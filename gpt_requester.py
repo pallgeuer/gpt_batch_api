@@ -1937,7 +1937,7 @@ class GPTRequester:
 						self.S.batches[:] = batches
 						batch.request_info = request_info
 
-					with utils.DelayKeyboardInterrupt():  # TODO: When unwound to here, manually trigger SAVEs and verify that files are STILL perfectly original (tests RAM state after unwinding, as files are just brute-replaced)
+					with utils.DelayKeyboardInterrupt():
 
 						with utils.RevertStack() as rstack:
 

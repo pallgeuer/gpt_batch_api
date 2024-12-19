@@ -121,7 +121,8 @@ class CharCodesTask(task_manager.TaskManager):
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 
 		CHOICE = 0
-		char_mismatch = utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors)
+		err_char_mismatch = utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors)
+		err_char_count = utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors)
 		sample_keys_succeeded = set()
 		sample_keys_failed = set()
 		sample_chars = set()
@@ -162,19 +163,23 @@ class CharCodesTask(task_manager.TaskManager):
 			warn_infos_choice = [warn_info for warn_info in info.warn_infos if not (warn_info.type == 'MessageChoice' and warn_info.data != CHOICE)]
 			if char_info is not None and info.err_info is None and not warn_infos_choice:
 				assert not info.retry
-				if char_info.character == sample_char:
+				if char_info.character != sample_char:
+					err_char_mismatch.log(f"Batch {result.batch.id} request ID {info.req_id} had a character mismatch: Got '{char_info.character}' instead of '{sample_char}'")
+					info.retry = True
+				elif char_info.sample_sentence.count(sample_char) < 2:
+					err_char_count.log(f"Batch {result.batch.id} request ID {info.req_id} sample sentence has less than 2 occurrences of the sample char '{sample_char}': \"{char_info.sample_sentence}\"")
+					info.retry = True
+				else:
 					sample_keys_succeeded.add(sample_key)
 					self.T.succeeded_samples[sample_key] = None
 					sample_chars.add(sample_char)
 					self.D.chars[sample_char] = char_info
-				else:
-					char_mismatch.log(f"Batch {result.batch.id} request ID {info.req_id} had a character mismatch: Got '{char_info.character}' instead of '{sample_char}'")
-					info.retry = True
 			elif not info.retry:
 				sample_keys_failed.add(sample_key)
 				self.T.failed_samples[sample_key] = None
 
-		char_mismatch.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further character mismatches (total {num_total} occurrences)")
+		err_char_mismatch.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further character mismatches (total {num_total} occurrences)")
+		err_char_count.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further sample sentences with less than 2 occurrences of the sample char (total {num_total} samples)")
 
 		return bool(sample_keys_succeeded) or bool(sample_keys_failed)
 
