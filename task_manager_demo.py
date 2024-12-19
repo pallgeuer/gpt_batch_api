@@ -34,30 +34,39 @@ from . import gpt_requester, task_manager, utils
 # Demo: Character codes
 #
 
+# Unicode character type enumeration
+class UnicodeCharacterType(str, enum.Enum):
+	LETTER = "letter"            # Any alphabetic character
+	NUMBER = "number"            # Numeric characters
+	PUNCTUATION = "punctuation"  # Characters like commas, periods, and such
+	SYMBOL = "symbol"            # Mathematical or other symbols
+	CURRENCY = "currency"        # Currency symbols
+	CONTROL = "control"          # Control characters
+	SPACE = "space"              # Whitespace characters
+	MARK = "mark"                # Combining marks
+	EMOJI = "emoji"              # Emoji characters
+	OTHER = "other"              # Any other type not covered by the above categories
+
+# Unicode character information class
+class UnicodeCharacterInfo(pydantic.BaseModel):
+	character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (a string containing only the single literal character).")
+	type: UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.")
+	description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
+	sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words in the sentence).")
+
+# Character codes data class
+@dataclasses.dataclass
+class CharCodesData:
+	chars: dict[str, UnicodeCharacterInfo] = dataclasses.field(default_factory=dict)  # Map of all characters to their produced output character information
+
+# Character codes file class
+class CharCodesFile(task_manager.DataclassOutputFile):
+	def status_str(self) -> str:
+		return f"{len(self.data.chars)} chars"
+	Dataclass = CharCodesData
+
 # Character codes task class
 class CharCodesTask(task_manager.TaskManager):
-
-	class UnicodeCharacterType(str, enum.Enum):
-		LETTER = "letter"            # Any alphabetic character
-		NUMBER = "number"            # Numeric characters
-		PUNCTUATION = "punctuation"  # Characters like commas, periods, and such
-		SYMBOL = "symbol"            # Mathematical or other symbols
-		CURRENCY = "currency"        # Currency symbols
-		CONTROL = "control"          # Control characters
-		SPACE = "space"              # Whitespace characters
-		MARK = "mark"                # Combining marks
-		EMOJI = "emoji"              # Emoji characters
-		OTHER = "other"              # Any other type not covered by the above categories
-
-	class UnicodeCharacterInfo(pydantic.BaseModel):
-		character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (a string containing only the single literal character).")
-		type: CharCodesTask.UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.")
-		description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
-		sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the character at least twice (as part of some of the words in the sentence).")
-
-	@dataclasses.dataclass
-	class Output:
-		chars: dict[str, CharCodesTask.UnicodeCharacterInfo] = dataclasses.field(default_factory=dict)  # Map of all characters to their produced output character information
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
 		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
@@ -65,7 +74,7 @@ class CharCodesTask(task_manager.TaskManager):
 		super().__init__(
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
-			output_factory=task_manager.DataclassOutputFile.of(cls=CharCodesTask.Output),
+			output_factory=CharCodesFile.output_factory(),
 			reinit_meta=cfg.reinit_meta,
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),

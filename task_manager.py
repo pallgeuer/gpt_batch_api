@@ -144,20 +144,29 @@ class TaskOutputFile:
 # Dataclass output file class
 class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 
-	data: Optional[DataclassT]
+	data: Optional[DataclassT]  # Data backed by the output file (while the class is in the entered state)
 
-	@staticmethod
-	def of(*, cls: Type[DataclassT]) -> Callable[[str, bool], DataclassOutputFile]:
-		# cls = Dataclass type to use (must be instantiatable without arguments)
-		# Returns a factory function suitable for passing as output_factory to TaskManager
-		return functools.partial(DataclassOutputFile, cls=cls)
-
-	def __init__(self, path_base: str, dryrun: bool, *, cls: Type[DataclassT]):
+	@classmethod
+	def read(cls, path_base: str, data_cls: Optional[Type[DataclassT]] = None) -> Self:
 		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
-		# dryrun = Whether to prevent any saving of output (dry run mode)
-		# cls = Dataclass type to use (must be instantiatable without arguments)
+		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
+		# Returns a new instance of the class in read-only mode (raises an exception if load() fails on enter, or a save() is attempted)
+		return cls(path_base=path_base, dryrun=True, data_cls=data_cls, read_only=True)
+
+	@classmethod
+	def output_factory(cls, data_cls: Optional[Type[DataclassT]] = None) -> Callable[[str, bool], DataclassOutputFile[DataclassT]]:
+		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
+		# Returns a (not read-only mode) factory function suitable for passing as the output_factory argument of the TaskManager class
+		return functools.partial(cls, data_cls=data_cls, read_only=False)
+
+	def __init__(self, path_base: str, dryrun: bool, *, data_cls: Optional[Type[DataclassT]], read_only: bool):
+		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
+		# dryrun = Whether to prevent any saving of output and just log what would have happened instead (dry run mode)
+		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
+		# read_only = Whether to use read-only mode (raises an exception if load() fails on enter, or a save() is attempted)
 		super().__init__(path_base=path_base, dryrun=dryrun)
-		self.cls = cls
+		self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')  # If no dataclass type is provided (only for subclasses) then it is expected that the class type has a field 'Dataclass' that specifies the dataclass type to use
+		self.read_only = read_only
 		self.path = f'{self.path_base}.json'
 		self.name = os.path.basename(self.path)
 		log.info(f"Task output file: {self.path}")
@@ -170,7 +179,10 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 				try:
 					self.load()
 				except FileNotFoundError:
-					self.create(rstack=rstack)
+					if self.read_only:
+						raise
+					else:
+						self.create(rstack=rstack)
 				assert self.data is not None
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
@@ -180,21 +192,23 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	def validate(self):
-		if not isinstance(self.data, self.cls):  # noqa
-			raise ValueError(f"Data is of unexpected type: {utils.get_class_str(type(self.data))} vs {utils.get_class_str(self.cls)}")
+		if not isinstance(self.data, self.data_cls):  # noqa
+			raise ValueError(f"Data is of unexpected type: {utils.get_class_str(type(self.data))} vs {utils.get_class_str(self.data_cls)}")
 
 	def create(self, rstack: utils.RevertStack):
-		self.data = self.cls()
+		self.data = self.data_cls()
 		self.save(rstack=rstack)
 
 	def load(self):
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
-			self.data = utils.dataclass_from_json(cls=self.cls, json_data=file)
+			self.data = utils.dataclass_from_json(cls=self.data_cls, json_data=file)
 		log.info(f"Loaded task output file with {self.status_str()} ({utils.format_size_iec(file_size)})")
 
 	def save(self, rstack: utils.RevertStack):
-		if self.dryrun:
+		if self.read_only:
+			raise RuntimeError("Cannot save dataclass output file in read-only mode")
+		elif self.dryrun:
 			log.warning(f"{gpt_requester.DRYRUN}Did not save task output file with {self.status_str()}")
 		else:
 			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
