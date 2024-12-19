@@ -35,6 +35,8 @@ token_estimator_warn: once
 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 remote_update_interval: 10.0
 
+# Whether to solely process existing unfinished remote batches and not generate/commit/push anything new
+only_process: False
 # How many warnings to show/log per batch per warning type when processing responses
 show_warnings: 50
 # How many errors to show/log per batch per error type when processing responses

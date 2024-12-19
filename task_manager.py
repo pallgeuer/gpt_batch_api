@@ -370,6 +370,10 @@ class TaskManager:
 			# Process all finished remote batches (nullifies then ensures condition F, nullifies conditions M and C), and update the task state (nullifies condition G)
 			# Requests may internally be auto-retried (if it occurs, temporarily nullifies condition P then re-ensures it and nullifies conditions Q and B)
 			self.process_batches()
+			if self.GR.only_process:
+				log.warning("Only-process mode => Stopping step after having only processed any finished batches")
+				all_done = False
+				break
 
 			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
 			if self.GR.num_unpushed_batches() > 0:

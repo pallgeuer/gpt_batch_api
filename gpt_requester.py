@@ -573,6 +573,7 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
+		only_process: bool = False,                           # Whether to solely process existing unfinished remote batches and not generate/commit/push anything new
 		show_warnings: int = 50,                              # How many warnings to show/log per batch per warning type when processing responses
 		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
 		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
@@ -648,6 +649,8 @@ class GPTRequester:
 			log.info("Manage OpenAI file storage: https://platform.openai.com/storage")
 			log.info("Manage OpenAI batches: https://platform.openai.com/batches")
 			log.info("Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
+
+		self.only_process = only_process  # Note: In only-process mode, it is still the responsibility of the task not to add/commit requests (as this functionality is needed for processing request retries)
 
 		self.show_warnings = show_warnings
 		if self.show_warnings < 1:
@@ -875,6 +878,7 @@ class GPTRequester:
 		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
+		add_argument(name='only_process', type=bool, help="Whether to solely process existing unfinished remote batches and not generate/commit/push anything new")
 		add_argument(name='show_warnings', type=int, metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
 		add_argument(name='show_errors', type=int, metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
 		add_argument(name='process_failed_batches', type=int, metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
@@ -1139,6 +1143,10 @@ class GPTRequester:
 		# Returns the new number of unpushed batches
 		# Note: Call can be skipped if not self.Q
 
+		if self.only_process:
+			log.warning("Only-process mode => Not creating any batches")
+			return self.num_unpushed_batches()
+
 		num_created = 0
 		num_created_requests = 0
 
@@ -1249,6 +1257,10 @@ class GPTRequester:
 	def push_batches(self) -> bool:
 		# Returns whether the batch pipeline is (now) congested
 		# Note: Call can be skipped if self.num_unpushed_batches() <= 0
+
+		if self.only_process:
+			log.warning("Only-process mode => Not pushing any batches")
+			return True  # Batch congestion
 
 		remote_batches = 0
 		remote_requests = 0
