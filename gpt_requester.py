@@ -2012,7 +2012,8 @@ class GPTRequester:
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-	# TODO: Add a 'clear/wipe/forget all ongoing' NUKE option that in both TASK and REQUESTER wipes and cleans up all pool/queue/local-batches/remote-batches/num_pass_failures without processing any of it (there is an OPTION to also un-fail all task samples that have permanently failed so far - wipe_failed? Ends up with committed == succeeded and failed is empty)
+	# TODO: Multi-JSONL file OutputFile strategy where each JSONL entry is a DataclassT instance (in read_mode, load ALL data instead of having data = [] and just receiving new data)
+	# TODO: Add a 'clear/wipe/forget all ongoing' NUKE option (suggest doing only_process mode prior to nuke) that in both TASK and REQUESTER wipes and cleans up (wipe_ongoing) all pool/queue/local-batches/remote-batches/num_pass_failures (NOT reset max_request_id?) without processing any of it (there is an OPTION to also un-fail all task samples that have permanently failed so far - wipe_failed (can ONLY occur in the context of a complete NUKE as there is no way to remove just selective requests / problem: this is relevant for task manager ONLY and must be implemented as such)? Ends up with committed == succeeded and failed is empty OTHERWISE committed == succeeded | failed)
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
