@@ -107,7 +107,7 @@ class CharCodesTask(task_manager.TaskManager):
 									dict(role='system', content="Given a unicode character, provide information about it."),
 									dict(role='user', content=f"Character: \"{char}\"" if char.isspace() else f"Character: {char}"),
 								],
-								response_format=CharCodesTask.UnicodeCharacterInfo,
+								response_format=UnicodeCharacterInfo,
 							),
 							meta=dict(
 								sample_key=sample_key,
@@ -160,14 +160,14 @@ class CharCodesTask(task_manager.TaskManager):
 			if sample_char in self.D.chars:
 				raise ValueError(f"Sample character '{sample_char}' unexpectedly already exists in task output")
 
-			char_info: Optional[CharCodesTask.UnicodeCharacterInfo] = None
+			char_info: Optional[UnicodeCharacterInfo] = None
 			if info.resp_info is not None:
 				resp_payload = info.resp_info.payload
 				if isinstance(resp_payload, openai_chat.ParsedChatCompletion):
 					choices = resp_payload.choices
 					if len(choices) > CHOICE >= 0:
 						parsed = choices[CHOICE].message.parsed
-						if isinstance(parsed, CharCodesTask.UnicodeCharacterInfo):
+						if isinstance(parsed, UnicodeCharacterInfo):
 							char_info = parsed
 
 			warn_infos_choice = [warn_info for warn_info in info.warn_infos if not (warn_info.type == 'MessageChoice' and warn_info.data != CHOICE)]
