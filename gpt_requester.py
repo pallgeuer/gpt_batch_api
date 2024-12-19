@@ -1429,13 +1429,13 @@ class GPTRequester:
 		return sum(1 for batch in self.S.batches if batch.remote is not None)
 
 	# Update the current state of all pushed remote batches (unless dry run)
-	def update_remote_batch_state(self, only_check_finished: bool, log_save: bool) -> tuple[bool, bool]:
+	def update_remote_batch_state(self, only_check_finished: bool, log_save: bool) -> tuple[bool, int]:
 		# only_check_finished = If True, return as soon as a single pushed remote batch is seen to be in the finished state (whether this is new or not)
 		# log_save = Whether to log if the state file is saved
-		# Returns whether there are any finished remote batches, and whether any batch statuses were updated
+		# Returns whether there are any finished remote batches, and how many batch statuses were updated
 
 		any_finished = False
-		status_updated = False
+		num_status_updates = 0
 		status_changed = collections.defaultdict(list)
 		for batch in self.S.batches:
 			if batch.remote is not None:
@@ -1454,7 +1454,7 @@ class GPTRequester:
 							if batch_status.status != batch.remote.batch.status:
 								status_changed[batch_status.status].append(batch.id)
 							batch.remote.batch = batch_status
-							status_updated = True
+							num_status_updates += 1
 							if batch.remote.batch.status in FINISHED_BATCH_STATUSES:
 								batch.remote.finished = True
 								any_finished = True
@@ -1464,7 +1464,7 @@ class GPTRequester:
 						utils.print_clear_line()
 						log.error(f"Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
 
-		if status_updated:
+		if num_status_updates != 0:
 			if status_changed or log_save:
 				utils.print_clear_line()
 			if status_changed:
@@ -1473,7 +1473,7 @@ class GPTRequester:
 				self.validate_state_queue(clean=False)
 				self.state.save(rstack=rstack, show_log=log_save)
 
-		return any_finished, status_updated
+		return any_finished, num_status_updates
 
 	# Return how many unfinished remote batches there are according to the latest local state of information (see update_remote_batch_state())
 	def num_unfinished_batches(self) -> int:
@@ -1497,15 +1497,13 @@ class GPTRequester:
 		printed_str = None
 
 		while True:
-			_, status_updated = self.update_remote_batch_state(only_check_finished=True, log_save=False)
-			if status_updated:
-				num_status_updates += 1
+			num_status_updates += self.update_remote_batch_state(only_check_finished=True, log_save=False)[1]
 			num_unfinished_batches = self.num_unfinished_batches()
 			if self.num_finished_batches() > 0 or num_unfinished_batches <= 0:
 				utils.print_in_place(f"Waited {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
 				return
 			time.sleep((start_time - time.perf_counter()) % self.remote_update_interval)
-			print_str = f"Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates... "
+			print_str = f"Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates of partial progress... "
 			if print_str != printed_str:
 				utils.print_in_place(print_str)
 				printed_str = print_str
@@ -1892,7 +1890,7 @@ class GPTRequester:
 					assert result_stats.num_retryable >= result_stats.num_cancelled + result_stats.num_expired
 					assert result_stats.num_fatal >= result_stats.num_missing
 
-					if result_stats.num_cancelled != 0:
+					if batch.remote.batch.status == 'cancelled' or result_stats.num_cancelled != 0:
 						log.error(f"Batch {batch.id} response contains {result_stats.num_cancelled} cancelled requests")
 						if raise_if_batch_failed:
 							delayed_raise.add(msg="Batch response contains cancelled requests")  # [DELAYED RAISE]
@@ -2002,7 +2000,6 @@ class GPTRequester:
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-	# TODO: Task manager output file and such
 	# TODO: Add a 'clear/wipe/forget all ongoing' NUKE option that in both TASK and REQUESTER wipes and cleans up all pool/queue/local-batches/remote-batches/num_pass_failures without processing any of it (there is an OPTION to also un-fail all task samples that have permanently failed so far - wipe_failed? Ends up with committed == succeeded and failed is empty)
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
