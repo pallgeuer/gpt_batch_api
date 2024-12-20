@@ -3,13 +3,15 @@
 # Imports
 from __future__ import annotations
 import os
+import re
 import copy
 import json
 import functools
 import contextlib
+import collections
 import dataclasses
 import typing
-from typing import Any, Optional, Self, Type, Callable, Generic
+from typing import Any, Optional, Self, Type, Callable, Generic, Iterable
 from .logger import log
 from . import gpt_requester, utils
 
@@ -232,6 +234,211 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 	def status_str(self) -> str:
 		# Returns a string summarizing the data status for logging purposes (intended to be overridden by subclasses, "... task output file with STATUS_STR")
 		return f"{len(dataclasses.fields(self.data))} fields"
+
+# Dataclass list output file class
+class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
+
+	class NoFilesError(Exception):
+		pass
+
+	@dataclasses.dataclass
+	class Data:
+		paths: list[str]           # Ordered list of the paths of all current output files (there is always at least one path)
+		last_entries: int          # Current number of entries in the last output file (on disk)
+		last_size: int             # Current file size in bytes of the last output file (on disk)
+		entries: list[DataclassT]  # Data read from or to be written to the output files
+
+	data: Data  # TaskOutputFile: Current data state (while the class is in the entered state)
+
+	@classmethod
+	def read(cls, path_base: str, data_cls: Optional[Type[DataclassT]] = None) -> Self:
+		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
+		# data_cls = Dataclass type to use for each list entry (None = Assume cls.Dataclass exists and use it)
+		# Returns a new instance of the class in read-only mode (loads all entries from all output files, raises an exception if load() fails on enter or a save() is attempted)
+		return cls(path_base=path_base, dryrun=True, data_cls=data_cls, read_only=True, max_entries=0, max_size=0)
+
+	@classmethod
+	def output_factory(cls, data_cls: Optional[Type[DataclassT]] = None, max_entries: int = 0, max_size: int = 0) -> Callable[[str, bool], DataclassListOutputFile[DataclassT]]:
+		# data_cls = Dataclass type to use for each list entry (None = Assume cls.Dataclass exists and use it)
+		# max_entries = Maximum number of entries to save per output file chunk (<=0 = No maximum)
+		# max_size = Maximum file size in bytes per output file chunk (<=0 = No maximum)
+		# Returns a (not read-only mode) factory function suitable for passing as the output_factory argument of the TaskManager class
+		return functools.partial(cls, data_cls=data_cls, read_only=False, max_entries=max_entries, max_size=max_size)
+
+	def __init__(self, path_base: str, dryrun: bool, *, data_cls: Optional[Type[DataclassT]], read_only: bool, max_entries: int = 0, max_size: int = 0):
+		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output (suffix of .jsonl or _partXofY.jsonl will automatically be added as appropriate)
+		# dryrun = Whether to prevent any saving of output and just log what would have happened instead (dry run mode)
+		# data_cls = Dataclass type to use for each list entry (None = Assume cls.Dataclass exists and use it)
+		# read_only = Whether to use read-only mode (loads all entries from all output files, raises an exception if load() fails on enter or a save() is attempted)
+		# max_entries = Maximum number of entries to save per output file chunk (<=0 = No maximum, not relevant in read-only mode)
+		# max_size = Maximum file size in bytes per output file chunk (<=0 = No maximum, not relevant in read-only mode)
+		super().__init__(path_base=path_base, dryrun=dryrun)
+		self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')  # If no dataclass type is provided (only for subclasses) then it is expected that the class type has a field 'Dataclass' that specifies the dataclass type to use
+		self.read_only = read_only
+		self.max_entries = max_entries
+		self.max_size = max_size
+		log.info(f"Task output file(s): {self.path_base}*.jsonl")
+		self.path_dirname = os.path.dirname(self.path_base)
+		self.path_basename = os.path.basename(self.path_base)
+		if not self.path_dirname or not self.path_basename:
+			raise ValueError("Cannot have empty path dirname or basename")
+		self._enter_stack = contextlib.ExitStack()
+
+	def __enter__(self) -> Self:
+		with self._enter_stack as enter_stack:
+			with utils.AtomicRevertStack() as rstack:
+				enter_stack.callback(self.unload)
+				try:
+					self.load(rstack=rstack)
+				except type(self).NoFilesError:
+					if self.read_only:
+						raise
+					else:
+						self.create(rstack=rstack)
+				assert self.data is not None
+			self._enter_stack = enter_stack.pop_all()
+		assert self._enter_stack is not enter_stack
+		return self
+
+	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
+
+	def validate(self):
+		if not self.data.paths:
+			raise ValueError("No output file paths")
+		elif self.data.last_entries < 0 or self.data.last_size < 0:
+			raise ValueError(f"Unexpected last output file state: {self.data.last_entries} entries, {self.data.last_size} file size")
+		elif not all(isinstance(entry, self.data_cls) for entry in self.data.entries):
+			raise ValueError(f"Not all entries are of the expected type: {utils.get_class_str(self.data_cls)}")
+
+	def create(self, rstack: utils.RevertStack):
+		if self.read_only:
+			raise RuntimeError("Cannot create dataclass list output file in read-only mode")
+		rstack.callback(setattr, self, 'data', self.data)
+		self.data = type(self).Data(paths=[path := f'{self.path_base}.jsonl'], last_entries=0, last_size=0, entries=[])
+		if self.dryrun:
+			log.warning(f"{gpt_requester.DRYRUN}Did not create empty initial task output file")
+		else:
+			with utils.SafeOpenForWrite(path=path, rstack=rstack) as file:
+				file_size = utils.get_file_size(file)
+			assert file_size == self.data.last_size == 0
+			log.info(f"Created empty initial task output file: {os.path.basename(path)}")
+
+	def load(self, rstack: utils.RevertStack):
+
+		part_files = collections.defaultdict(set)
+		for entry in os.listdir(self.path_dirname):
+			entry_path = os.path.join(self.path_dirname, entry)
+			if entry_path.startswith(self.path_base):
+				entry_suffix = entry_path[len(self.path_base):]
+				if entry_suffix.endswith('.jsonl') and os.path.isfile(entry_path):
+					if entry_suffix == '.jsonl':
+						part_num = part_total = 1
+					elif match := re.fullmatch(r'_part([0-9]+)of([0-9]+)\.jsonl', entry_suffix):
+						part_num = int(match.group(1))
+						part_total = int(match.group(2))
+					else:
+						continue
+					part_files[part_total].add((part_num, entry_path))
+
+		if not part_files:
+			raise type(self).NoFilesError("No output files exist that can be loaded")
+		elif len(part_files) != 1:
+			raise RuntimeError("Output file parts of differing part totals exist")
+		part_total, parts_set = part_files.popitem()
+		if part_total < 1:
+			raise RuntimeError(f"Output file parts exist for an invalid part total of {part_total}")
+		parts_list = sorted(parts_set)
+		if len(parts_list) != part_total or tuple(part_num for part_num, entry_path in parts_list) != tuple(range(1, part_total + 1)):
+			raise RuntimeError(f"Inconsistent or incomplete output file parts exist for a part total of {part_total}")
+
+		rstack.callback(setattr, self, 'data', self.data)
+		self.data = type(self).Data(paths=[entry_path for part_num, entry_path in parts_list], last_entries=0, last_size=0, entries=[])
+		assert len(self.data.paths) == part_total >= 1
+
+		if self.read_only:
+			for path in self.data.paths:
+				with open(path, 'r', encoding='utf-8') as file:
+					self.data.entries.extend(utils.dataclass_from_json(cls=self.data_cls, json_data=line) for line in file)
+
+		with open(self.data.paths[-1], 'r', encoding='utf-8') as file:
+			self.data.last_entries = sum(1 for line in file)  # noqa
+			self.data.last_size = utils.get_file_size(file)
+
+		log.info(f"Loaded the task output file(s) in {len(self.data.paths)} parts")
+
+	def pre_save(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use to make any changes to the data entries reversible
+		# This method can be overridden to perform changes to self.data.entries immediately prior to them being saved and cleared (e.g. sorting keys of a dictionary or so)
+		pass
+
+	def save(self, rstack: utils.RevertStack):
+
+		if self.read_only:
+			raise RuntimeError("Cannot save dataclass list output file in read-only mode")
+
+		self.pre_save(rstack=rstack)
+
+		Data = type(self).Data
+		def revert_data(data: Data):  # noqa
+			self.data.paths[:] = data.paths
+			self.data.last_entries = data.last_entries
+			self.data.last_size = data.last_size
+			self.data.entries[:] = data.entries
+		rstack.callback(revert_data, data=copy.deepcopy(self.data))
+
+		if self.dryrun:
+			log.warning(f"{gpt_requester.DRYRUN}Did not append {len(self.data.entries)} entries to the task output file(s)")
+		else:
+
+			added_entry_size = 0
+			last_lines = []
+
+			def save_last_lines():
+				nonlocal added_entry_size
+				with utils.SafeOpenForAppend(path=self.data.paths[-1], mode='ab', rstack=rstack) as file:
+					file.writelines(last_lines)
+					added_entry_size += sum(len(line) for line in last_lines)
+				last_lines.clear()
+
+			for entry in self.data.entries:
+				entry_line = (utils.json_from_dataclass(obj=entry, indent=None) + '\n').encode('utf-8')
+				entry_size = len(entry_line)
+				if self.data.last_entries + 1 > self.max_entries > 0 or self.data.last_size + entry_size > self.max_size > 0:
+					if last_lines:
+						save_last_lines()
+					new_num_paths = len(self.data.paths) + 1
+					self.data.paths.append(f'{self.path_base}_part{new_num_paths:03d}of{new_num_paths:03d}.jsonl')  # Note: If this line executes then last_lines will be non-empty further below, and thus the file will be saved later on and will exist for sure with at least one entry
+					self.data.last_entries = 0
+					self.data.last_size = 0
+					if entry_size > self.max_size > 0:
+						raise ValueError(f"Entry of size {entry_size} cannot be appended to the currently EMPTY task output file due to over-restrictive max size of {self.max_size}")
+				last_lines.append(entry_line)
+				self.data.last_entries += 1
+				self.data.last_size += entry_size
+
+			if last_lines:
+				save_last_lines()
+
+			if len(self.data.paths) > 1:
+				for p, path in enumerate(self.data.paths, 1):
+					correct_path = f'{self.path_base}_part{p:03d}of{len(self.data.paths):03d}.jsonl'
+					if path != correct_path:
+						os.replace(src=path, dst=correct_path)
+						rstack.callback(os.replace, src=correct_path, dst=path)
+
+			log.info(f"Appended {len(self.data.entries)} entries to the {len(self.data.paths)} task output file(s) (added {utils.format_size_iec(added_entry_size)})")
+
+		self.data.entries.clear()
+
+	def entries(self) -> Iterable[DataclassT]:
+		for path in self.data.paths:
+			with open(path, 'r', encoding='utf-8') as file:
+				for line in file:
+					yield utils.dataclass_from_json(cls=self.data_cls, json_data=line)
+
+	def all_entries(self) -> list[DataclassT]:
+		return list(self.entries())
 
 #
 # Task manager class
