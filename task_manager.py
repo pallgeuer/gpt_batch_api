@@ -220,10 +220,10 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 	def save(self, rstack: utils.RevertStack):
 		if self.read_only:
 			raise RuntimeError("Cannot save dataclass output file in read-only mode")
-		elif self.dryrun:
+		self.pre_save(rstack=rstack)
+		if self.dryrun:
 			log.warning(f"{gpt_requester.DRYRUN}Did not save task output file with {self.status_str()}")
 		else:
-			self.pre_save(rstack=rstack)
 			with utils.SafeOpenForWrite(path=self.path, rstack=rstack) as file:
 				utils.json_from_dataclass(obj=self.data, file=file)
 				file_size = utils.get_file_size(file)
