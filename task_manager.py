@@ -61,7 +61,7 @@ class TaskStateFile:
 			with utils.AtomicRevertStack() as rstack:
 				enter_stack.callback(self.unload)
 				try:
-					self.load()
+					self.load(rstack=rstack)
 					if self.reinit_meta:
 						self.state.meta = copy.deepcopy(self.init_meta)
 						self.save(rstack=rstack)
@@ -79,10 +79,13 @@ class TaskStateFile:
 
 	def create(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible creation of the task state file
+		rstack.callback(setattr, self, 'state', self.state)
 		self.state = TaskState(meta=copy.deepcopy(self.init_meta))
 		self.save(rstack=rstack)
 
-	def load(self):
+	def load(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible loading of the task state file
+		rstack.callback(setattr, self, 'state', self.state)
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=TaskState, json_data=file)
@@ -131,7 +134,8 @@ class TaskOutputFile:
 		# rstack = RevertStack to use for safe reversible creation of the task output file
 		raise NotImplementedError
 
-	def load(self):
+	def load(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible loading of the task output file
 		raise NotImplementedError
 
 	def save(self, rstack: utils.RevertStack):
@@ -145,7 +149,7 @@ class TaskOutputFile:
 # Dataclass output file class
 class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 
-	data: Optional[DataclassT]  # Data backed by the output file (while the class is in the entered state)
+	data: Optional[DataclassT]  # TaskOutputFile: Data backed by the output file (while the class is in the entered state)
 
 	@classmethod
 	def read(cls, path_base: str, data_cls: Optional[Type[DataclassT]] = None) -> Self:
@@ -161,7 +165,7 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		return functools.partial(cls, data_cls=data_cls, read_only=False)
 
 	def __init__(self, path_base: str, dryrun: bool, *, data_cls: Optional[Type[DataclassT]], read_only: bool):
-		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
+		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output (extension of .json will automatically be added)
 		# dryrun = Whether to prevent any saving of output and just log what would have happened instead (dry run mode)
 		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
 		# read_only = Whether to use read-only mode (raises an exception if load() fails on enter, or a save() is attempted)
@@ -178,7 +182,7 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 			with utils.AtomicRevertStack() as rstack:
 				enter_stack.callback(self.unload)
 				try:
-					self.load()
+					self.load(rstack=rstack)
 				except FileNotFoundError:
 					if self.read_only:
 						raise
@@ -193,14 +197,16 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		return self._enter_stack.__exit__(exc_type, exc_val, exc_tb)
 
 	def validate(self):
-		if not isinstance(self.data, self.data_cls):  # noqa
+		if not isinstance(self.data, self.data_cls):
 			raise ValueError(f"Data is of unexpected type: {utils.get_class_str(type(self.data))} vs {utils.get_class_str(self.data_cls)}")
 
 	def create(self, rstack: utils.RevertStack):
+		rstack.callback(setattr, self, 'data', self.data)
 		self.data = self.data_cls()
 		self.save(rstack=rstack)
 
-	def load(self):
+	def load(self, rstack: utils.RevertStack):
+		rstack.callback(setattr, self, 'data', self.data)
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.data = utils.dataclass_from_json(cls=self.data_cls, json_data=file)

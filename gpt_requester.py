@@ -297,7 +297,7 @@ class StateFile:
 			with utils.AtomicRevertStack() as rstack:
 				enter_stack.callback(self.unload)
 				try:
-					self.load()
+					self.load(rstack=rstack)
 				except FileNotFoundError:
 					self.create(rstack=rstack)
 				assert self.state is not None
@@ -314,10 +314,13 @@ class StateFile:
 
 	def create(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for the safe reversible creation of the state file
+		rstack.callback(setattr, self, 'state', self.state)
 		self.state = State(endpoint=self.endpoint)
 		self.save(rstack=rstack)
 
-	def load(self):
+	def load(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for the safe reversible loading of the state file
+		rstack.callback(setattr, self, 'state', self.state)
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
@@ -440,7 +443,7 @@ class QueueFile:
 			with utils.AtomicRevertStack() as rstack:
 				enter_stack.callback(self.unload)
 				try:
-					self.load()
+					self.load(rstack=rstack)
 				except FileNotFoundError:
 					self.create(rstack=rstack)
 				assert self.pool_queue is not None
@@ -453,10 +456,13 @@ class QueueFile:
 
 	def create(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible creation of the queue file
+		rstack.callback(setattr, self, 'pool_queue', self.pool_queue)
 		self.pool_queue = PoolQueue()
 		self.save(rstack=rstack)
 
-	def load(self):
+	def load(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible loading of the queue file
+		rstack.callback(setattr, self, 'pool_queue', self.pool_queue)
 		with open(self.path, 'r', encoding='utf-8') as file:
 			file_size = utils.get_file_size(file)
 			self.pool_queue = PoolQueue(pool=[], queue=[CachedGPTRequest.from_item(
