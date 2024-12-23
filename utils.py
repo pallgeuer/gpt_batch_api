@@ -10,6 +10,8 @@ import signal
 import shutil
 import inspect
 import logging
+import pathlib
+import tempfile
 import importlib
 import itertools
 import contextlib
@@ -431,17 +433,19 @@ class Affix:                           # /path/to/file.ext --> /path/to/{prefix}
 # Context manager that performs a reversible write to a file by using a temporary file (in the same directory) as an intermediate and performing an atomic file replace (completely reversible on future exception if a RevertStack is supplied)
 @contextlib.contextmanager
 def SafeOpenForWrite(
-	path: str,                             # path = Path of the file to safe-write to
-	mode: str = 'w',                       # mode = File opening mode (should always be a 'write' mode that ensures the file is created, i.e. including 'w' or 'x')
+	path: Union[str, pathlib.Path],        # path = Path of the file to safe-write to
+	mode: str = 'w',                       # mode = File opening mode (should always be a 'write' mode, i.e. including 'w')
 	*,                                     # Keyword arguments only beyond here
-	temp_affix: Optional[Affix] = None,    # temp_affix = Affix to use for the temporary file path to write to before atomically replacing the target file with the temporary written file (defaults to a suffix of '.tmp')
+	temp_affix: Optional[Affix] = None,    # temp_affix = Affix to use for the temporary file path to write to before atomically replacing the target file with the temporary written file (defaults to a suffix of '.tmp', will also always have a random suffix added by the tempfile module to ensure a unique new file)
 	rstack: Optional[RevertStack] = None,  # rstack = If a RevertStack is provided, callbacks are pushed to the stack to make all changes reversible on exception
-	backup_affix: Optional[Affix] = None,  # backup_affix = If a RevertStack is provided, the affix to use for the backup file path (defaults to a suffix of '.bak')
-	**open_kwargs,                         # open_kwargs = Keyword arguments to provide to the internal call to open() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
+	backup_affix: Optional[Affix] = None,  # backup_affix = If a RevertStack is provided, the affix to use for the backup file path (defaults to a suffix of '.bak', will also always have a random suffix added by the tempfile module to ensure a unique new file)
+	**open_kwargs,                         # open_kwargs = Keyword arguments to provide to the internal call to tempfile.NamedTemporaryFile() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
 ) -> ContextManager[Union[TextIO, BinaryIO]]:
 
-	if 'w' not in mode and 'x' not in mode:
-		raise ValueError(f"File opening mode must be a truncating write mode (w or x): {mode}")
+	if isinstance(path, pathlib.Path):
+		path = str(path)
+	if 'w' not in mode:
+		raise ValueError(f"File opening mode must be a truncating write mode (w): {mode}")
 	if 'b' not in mode:
 		open_kwargs.setdefault('encoding', 'utf-8')
 		open_kwargs.setdefault('newline', '\n')
@@ -451,43 +455,41 @@ def SafeOpenForWrite(
 
 	if temp_affix is None:
 		temp_affix = Affix(prefix=None, root_suffix=None, suffix='.tmp')
-	temp_path = os.path.join(dirname, f"{temp_affix.prefix or ''}{root}{temp_affix.root_suffix or ''}{ext}{temp_affix.suffix or ''}")
+	temp_base_name = f"{temp_affix.prefix or ''}{root}{temp_affix.root_suffix or ''}{ext}{temp_affix.suffix or ''}."
 
-	with RevertStack() as temp_rstack:
-		@temp_rstack.callback
-		def unlink_temp():
-			with contextlib.suppress(FileNotFoundError):
-				os.unlink(temp_path)
-		yield temp_rstack.enter_context_always(open(temp_path, mode=mode, **open_kwargs))
+	with contextlib.ExitStack() as stack:
 
-	if rstack is not None:
-
-		if backup_affix is None:
-			backup_affix = Affix(prefix=None, root_suffix=None, suffix='.bak')
-		backup_path = os.path.join(dirname, f"{backup_affix.prefix or ''}{root}{backup_affix.root_suffix or ''}{ext}{backup_affix.suffix or ''}")
-
-		@rstack.callback_always
-		def unlink_backup():
-			with contextlib.suppress(FileNotFoundError):
-				os.unlink(backup_path)
-
-		try:
-			shutil.copy2(src=path, dst=backup_path)
-			@rstack.callback  # noqa
-			def revert_backup():
-				os.replace(src=backup_path, dst=path)  # Internally atomic operation
-		except FileNotFoundError:
-			@rstack.callback
-			def unlink_path():
+		with tempfile.NamedTemporaryFile(mode=mode, suffix=None, prefix=temp_base_name, dir=dirname, delete=False, **open_kwargs) as temp_file:
+			@stack.callback
+			def unlink_temp():
 				with contextlib.suppress(FileNotFoundError):
-					os.unlink(path)
+					os.unlink(temp_file.name)
+			yield temp_file
 
-	try:
-		os.replace(src=temp_path, dst=path)  # Internally atomic operation
-	except OSError:
-		with contextlib.suppress(FileNotFoundError):
-			os.unlink(temp_path)
-		raise
+		if rstack is not None:
+
+			if backup_affix is None:
+				backup_affix = Affix(prefix=None, root_suffix=None, suffix='.bak')
+			backup_base_name = f"{backup_affix.prefix or ''}{root}{backup_affix.root_suffix or ''}{ext}{backup_affix.suffix or ''}."
+
+			with tempfile.NamedTemporaryFile(mode=mode, suffix=None, prefix=backup_base_name, dir=dirname, delete=False, **open_kwargs) as backup_file:
+				@rstack.callback_always
+				def unlink_backup():
+					with contextlib.suppress(FileNotFoundError):
+						os.unlink(backup_file.name)
+
+			try:
+				shutil.copy2(src=path, dst=backup_file.name)
+				@rstack.callback  # noqa
+				def revert_backup():
+					os.replace(src=backup_file.name, dst=path)  # Internally atomic operation
+			except FileNotFoundError:
+				@rstack.callback
+				def unlink_path():
+					with contextlib.suppress(FileNotFoundError):
+						os.unlink(path)
+
+		os.replace(src=temp_file.name, dst=path)  # Internally atomic operation
 
 # Lock file class that uses verbose prints to inform about the lock acquisition process in case it isn't quick
 class LockFile:
