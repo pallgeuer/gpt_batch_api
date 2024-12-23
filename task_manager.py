@@ -172,7 +172,10 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
 		# read_only = Whether to use read-only mode (raises an exception if load() fails on enter, or a save() is attempted)
 		super().__init__(path_base=path_base, dryrun=dryrun)
-		self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')  # If no dataclass type is provided (only for subclasses) then it is expected that the class type has a field 'Dataclass' that specifies the dataclass type to use
+		try:
+			self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')
+		except AttributeError:
+			raise ValueError("If no explicit dataclass type is provided via data_cls=X, then this class must be a subclass with a defined 'Dataclass' class attribute")
 		self.read_only = read_only
 		self.path = f'{self.path_base}.json'
 		self.name = os.path.basename(self.path)
@@ -273,7 +276,10 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 		# max_entries = Maximum number of entries to save per output file chunk (<=0 = No maximum, not relevant in read-only mode)
 		# max_size = Maximum file size in bytes per output file chunk (<=0 = No maximum, not relevant in read-only mode)
 		super().__init__(path_base=path_base, dryrun=dryrun)
-		self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')  # If no dataclass type is provided (only for subclasses) then it is expected that the class type has a field 'Dataclass' that specifies the dataclass type to use
+		try:
+			self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')
+		except AttributeError:
+			raise ValueError("If no explicit dataclass type is provided via data_cls=X, then this class must be a subclass with a defined 'Dataclass' class attribute")
 		self.read_only = read_only
 		self.max_entries = max_entries
 		self.max_size = max_size
