@@ -396,7 +396,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 
 			def save_last_lines():
 				nonlocal added_entry_size
-				with utils.SafeOpenForAppend(path=self.data.paths[-1], mode='ab', rstack=rstack) as file:
+				with utils.SafeOpenForWrite(path=self.data.paths[-1], mode='ab', rstack=rstack) as file:
 					file.writelines(last_lines)
 					added_entry_size += sum(len(line) for line in last_lines)
 				last_lines.clear()

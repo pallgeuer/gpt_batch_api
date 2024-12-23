@@ -12,7 +12,7 @@ from . import utils
 def test_invalid_mode_raises(tmp_path: pathlib.Path):
 	# Ensure that providing a mode without 'w' raises a ValueError
 	file_path = tmp_path / 'dummy.txt'
-	with pytest.raises(ValueError, match="File opening mode must be a truncating write mode"):
+	with pytest.raises(ValueError, match=r"File opening mode must be a write mode \(w\) or an append mode \(a\)"):
 		with utils.SafeOpenForWrite(file_path, mode='r'):
 			pass
 
@@ -138,5 +138,82 @@ def test_backup_affix_custom(tmp_path: pathlib.Path):
 		if not (len(e.args) == 1 and e.args[0] == 'Triggered revert'):
 			raise
 	assert file_path.read_text(encoding='utf-8') == file_content_old
+	assert list(tmp_path.iterdir()) == [file_path]
+
+def test_text_append_no_rstack_no_existing_file(tmp_path: pathlib.Path):
+	# Test appending text data with no RevertStack or existing file
+	file_path = tmp_path / 'testfile.txt'
+	file_content_append = "Appended content"
+	assert not file_path.exists()
+	with utils.SafeOpenForWrite(file_path, mode='a') as file:
+		file.write(file_content_append)
+	assert file_path.read_text(encoding='utf-8') == file_content_append
+	assert list(tmp_path.iterdir()) == [file_path]
+
+def test_text_append_existing_file_no_rstack(tmp_path: pathlib.Path):
+	# Test appending to an existing file with no RevertStack
+	file_path = tmp_path / 'testfile.txt'
+	file_content_initial = "Original content\n"
+	file_content_append = "New appended content"
+	file_path.write_text(file_content_initial, encoding='utf-8')
+	assert file_path.read_text(encoding='utf-8') == file_content_initial
+	with utils.SafeOpenForWrite(file_path, mode='a') as file:
+		file.write(file_content_append)
+	assert file_path.read_text(encoding='utf-8') == file_content_initial + file_content_append
+	assert list(tmp_path.iterdir()) == [file_path]
+
+def test_text_append_rstack_backup(tmp_path: pathlib.Path):
+	# Test that a backup is created if a RevertStack is provided, and that it can be reverted after appending
+	file_path = tmp_path / 'testfile.txt'
+	file_content_initial = "Original content\n"
+	file_content_append = "Appended content"
+	file_path.write_text(file_content_initial, encoding='utf-8')
+	assert file_path.read_text(encoding='utf-8') == file_content_initial
+	try:
+		with utils.RevertStack() as rstack:
+			with utils.SafeOpenForWrite(file_path, mode='a', rstack=rstack) as file:
+				file.write(file_content_append)
+			assert file_path.read_text(encoding='utf-8') == file_content_initial + file_content_append
+			raise RuntimeError("Triggered revert")  # Raise an exception to trigger revert
+	except RuntimeError as e:
+		if not (len(e.args) == 1 and e.args[0] == "Triggered revert"):
+			raise
+	assert file_path.read_text(encoding='utf-8') == file_content_initial
+	assert list(tmp_path.iterdir()) == [file_path]
+
+def test_text_append_rstack_no_existing_file(tmp_path: pathlib.Path):
+	# Test using SafeOpenForWrite with RevertStack in append mode when the file doesn't exist initially
+	# No backup should be created, but reverting should remove the newly created file
+	file_path = tmp_path / 'newfile.txt'
+	file_content = "New content in non-existent file"
+	assert not file_path.exists()
+	try:
+		with utils.RevertStack() as rstack:
+			with utils.SafeOpenForWrite(file_path, mode='a', rstack=rstack) as file:
+				file.write(file_content)
+			assert file_path.exists()
+			assert file_path.read_text(encoding='utf-8') == file_content
+			raise RuntimeError('Triggered revert')
+	except RuntimeError as e:
+		if not (len(e.args) == 1 and e.args[0] == 'Triggered revert'):
+			raise
+	assert not file_path.exists()
+	assert not list(tmp_path.iterdir())
+
+def test_text_append_exception_inside_block(tmp_path: pathlib.Path):
+	# Test an exception inside the append with-block
+	file_path = tmp_path / 'testfile.txt'
+	file_content_initial = "Original content\n"
+	file_content_append = "New appended content"
+	file_path.write_text(file_content_initial, encoding='utf-8')
+	assert file_path.read_text(encoding='utf-8') == file_content_initial
+	try:
+		with utils.SafeOpenForWrite(file_path, mode='a') as file:
+			file.write(file_content_append)
+			raise RuntimeError('Triggered revert')
+	except RuntimeError as e:
+		if not (len(e.args) == 1 and e.args[0] == 'Triggered revert'):
+			raise
+	assert file_path.read_text(encoding='utf-8') == file_content_initial
 	assert list(tmp_path.iterdir()) == [file_path]
 # EOF

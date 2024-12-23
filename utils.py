@@ -434,37 +434,61 @@ class Affix:                           # /path/to/file.ext --> /path/to/{prefix}
 @contextlib.contextmanager
 def SafeOpenForWrite(
 	path: Union[str, pathlib.Path],        # path = Path of the file to safe-write to
-	mode: str = 'w',                       # mode = File opening mode (should always be a 'write' mode, i.e. including 'w')
+	mode: str = 'w',                       # mode = File opening mode (should always be a 'write' or 'append' mode, i.e. including 'w' or 'a')
 	*,                                     # Keyword arguments only beyond here
 	temp_affix: Optional[Affix] = None,    # temp_affix = Affix to use for the temporary file path to write to before atomically replacing the target file with the temporary written file (defaults to a suffix of '.tmp', will also always have a random suffix added by the tempfile module to ensure a unique new file)
 	rstack: Optional[RevertStack] = None,  # rstack = If a RevertStack is provided, callbacks are pushed to the stack to make all changes reversible on exception
 	backup_affix: Optional[Affix] = None,  # backup_affix = If a RevertStack is provided, the affix to use for the backup file path (defaults to a suffix of '.bak', will also always have a random suffix added by the tempfile module to ensure a unique new file)
-	**open_kwargs,                         # open_kwargs = Keyword arguments to provide to the internal call to tempfile.NamedTemporaryFile() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
+	**open_kwargs,                         # open_kwargs = Keyword arguments to provide to the internal call(s) to open()/tempfile.NamedTemporaryFile() (default kwargs of encoding='utf-8' and newline='\n' will be added unless the mode is binary or explicit alternative values are specified)
 ) -> ContextManager[Union[TextIO, BinaryIO]]:
 
 	if isinstance(path, pathlib.Path):
 		path = str(path)
-	if 'w' not in mode:
-		raise ValueError(f"File opening mode must be a truncating write mode (w): {mode}")
-	if 'b' not in mode:
-		open_kwargs.setdefault('encoding', 'utf-8')
-		open_kwargs.setdefault('newline', '\n')
-
 	dirname, basename = os.path.split(path)
 	root, ext = os.path.splitext(basename)
 
-	if temp_affix is None:
-		temp_affix = Affix(prefix=None, root_suffix=None, suffix='.tmp')
-	temp_base_name = f"{temp_affix.prefix or ''}{root}{temp_affix.root_suffix or ''}{ext}{temp_affix.suffix or ''}."
+	write_mode = 'w' in mode
+	append_mode = 'a' in mode
+	binary_mode = 'b' in mode
+	if write_mode and append_mode:
+		raise ValueError(f"File opening mode cannot be both a write mode (w) and append mode (a): {mode}")
+	elif not write_mode and not append_mode:
+		raise ValueError(f"File opening mode must be a write mode (w) or an append mode (a): {mode}")
+	if not binary_mode:
+		open_kwargs.setdefault('encoding', 'utf-8')
+		open_kwargs.setdefault('newline', '\n')
+	mode_create = mode.replace('a', 'w') if append_mode else mode
 
 	with contextlib.ExitStack() as stack:
 
-		with tempfile.NamedTemporaryFile(mode=mode, suffix=None, prefix=temp_base_name, dir=dirname, delete=False, **open_kwargs) as temp_file:
-			@stack.callback
-			def unlink_temp():
-				with contextlib.suppress(FileNotFoundError):
-					os.unlink(temp_file.name)
-			yield temp_file
+		if temp_affix is None:
+			temp_affix = Affix(prefix=None, root_suffix=None, suffix='.tmp')
+		temp_base_name = f"{temp_affix.prefix or ''}{root}{temp_affix.root_suffix or ''}{ext}{temp_affix.suffix or ''}."
+
+		if append_mode:
+
+			with tempfile.NamedTemporaryFile(mode=mode_create, suffix=None, prefix=temp_base_name, dir=dirname, delete=False, **open_kwargs) as temp_file:
+				@stack.callback
+				def unlink_temp():
+					with contextlib.suppress(FileNotFoundError):
+						os.unlink(temp_file.name)
+
+			try:
+				shutil.copy2(src=path, dst=temp_file.name)
+			except FileNotFoundError:
+				pass
+
+			with open(temp_file.name, mode=mode, **open_kwargs) as temp_file_append:
+				yield temp_file_append
+
+		else:
+
+			with tempfile.NamedTemporaryFile(mode=mode, suffix=None, prefix=temp_base_name, dir=dirname, delete=False, **open_kwargs) as temp_file:
+				@stack.callback
+				def unlink_temp():
+					with contextlib.suppress(FileNotFoundError):
+						os.unlink(temp_file.name)
+				yield temp_file
 
 		if rstack is not None:
 
@@ -472,7 +496,7 @@ def SafeOpenForWrite(
 				backup_affix = Affix(prefix=None, root_suffix=None, suffix='.bak')
 			backup_base_name = f"{backup_affix.prefix or ''}{root}{backup_affix.root_suffix or ''}{ext}{backup_affix.suffix or ''}."
 
-			with tempfile.NamedTemporaryFile(mode=mode, suffix=None, prefix=backup_base_name, dir=dirname, delete=False, **open_kwargs) as backup_file:
+			with tempfile.NamedTemporaryFile(mode=mode_create, suffix=None, prefix=backup_base_name, dir=dirname, delete=False, **open_kwargs) as backup_file:
 				@rstack.callback_always
 				def unlink_backup():
 					with contextlib.suppress(FileNotFoundError):
