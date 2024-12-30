@@ -427,13 +427,14 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 				save_last_lines()
 
 			if len(self.data.paths) > 1:
-				for p, path in enumerate(self.data.paths, 1):
-					correct_path = f'{self.path_base}_part{p:03d}of{len(self.data.paths):03d}.jsonl'
+				for p, path in enumerate(self.data.paths):
+					correct_path = f'{self.path_base}_part{p + 1:03d}of{len(self.data.paths):03d}.jsonl'
 					if path != correct_path:
 						os.replace(src=path, dst=correct_path)
 						rstack.callback(os.replace, src=correct_path, dst=path)
+						self.data.paths[p] = correct_path
 
-			log.info(f"Appended {len(self.data.entries)} entries to the {len(self.data.paths)} task output file(s) (added {utils.format_size_iec(added_entry_size)})")
+			log.info(f"Appended {len(self.data.entries)} entries to the now {len(self.data.paths)} task output file(s) (added {utils.format_size_iec(added_entry_size)})")
 
 		self.data.entries.clear()
 
