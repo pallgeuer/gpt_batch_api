@@ -5,14 +5,18 @@ from __future__ import annotations
 import os
 import sys
 import enum
+import math
 import logging
 import argparse
 import functools
+import collections
 import dataclasses
-from typing import Sequence, Optional, Any
+from typing import Sequence, Optional, Any, Counter
 import pydantic
 import openai.types.chat as openai_chat
 from . import gpt_requester, task_manager, utils
+
+# TODO: Verify as part of a new demo (debug step) that DataclassListOutputFile works correctly
 
 # TODO: Add any new demos to gpt_batch_api/commands.txt
 # TODO: Demo a basic single opinion/single stage text writing task with simple JSON output
@@ -22,45 +26,37 @@ from . import gpt_requester, task_manager, utils
 # TODO: At least one demo should use structured outputs, and at least one shouldn't
 # TODO: Direct is tested by having an auto-direct thing when an odd small number of samples left at the end (make sure the numbers are such that a small thing is left over)
 
-# TODO: Standardise structured output error handling (refusals, stop reason is length (in all cases), etc)
-# TODO: Retrying: Can it be lower, inside GPTRequester? => Means you also don't have to rebuild the payload
-# TODO: When response comes, can attempt to parse, and return a bool saying RETRY if the exact same payload should be retried => If NOT retry, then it has to end up in failed_samples or succeeded_samples
-# TODO: State what the unicode character is, give a one sentence description of what the symbol represents and where it comes from, give a sample sentence including the character at least once (if not included then this is a 'parse error' situation, i.e. soft fail)
-# TODO: _task.json file for storing basically information about what you've already processed (must be hashable after lists are converted to tuples and dicts are converted to tuples of items?)
-# TODO: _output.json OR _data_001.jsonl file for storing the ACTUAL output/processed response data (NOT needed to determine what samples are needed in future)
-# TODO: Output file MUST be _output*.EXT => Class to generically wrap what kind of output file? Or just a method override (would this require frequent duplication of boiler plate code for saving e.g. just a standard JSON)? / Generic TaskOutputFile (could be simple JSON, or potentially chunked JSONL, or totally different file ext?)
-
 #
 # Demo: Character codes
 #
 
-# Unicode character type enumeration
+# Unicode character type enumeration (part of the structured output schema used by the GPT)
 class UnicodeCharacterType(str, enum.Enum):
-	LETTER = "letter"            # Any alphabetic character
-	NUMBER = "number"            # Numeric characters
-	PUNCTUATION = "punctuation"  # Characters like commas, periods, and such
-	SYMBOL = "symbol"            # Mathematical or other symbols
-	CURRENCY = "currency"        # Currency symbols
-	CONTROL = "control"          # Control characters
-	SPACE = "space"              # Whitespace characters
-	MARK = "mark"                # Combining marks
-	EMOJI = "emoji"              # Emoji characters
-	OTHER = "other"              # Any other type not covered by the above categories
+	LETTER = 'letter'            # Any alphabetic character
+	NUMBER = 'number'            # Numeric characters
+	PUNCTUATION = 'punctuation'  # Characters like commas, periods, and such
+	SYMBOL = 'symbol'            # Mathematical or other symbols
+	CURRENCY = 'currency'        # Currency symbols
+	CONTROL = 'control'          # Control characters
+	SPACE = 'space'              # Whitespace characters
+	MARK = 'mark'                # Combining marks
+	EMOJI = 'emoji'              # Emoji characters
+	OTHER = 'other'              # Any other type not covered by the above categories
 
-# Unicode character information class
+# Unicode character information class (structured output schema used by the GPT)
 class UnicodeCharacterInfo(pydantic.BaseModel):
 	model_config = pydantic.ConfigDict(strict=True)
-	character: str = pydantic.Field(title="Unicode character", description="The unicode character in question (a string containing only the single literal character).")
-	type: UnicodeCharacterType = pydantic.Field(title="Character type", description="The best-matching type of the unicode character.", strict=False)
-	description: str = pydantic.Field(title="Character description", description="A one-sentence description of what the character symbol represents and where it comes from.")
-	sample_sentence: str = pydantic.Field(title="Sample sentence", description="A sample sentence including the EXACT case-sensitive unicode character codepoint at least TWICE.")
+	character: str = pydantic.Field(title='Unicode character', description="The unicode character in question (a string containing only the single literal character).")
+	type: UnicodeCharacterType = pydantic.Field(title='Character type', description="The best-matching type of the unicode character.", strict=False)  # Note: Not strict due to str vs enumeration type considerations
+	description: str = pydantic.Field(title='Character description', description="A one-sentence description of what the character symbol represents and where it comes from.")
+	sample_sentence: str = pydantic.Field(title='Sample sentence', description="A sample sentence including the EXACT case-sensitive unicode character codepoint at least TWICE.")
 
-# Character codes data class
+# Character codes data class (data class used for the output file)
 @dataclasses.dataclass
 class CharCodesData:
 	chars: dict[str, UnicodeCharacterInfo] = dataclasses.field(default_factory=dict)  # Map of all characters to their produced output character information
 
-# Character codes file class
+# Character codes file class (output file class that can also be reused in downstream code to read and parse the generated data)
 class CharCodesFile(task_manager.DataclassOutputFile):
 
 	Dataclass = CharCodesData
@@ -72,12 +68,14 @@ class CharCodesFile(task_manager.DataclassOutputFile):
 	def status_str(self) -> str:
 		return f"{len(self.data.chars)} chars"
 
-# Character codes task class
+# Character codes task class (runs the task)
 class CharCodesTask(task_manager.TaskManager):
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
+
 		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
 		gpt_requester_kwargs.update(endpoint=cfg.chat_endpoint)
+
 		super().__init__(
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
@@ -91,6 +89,7 @@ class CharCodesTask(task_manager.TaskManager):
 			),
 			**gpt_requester_kwargs,
 		)
+
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.char_ranges = char_ranges
 
@@ -154,8 +153,6 @@ class CharCodesTask(task_manager.TaskManager):
 
 		for info in result.info.values():
 
-			info: gpt_requester.ResultInfo
-
 			sample_key = info.req_info.meta['sample_key']
 			if sample_key in self.T.succeeded_samples:
 				raise ValueError(f"Sample key '{sample_key}' unexpectedly already exists in succeeded samples task state")
@@ -218,6 +215,268 @@ def demo_char_codes(cfg: utils.Config, task_dir: str):
 	).run()
 
 #
+# Demo: Emotion recognition
+#
+
+# Utterance emotion enumeration (part of the structured output schema used by the GPT)
+class UtteranceEmotion(str, enum.Enum):
+	ANGER = 'anger'
+	DISGUST = 'disgust'
+	SADNESS = 'sadness'
+	JOY = 'joy'
+	NEUTRAL = 'neutral'
+	SURPRISE = 'surprise'
+	FEAR = 'fear'
+
+# Utterance information class (structured output schema used by the GPT)
+class UtteranceInfo(pydantic.BaseModel):
+	model_config = pydantic.ConfigDict(strict=True)
+	emotion: UtteranceEmotion = pydantic.Field(title='Utterance emotion', description="The best-matching emotion classification of the utterance.", strict=False)  # Note: Not strict due to str vs enumeration type considerations
+	is_clear: bool = pydantic.Field(title='Is clear emotion', description="Whether the emotion classification of the utterance is very clear, and not in any possible way ambiguous.")
+
+# Utterance data class (data class used for the output file)
+@dataclasses.dataclass
+class UtteranceData:
+	utterance: str                           # The utterance in question
+	is_clear: bool                           # Whether the emotion classification opinions reached a clear majority conclusion
+	emotion: Optional[UtteranceEmotion]      # Utterance emotion (None = No single opinion was successful)
+	emotions: dict[UtteranceEmotion, float]  # All utterance emotion classifications with their corresponding confidence score (in descending confidence order)
+
+# Utterances file class (output file class that can also be reused in downstream code to read and parse the generated data)
+class UtterancesFile(task_manager.DataclassListOutputFile):
+	Dataclass = UtteranceData
+
+# Utterance emotion task class (runs the task)
+class UtteranceEmotionTask(task_manager.TaskManager):
+
+	def __init__(self, cfg: utils.Config, task_dir: str, utterances: Sequence[str]):
+
+		opinions_min = resolve(cfg.opinions_min, default=3)
+		opinions_max = resolve(cfg.opinions_max, default=5)
+		if not isinstance(opinions_min, int) or not isinstance(opinions_max, int) or opinions_min < 1 or opinions_max < 1 or opinions_max < opinions_min:
+			raise ValueError(f"Invalid opinions specification: Min {opinions_min}, Max {opinions_max}")
+
+		confidence = resolve(cfg.confidence, default=0.78)
+		if not (isinstance(confidence, float) and 0.0 < confidence < 1.0):
+			raise ValueError(f"Invalid confidence specification: {confidence}")
+
+		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
+		gpt_requester_kwargs.update(endpoint=cfg.chat_endpoint)
+
+		super().__init__(
+			task_dir=task_dir,
+			name_prefix=cfg.task_prefix,
+			output_factory=UtterancesFile.output_factory(),
+			reinit_meta=cfg.reinit_meta,
+			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
+				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
+				max_completion_tokens=resolve(cfg.max_completion_tokens, default=64),
+				temperature=resolve(cfg.temperature, default=0.2),
+				top_p=resolve(cfg.top_p, default=0.6),
+				opinions_min=opinions_min,
+				opinions_max=opinions_max,
+				confidence=confidence,
+			),
+			**gpt_requester_kwargs,
+		)
+
+		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
+		self.utterances = utterances
+
+	def generate_requests(self) -> bool:
+
+		opinions_min = self.T.meta['opinions_min']
+		opinions_max = self.T.meta['opinions_max']
+		confidence = self.T.meta['confidence']
+
+		for i, utterance in enumerate(self.utterances, 1):
+
+			sample_key = f'{i}:{utterance[:30]}'
+
+			num_committed = self.T.committed_samples.get(sample_key, 0)
+			if num_committed >= opinions_max:
+				continue
+			num_failed = self.T.failed_samples.get(sample_key, 0)  # Note: Failed requests effectively count as an 'unknown other opinion' (which cannot be chosen as the most common emotion classification however)
+			opinions: Optional[list[dict[str, Any]]] = self.T.succeeded_samples.get(sample_key, None)
+
+			if opinions is None:
+				most_common_count = 0
+				num_responded = num_failed
+			else:
+				opinions_counter, most_common_emotion, most_common_count = self.resolve_opinions(opinions=opinions)
+				num_responded = opinions_counter.total() + num_failed
+			assert num_responded <= num_committed
+
+			num_committed_reqd = max(num_committed, opinions_min, min(opinions_max, math.ceil((num_responded - most_common_count) / (1 - confidence))))
+			num_required = num_committed_reqd - num_committed
+			assert num_required == 0 or opinions_min <= num_committed_reqd <= opinions_max
+
+			if num_required > 0:
+				request = gpt_requester.GPTRequest(
+					payload=dict(
+						model=self.T.meta['model'],
+						max_completion_tokens=self.T.meta['max_completion_tokens'],
+						temperature=self.T.meta['temperature'],
+						top_p=self.T.meta['top_p'],
+						messages=[
+							dict(role='system', content="Given an utterance, perform emotion recognition by classifying the utterance as one of the MELD dataset emotion categories."),
+							dict(role='user', content=f"UTTERANCE:\n{utterance}"),
+						],
+						response_format=UtteranceInfo,
+					),
+					meta=dict(
+						sample_key=sample_key,
+						utterance=utterance,
+					),
+				)
+				self.GR.add_requests(request for _ in range(num_required))
+
+		return True
+
+	def commit_cached_request(self, cached_req: gpt_requester.CachedGPTRequest):
+		sample_key = cached_req.item.req.meta['sample_key']
+		self.T.committed_samples[sample_key] = self.T.committed_samples.get(sample_key, 0) + 1
+
+	def cached_request_keys(self, cached_reqs: list[gpt_requester.CachedGPTRequest]) -> Optional[set[str]]:
+		return {cached_req.item.req.meta['sample_key'] for cached_req in cached_reqs}
+
+	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
+
+		opinions_min = self.T.meta['opinions_min']
+		opinions_max = self.T.meta['opinions_max']
+		confidence = self.T.meta['confidence']
+
+		succeeded_samples = {}
+		failed_samples = {}
+		num_entries = len(self.D.entries)
+
+		@rstack.callback
+		def revert_sample_state():
+			for skey, value in succeeded_samples.items():
+				if value is None:
+					del self.T.succeeded_samples[skey]
+				else:
+					del self.T.succeeded_samples[skey][value:]
+			for skey, value in failed_samples.items():
+				if value is None:
+					del self.T.failed_samples[skey]
+				else:
+					self.T.failed_samples[skey] = value
+			del self.D.entries[num_entries:]
+
+		for info in result.info.values():
+
+			sample_key = info.req_info.meta['sample_key']
+			utterance = info.req_info.meta['utterance']
+
+			num_committed = self.T.committed_samples.get(sample_key, 0)
+			num_succeeded = len(self.T.succeeded_samples[sample_key]) if sample_key in self.T.succeeded_samples else 0
+			num_failed = self.T.failed_samples.get(sample_key, 0)
+			num_responded = num_succeeded + num_failed + 1  # Number of responded opinions for the sample key (assuming not a retry, which just postpones the response anyway)
+			if num_committed < 0 or num_succeeded < 0 or num_failed < 0:
+				raise ValueError(f"Invalid counts for sample key '{sample_key}': {num_committed} committed, {num_succeeded} succeeded, {num_failed} failed")
+			elif num_committed < num_responded:
+				raise ValueError(f"Unexpectedly too many opinions for sample key '{sample_key}': {num_committed} committed < {num_succeeded} succeeded + {num_failed} failed + 1 new opinion = {num_responded} responded")
+
+			if info.err_info is None and info.resp_info is not None and isinstance(info.resp_info.payload, openai_chat.ParsedChatCompletion) and info.resp_info.payload.choices and isinstance((utterance_info := info.resp_info.payload.choices[0].message.parsed), UtteranceInfo):
+
+				assert not info.retry
+
+				opinion = utterance_info.model_dump(mode='json')
+				if sample_key in self.T.succeeded_samples:
+					opinions = self.T.succeeded_samples[sample_key]
+					if sample_key not in succeeded_samples:
+						succeeded_samples[sample_key] = len(opinions)
+					opinions.append(opinion)
+				else:
+					if sample_key not in succeeded_samples:
+						succeeded_samples[sample_key] = None
+					opinions = self.T.succeeded_samples[sample_key] = [opinion]
+
+				opinions_counter, most_common_emotion, most_common_count = self.resolve_opinions(opinions=opinions)
+				if num_committed == num_responded >= opinions_min and (num_responded >= opinions_max or most_common_count / num_responded >= confidence):
+					total_clarity = sum(1.0 if opinion['is_clear'] else 0.5 for opinion in opinions)
+					emotions = {UtteranceEmotion(emotion): sum(1.0 if opinion['is_clear'] else 0.5 for opinion in opinions if opinion['emotion'] == emotion) / total_clarity for emotion in opinions_counter}
+					self.D.entries.append(UtteranceData(
+						utterance=utterance,
+						is_clear=most_common_count / num_responded >= confidence,
+						emotion=UtteranceEmotion(most_common_emotion) if most_common_emotion is not None else None,
+						emotions=dict(sorted(emotions.items(), key=lambda item: (-item[1], item[0]))),
+					))
+
+			elif not info.retry:
+				if sample_key not in failed_samples:
+					failed_samples[sample_key] = self.T.failed_samples.get(sample_key, None)
+				self.T.failed_samples[sample_key] = self.T.failed_samples.get(sample_key, 0) + 1
+
+		return bool(succeeded_samples) or bool(failed_samples)
+
+	@classmethod
+	def resolve_opinions(cls, opinions: list[dict[str, Any]]) -> tuple[Counter[str], Optional[str], int]:
+		# opinions = List of opinions received so far for a sample
+		# Returns a counter of the emotion opinions, the most common emotion as a string (None if there are no opinions yet), and the corresponding count
+		opinions_counter: Counter[str] = collections.Counter(opinion['emotion'] for opinion in opinions)
+		most_common_list: list[tuple[str, int]] = opinions_counter.most_common(n=1)
+		if most_common_list:
+			return opinions_counter, *most_common_list[0]  # noqa
+		else:
+			return opinions_counter, None, 0
+
+# Demonstrate the task manager class on the task of classifying the emotion of utterances
+def demo_utterance_emotion(cfg: utils.Config, task_dir: str):
+	UtteranceEmotionTask(
+		cfg=cfg,
+		task_dir=task_dir,
+		utterances=(
+			"I can’t believe you went behind my back after everything I’ve done for you!",
+			"Why do you always have to ruin every single thing I plan?",
+			"Stop interrupting me when I’m trying to explain what happened!",
+			"I’ve had enough of your excuses; just admit you messed up!",
+			"This is the last time I let you talk to me like that!",
+			"I can’t stand the way he chews with his mouth open; it’s revolting.",
+			"That’s absolutely disgusting—I can’t believe you would even suggest it.",
+			"The way they treated her was so awful, it made me sick to my stomach.",
+			"I can’t believe you actually enjoy eating something that smells like this.",
+			"That behavior is so gross; I don’t even want to be associated with it.",
+			"I don’t think I’ll ever get over how much this hurts.",
+			"It feels like no matter what I do, I’m always letting everyone down.",
+			"I just really miss the way things used to be when everything felt normal.",
+			"I wish I could change the past, but I know that’s not possible.",
+			"It’s hard to stay positive when everything keeps falling apart.",
+			"I can’t believe it—we actually won the competition!",
+			"This is the happiest I’ve felt in such a long time; thank you for making it possible.",
+			"The surprise party was amazing; I felt so loved and appreciated.",
+			"I’ve been laughing non-stop all day; everything just feels perfect!",
+			"I’m so proud of what we’ve accomplished together—it’s incredible.",
+			"Let me know if you’re free tomorrow so we can finalize the plans.",
+			"I think the meeting starts at 3 p.m., but I’ll double-check the schedule.",
+			"Can you send me the details later? I need to make sure I’ve got everything.",
+			"It seems like a decent option, but I’d need more information before deciding.",
+			"I saw your message and will get back to you once I’ve had a chance to think about it.",
+			"Wait, you’re telling me that they finished the project a week early?",
+			"I wasn’t expecting to see you here—it’s such a pleasant surprise!",
+			"How did you manage to pull this off without me finding out?",
+			"I can’t believe it actually worked; I was so sure it wouldn’t!",
+			"You’re kidding, right? That’s the last thing I ever thought would happen!",
+			"I’m really worried that if we don’t act soon, things will spiral out of control.",
+			"I don’t feel safe walking home alone this late at night.",
+			"What if they find out the truth and everything falls apart?",
+			"I’ve got a bad feeling about this; something just doesn’t feel right.",
+			"Every time I hear a noise like that, my heart races uncontrollably.",
+			"I trusted you completely, and now you’ve left me feeling so hurt and betrayed.",
+			"I can’t believe this is actually happening—it’s even better than I imagined!",
+			"The way they acted in that situation was so horrifying, I can’t even process it.",
+			"I guess I’ll just have to accept that things aren’t going to work out the way I hoped.",
+			"This is such an amazing gift—I never expected something so thoughtful from you!",
+			"How could you say something so cruel and completely out of line?",
+			"I’m so scared that I’ll never get the chance to fix what went wrong between us.",
+			"I didn’t think it would happen so soon, but I suppose we’ll figure it out.",
+			"It’s great that we managed to finish early, though I’m not sure what’s next.",
+			"I never thought I’d feel so heartbroken over something I didn’t see coming.",
+		),
+	).run()
+
+#
 # Miscellaneous
 #
 
@@ -261,6 +520,9 @@ def main():
 	parser_meta.add_argument('--max_completion_tokens', type=int, metavar='NUM', help="Maximum number of generated output tokens per request (including both reasoning and visible tokens)")
 	parser_meta.add_argument('--temperature', type=float, metavar='TEMP', help="What sampling temperature to use")
 	parser_meta.add_argument('--top_p', type=float, metavar='MASS', help="Nucleus sampling probability mass")
+	parser_meta.add_argument('--opinions_min', type=int, metavar='NUM', help="Minimum number of opinions required")
+	parser_meta.add_argument('--opinions_max', type=int, metavar='NUM', help="Maximum number of opinions required")
+	parser_meta.add_argument('--confidence', type=float, metavar='RATIO', help="Opinion-based classification confidence required")
 
 	gpt_requester.GPTRequester.configure_argparse(parser=parser)
 
@@ -271,6 +533,8 @@ def main():
 	task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks')
 	if args.task == 'char_codes':
 		demo_char_codes(cfg=args, task_dir=task_dir)
+	elif args.task == 'utterance_emotion':
+		demo_utterance_emotion(cfg=args, task_dir=task_dir)
 	elif args.task is None:
 		raise ValueError("Please specify which task to demo using --task")
 	else:
