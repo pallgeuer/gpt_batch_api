@@ -467,6 +467,14 @@ class TaskManager:
 	# In order to conveniently provide relevant command line arguments, use either:
 	#   - gpt_requester.GPTRequester.configure_argparse() => Python argparse
 	#   - config/gpt_batch_api.yaml                       => Hydra configuration parameters YAML
+	#
+	# Each task needs to define a task state format (in particular a method for constructing string sample keys, see TaskState) and a request metadata format (see gpt_requester.GPTRequest) that need to satisfy the following properties:
+	#  - Given committed_samples (dict with keys given by the sample keys committed so far) and possibly committed_meta/responded_meta/failed_samples/succeeded_samples as well, it must be possible to unambiguously determine which requests need to be generated and committed for the remaining task (at least possibly until further responses come back triggering further requests, see generate_requests())
+	#  - Given only a single generated request and no further context, it must be possible to correctly update the committed_meta/committed_samples task state to reflect that the request has now been committed (generally implies that each request metadata needs to include the corresponding sample key the request originates from, see commit_cached_request())
+	#  - OPTIONAL: Given only a list of generated requests and no further context, it should be possible to establish a set of sample keys containing all keys of committed_samples that could possibly be added/modified by committing the requests (generally implies that each request metadata needs to include the corresponding sample key the request originates from, see cached_request_keys())
+	#  - Given a gpt_requester.BatchResult (contains request and response) and no further context other than committed_meta/committed_samples, it must be possible to update responded_meta/failed_samples/succeeded_samples in a way compatible with how generate_requests() works (see process_batch_result())
+	#
+	# The init_meta argument to __init__ specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta).
 
 	# Construct a task manager to make use of the OpenAI Batch API to process samples
 	def __init__(
@@ -638,6 +646,7 @@ class TaskManager:
 		# Iterate through available samples and generate and add (using self.GR.add_request() / self.GR.add_requests()) GPTRequest instances for work yet to do (i.e. requests that haven't previously already been generated and committed).
 		# The task state, and in particular the committed_meta/committed_samples fields thereof (in combination with sample key strings) can be used to determine what work has already been generated, and what work is yet to do.
 		# Return a boolean whether there are no more requests that can be generated right now, e.g. because all available samples have been iterated through, and all corresponding requests that can be foreseen for now have been generated.
+		# A returned boolean of True MUST mean that if generate_requests() were to immediately be called again (after committing the previously generated requests) then NO further requests would be generated.
 		# It must be the case that if generate_requests() is called repeatedly in succession it eventually returns True when there is nothing more that can be generated right now (e.g. at least until some currently in-progress requests finish in the future and potentially allow more requests to then be required).
 		# Generated requests must contain enough metadata to allow unambiguous updating of the task state later in commit_cached_request(), i.e. at the very least the sample key(s) associated with the request, as well as any metadata required for later response processing and output file writing.
 		# To allow samples to be committed and batched more incrementally (memory/disk consideration), it is permitted to manually call self.commit_requests() at any intermediate time in this method. Otherwise, it can be assumed that self.commit_requests() will be called automatically after this method returns.
@@ -728,7 +737,7 @@ class TaskManager:
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 		# result => The result of a batch
 		# rstack => A RevertStack so that the actions of this method are perfectly reversible in the case of an exception
-		# Returns whether the task state or output was modified and thus that both need to be saved
+		# Returns whether the task state (self.T) or output (self.D) was modified and thus that both need to be saved
 		#
 		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState).
 		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts.
