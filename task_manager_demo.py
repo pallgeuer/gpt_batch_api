@@ -270,7 +270,7 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 			reinit_meta=cfg.reinit_meta,
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
-				max_completion_tokens=resolve(cfg.max_completion_tokens, default=64),
+				max_completion_tokens=resolve(cfg.max_completion_tokens, default=32),
 				temperature=resolve(cfg.temperature, default=0.2),
 				top_p=resolve(cfg.top_p, default=0.6),
 				opinions_min=opinions_min,
