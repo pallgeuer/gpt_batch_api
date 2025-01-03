@@ -8,11 +8,13 @@ import copy
 import http
 import json
 import time
+import heapq
 import getpass
 import inspect
 import logging
 import argparse
 import datetime
+import operator
 import itertools
 import contextlib
 import collections
@@ -1521,7 +1523,10 @@ class GPTRequester:
 				utils.print_in_place(f"Waited {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
 				return
 			time.sleep((start_time - time.perf_counter()) % self.remote_update_interval)
-			print_str = f"Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates of partial progress... "
+			batches_in_progress = tuple(batch for batch in self.S.batches if batch.remote is not None and batch.remote.batch.request_counts is not None)
+			next_batches = heapq.nlargest(n=3, iterable=((batch.id, batch.remote.batch.request_counts) for batch in batches_in_progress), key=lambda item: max(item[1].completed + item[1].failed, 0) / max(item[1].total, 1))
+			next_batches.sort(key=operator.itemgetter(0))
+			print_str = f"Still waiting on {num_unfinished_batches} unfinished batches after {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates{f' ({", ".join(f"batch {batch_id} = {counts.completed}+{counts.failed}/{counts.total}" for batch_id, counts in next_batches)})' if next_batches else ''}... "
 			if print_str != printed_str:
 				utils.print_in_place(print_str)
 				printed_str = print_str
