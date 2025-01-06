@@ -566,6 +566,10 @@ class GPTRequester:
 		*,                                                    # Keyword arguments only beyond here
 
 		dryrun: bool = False,                                 # Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)
+		only_process: bool = False,                           # Whether to solely process existing unfinished remote batches and not generate/commit/push anything new
+		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
+		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
+		wipe_requests: bool = False,                          # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
 
 		openai_api_key: Optional[str] = None,                 # OpenAI API key (see openai.OpenAI, ends up in request headers)
 		openai_organization: Optional[str] = None,            # OpenAI organization (see openai.OpenAI, ends up in request headers)
@@ -575,8 +579,6 @@ class GPTRequester:
 		client: Optional[openai.OpenAI] = None,               # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
 		endpoint: Optional[str] = None,                       # Endpoint to use for all GPT requests (None => OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
 
-		wipe_requests: bool = False,                          # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
-
 		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
 		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
 		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
@@ -584,11 +586,8 @@ class GPTRequester:
 		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
-		only_process: bool = False,                           # Whether to solely process existing unfinished remote batches and not generate/commit/push anything new
 		show_warnings: int = 50,                              # How many warnings to show/log per batch per warning type when processing responses
 		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
-		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
-		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
 		max_retries: int = 2,                                 # Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)
 		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 
@@ -633,7 +632,21 @@ class GPTRequester:
 		if not self.name_prefix:
 			raise ValueError("Name prefix cannot be empty")
 
+		self.dryrun = dryrun
+		if self.dryrun:
+			log.warning(f"{DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
+
+		self.only_process = only_process  # Note: In only-process mode, it is still the responsibility of the task not to add/commit requests (as this functionality is needed for processing request retries it cannot be completely disabled)
 		self.wipe_requests = wipe_requests
+
+		self.process_failed_batches = process_failed_batches
+		self.retry_fatal_requests = retry_fatal_requests
+		if self.process_failed_batches > 0:
+			log.info(f"Processing and clearing up to {self.process_failed_batches} failed batches per session")
+		elif self.process_failed_batches == 0:
+			log.info("An exception will be raised if failed batches occur")
+		else:
+			log.info("Processing and clearing up any failed batches that occur")
 
 		self.autocreate_working_dir = autocreate_working_dir
 		created_working_dir = False
@@ -645,10 +658,6 @@ class GPTRequester:
 		log.info(f"Using GPT requester of prefix '{self.name_prefix}' in dir: {self.working_dir}{' [CREATED]' if created_working_dir else ''}")
 		if not os.path.isdir(self.working_dir):
 			raise FileNotFoundError(f"GPT working directory does not exist: {self.working_dir}")
-
-		self.dryrun = dryrun
-		if self.dryrun:
-			log.warning(f"{DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.endpoint = endpoint
@@ -663,8 +672,6 @@ class GPTRequester:
 			log.info("Manage OpenAI batches: https://platform.openai.com/batches")
 			log.info("Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
 
-		self.only_process = only_process  # Note: In only-process mode, it is still the responsibility of the task not to add/commit requests (as this functionality is needed for processing request retries)
-
 		self.show_warnings = show_warnings
 		if self.show_warnings < 1:
 			raise ValueError(f"Number of warnings to show/log must be at least 1: {self.show_warnings}")
@@ -672,15 +679,6 @@ class GPTRequester:
 		if self.show_errors < 1:
 			raise ValueError(f"Number of errors to show/log must be at least 1: {self.show_errors}")
 		log.info(f"Showing up to {self.show_warnings} warnings and {self.show_errors} errors explicitly per batch per type")
-
-		self.process_failed_batches = process_failed_batches
-		self.retry_fatal_requests = retry_fatal_requests
-		if self.process_failed_batches > 0:
-			log.info(f"Processing and clearing up to {self.process_failed_batches} failed batches per session")
-		elif self.process_failed_batches == 0:
-			log.info("An exception will be raised if failed batches occur")
-		else:
-			log.info("Processing and clearing up any failed batches that occur")
 
 		self.max_retries = max_retries
 		if self.max_retries > 0:
@@ -852,6 +850,10 @@ class GPTRequester:
 		add_argument = functools.partial(utils.add_init_argparse, cls=GPTRequester, parser=group, defaults=defaults)
 
 		add_argument(name='dryrun', help="Perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)")
+		add_argument(name='only_process', help="Whether to solely process existing unfinished remote batches and not generate/commit/push anything new")
+		add_argument(name='process_failed_batches', metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
+		add_argument(name='retry_fatal_requests', help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
+		add_argument(name='wipe_requests', help="CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)")
 
 		add_argument(name='openai_api_key', metavar='KEY', help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='openai_organization', metavar='ID', help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
@@ -860,8 +862,6 @@ class GPTRequester:
 		if include_endpoint:
 			add_argument(name='endpoint', help="API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)")
 
-		add_argument(name='wipe_requests', help="CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)")
-
 		add_argument(name='autocreate_working_dir', help="Do not automatically create the GPT working directory if it does not exist (parent directory must already exist)")
 		add_argument(name='lock_timeout', metavar='SEC', unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
 		add_argument(name='lock_poll_interval', metavar='SEC', unit='s', help="Lock file polling interval (see utils.LockFile)")
@@ -869,11 +869,8 @@ class GPTRequester:
 		add_argument(name='token_estimator_warn', metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
-		add_argument(name='only_process', help="Whether to solely process existing unfinished remote batches and not generate/commit/push anything new")
 		add_argument(name='show_warnings', metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
 		add_argument(name='show_errors', metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
-		add_argument(name='process_failed_batches', metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
-		add_argument(name='retry_fatal_requests', help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
 		add_argument(name='max_retries', metavar='NUM', help="Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)")
 		if include_auto_parse:
 			add_argument(name='auto_parse', help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
