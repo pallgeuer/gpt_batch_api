@@ -487,7 +487,6 @@ class TaskManager:
 		init_meta: Optional[dict[str, Any]],                    # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
 		*,                                                      # Keyword arguments only beyond here
 
-		wipe_task: bool = False,                                # CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_failed and wipe_requests, wipes succeeded samples and task output)
 		wipe_failed: bool = False,                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)
 		reinit_meta: bool = False,                              # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
 
@@ -518,7 +517,6 @@ class TaskManager:
 		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {})) if isinstance(parser, argparse.ArgumentParser) else parser
 		add_argument = functools.partial(utils.add_init_argparse, cls=TaskManager, parser=group, defaults=defaults)
 
-		add_argument(name='wipe_task', help="CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_failed and wipe_requests, wipes succeeded samples and task output)")
 		add_argument(name='wipe_failed', help="CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)")
 		add_argument(name='reinit_meta', help="CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)")
 

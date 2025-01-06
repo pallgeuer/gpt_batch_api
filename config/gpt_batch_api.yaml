@@ -22,8 +22,6 @@ endpoint: null
 ##  Task Manager  ##
 ####################
 
-# CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_failed and wipe_requests, wipes succeeded samples and task output)
-wipe_task: False
 # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)
 wipe_failed: False
 # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
@@ -41,6 +39,8 @@ process_failed_batches: 0
 retry_fatal_requests: False
 # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
 wipe_requests: False
+# CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (also triggers task manager actions if requester is being managed by one)
+wipe_task: False
 
 # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
 autocreate_working_dir: True

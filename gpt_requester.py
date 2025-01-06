@@ -570,6 +570,7 @@ class GPTRequester:
 		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
 		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
 		wipe_requests: bool = False,                          # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
+		wipe_task: bool = False,                              # CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (also triggers task manager actions if requester is being managed by one)
 
 		openai_api_key: Optional[str] = None,                 # OpenAI API key (see openai.OpenAI, ends up in request headers)
 		openai_organization: Optional[str] = None,            # OpenAI organization (see openai.OpenAI, ends up in request headers)
@@ -638,6 +639,7 @@ class GPTRequester:
 
 		self.only_process = only_process  # Note: In only-process mode, it is still the responsibility of the task not to add/commit requests (as this functionality is needed for processing request retries it cannot be completely disabled)
 		self.wipe_requests = wipe_requests
+		self.wipe_task = wipe_task
 
 		self.process_failed_batches = process_failed_batches
 		self.retry_fatal_requests = retry_fatal_requests
@@ -854,6 +856,7 @@ class GPTRequester:
 		add_argument(name='process_failed_batches', metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
 		add_argument(name='retry_fatal_requests', help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
 		add_argument(name='wipe_requests', help="CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)")
+		add_argument(name='wipe_task', help="CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (also triggers task manager actions if requester is being managed by one)")
 
 		add_argument(name='openai_api_key', metavar='KEY', help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='openai_organization', metavar='ID', help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
