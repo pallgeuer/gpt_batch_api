@@ -10,11 +10,11 @@ import json
 import time
 import heapq
 import getpass
-import inspect
 import logging
 import argparse
 import datetime
 import operator
+import functools
 import itertools
 import contextlib
 import collections
@@ -555,6 +555,7 @@ class BatchResult:
 #
 
 # GPT requester class
+@utils.init_kwargs
 class GPTRequester:
 
 	# Construct a GPT requester to make use of the OpenAI Batch API to process GPT requests
@@ -573,6 +574,8 @@ class GPTRequester:
 		client_kwargs: Optional[dict[str, Any]] = None,       # Additional kwargs to use for the OpenAI API client (see openai.OpenAI)
 		client: Optional[openai.OpenAI] = None,               # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
 		endpoint: Optional[str] = None,                       # Endpoint to use for all GPT requests (None => OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
+
+		wipe_requests: bool = False,                          # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
 
 		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
 		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
@@ -629,6 +632,8 @@ class GPTRequester:
 		self.name_prefix = name_prefix
 		if not self.name_prefix:
 			raise ValueError("Name prefix cannot be empty")
+
+		self.wipe_requests = wipe_requests
 
 		self.autocreate_working_dir = autocreate_working_dir
 		created_working_dir = False
@@ -830,20 +835,9 @@ class GPTRequester:
 		# Returns the maximum number of tokens allowed across all remote batches (including possible reduction due to the token safety factor)
 		return max(round(self.max_remote_ktokens * 1000 / self.max_token_safety), 1000)
 
-	# Dictionary of all __init__ keyword arguments and their default values
-	__kwargs__ = {name: param.default for name, param in inspect.signature(__init__).parameters.items() if name != 'self' and param.default != inspect.Parameter.empty}
-
-	# Populate a dictionary of __init__ keyword arguments based on an attribute-based config object (e.g. argparse.Namespace, flat omegaconf.DictConfig)
-	@classmethod
-	def get_kwargs(cls, cfg: utils.Config) -> dict[str, Any]:
-		# cfg = Attribute-based config object to extract __init__ keyword arguments from (e.g. an instance of argparse.Namespace, or a flat omegaconf.DictConfig)
-		# Returns a dictionary of the extracted keyword arguments
-		return {key: getattr(cfg, key) for key in cls.__kwargs__.keys() if hasattr(cfg, key)}
-
 	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
-	@classmethod
+	@staticmethod
 	def configure_argparse(
-		cls,
 		parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup],  # noqa / Argument parser or group
 		*,                                                                # Keyword arguments only beyond here
 		title: Optional[str] = 'GPT requester',                           # If parser is not already an argument group, the title to use for the created argument group
@@ -851,80 +845,69 @@ class GPTRequester:
 		group_kwargs: Optional[dict[str, Any]] = None,                    # If parser is not already an argument group, the extra keyword arguments to use for the created argument group
 		include_endpoint: bool = False,                                   # Whether to include an argument for the API endpoint to use (often this should be task-specific and more specific arguments like chat_endpoint should be defined and used by the task itself)
 		include_auto_parse: bool = False,                                 # Whether to include an argument for auto-parsing (often this is task-specific)
-		**custom_defaults,                                                # noqa / Keyword arguments that can be used to override individual default argument values
+		**defaults,                                                       # noqa / Keyword arguments that can be used to override individual default argument values
 	) -> argparse._ArgumentGroup:                                         # noqa / Returns the passed or newly created argument group
 
-		if isinstance(parser, argparse.ArgumentParser):
-			group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {}))
-		else:
-			group = parser
+		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {})) if isinstance(parser, argparse.ArgumentParser) else parser
+		add_argument = functools.partial(utils.add_init_argparse, cls=GPTRequester, parser=group, defaults=defaults)
 
-		# noinspection PyShadowingBuiltins
-		def add_argument(name: str, type: type, help: str, unit: str = '', metavar: Union[str, tuple[str, ...], None] = None):
-			default_value = custom_defaults.get(name, cls.__kwargs__[name])
-			if type is bool:
-				if default_value:
-					group.add_argument(f'--no_{name}', action='store_false', help=help)
-				else:
-					group.add_argument(f'--{name}', action='store_true', help=help)
-			else:
-				group.add_argument(f'--{name}', type=type, default=default_value, metavar=metavar, help=help if default_value is None else f'{help} [default: {default_value}{unit}]')
+		add_argument(name='dryrun', help="Perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)")
 
-		add_argument(name='dryrun', type=bool, help="Perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)")
-
-		add_argument(name='openai_api_key', type=str, metavar='KEY', help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
-		add_argument(name='openai_organization', type=str, metavar='ID', help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
-		add_argument(name='openai_project', type=str, metavar='ID', help="OpenAI project (see openai.OpenAI, ends up in request headers)")
-		add_argument(name='client_base_url', type=str, metavar='URL', help="Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)")
+		add_argument(name='openai_api_key', metavar='KEY', help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='openai_organization', metavar='ID', help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='openai_project', metavar='ID', help="OpenAI project (see openai.OpenAI, ends up in request headers)")
+		add_argument(name='client_base_url', metavar='URL', help="Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)")
 		if include_endpoint:
-			add_argument(name='endpoint', type=str, help="API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)")
+			add_argument(name='endpoint', help="API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)")
 
-		add_argument(name='autocreate_working_dir', type=bool, help="Do not automatically create the GPT working directory if it does not exist (parent directory must already exist)")
-		add_argument(name='lock_timeout', type=float, metavar='SEC', unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
-		add_argument(name='lock_poll_interval', type=float, metavar='SEC', unit='s', help="Lock file polling interval (see utils.LockFile)")
-		add_argument(name='lock_status_interval', type=float, metavar='SEC', unit='s', help="Lock file status update interval (see utils.LockFile)")
-		add_argument(name='token_estimator_warn', type=str, metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
-		add_argument(name='remote_update_interval', type=float, metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
+		add_argument(name='wipe_requests', help="CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)")
 
-		add_argument(name='only_process', type=bool, help="Whether to solely process existing unfinished remote batches and not generate/commit/push anything new")
-		add_argument(name='show_warnings', type=int, metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
-		add_argument(name='show_errors', type=int, metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
-		add_argument(name='process_failed_batches', type=int, metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
-		add_argument(name='retry_fatal_requests', type=bool, help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
-		add_argument(name='max_retries', type=int, metavar='NUM', help="Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)")
+		add_argument(name='autocreate_working_dir', help="Do not automatically create the GPT working directory if it does not exist (parent directory must already exist)")
+		add_argument(name='lock_timeout', metavar='SEC', unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
+		add_argument(name='lock_poll_interval', metavar='SEC', unit='s', help="Lock file polling interval (see utils.LockFile)")
+		add_argument(name='lock_status_interval', metavar='SEC', unit='s', help="Lock file status update interval (see utils.LockFile)")
+		add_argument(name='token_estimator_warn', metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
+		add_argument(name='remote_update_interval', metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
+
+		add_argument(name='only_process', help="Whether to solely process existing unfinished remote batches and not generate/commit/push anything new")
+		add_argument(name='show_warnings', metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
+		add_argument(name='show_errors', metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
+		add_argument(name='process_failed_batches', metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
+		add_argument(name='retry_fatal_requests', help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
+		add_argument(name='max_retries', metavar='NUM', help="Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)")
 		if include_auto_parse:
-			add_argument(name='auto_parse', type=bool, help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
+			add_argument(name='auto_parse', help="Whether to perform auto-parsing to help validate and Python-ify API requests and responses")
 
-		add_argument(name='cost_input_direct_mtoken', type=float, metavar='COST', help="The cost per million direct input tokens (1M tokens ~ 750K words)")
-		add_argument(name='cost_input_cached_mtoken', type=float, metavar='COST', help="The cost per million cached input tokens")
-		add_argument(name='cost_input_batch_mtoken', type=float, metavar='COST', help="The cost per million input tokens with Batch API")
-		add_argument(name='cost_output_direct_mtoken', type=float, metavar='COST', help="The cost per million direct output tokens (1M tokens ~ 750K words)")
-		add_argument(name='cost_output_batch_mtoken', type=float, metavar='COST', help="The cost per million output tokens with Batch API")
-		add_argument(name='assumed_completion_ratio', type=float, metavar='RATIO', help="How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)")
+		add_argument(name='cost_input_direct_mtoken', metavar='COST', help="The cost per million direct input tokens (1M tokens ~ 750K words)")
+		add_argument(name='cost_input_cached_mtoken', metavar='COST', help="The cost per million cached input tokens")
+		add_argument(name='cost_input_batch_mtoken', metavar='COST', help="The cost per million input tokens with Batch API")
+		add_argument(name='cost_output_direct_mtoken', metavar='COST', help="The cost per million direct output tokens (1M tokens ~ 750K words)")
+		add_argument(name='cost_output_batch_mtoken', metavar='COST', help="The cost per million output tokens with Batch API")
+		add_argument(name='assumed_completion_ratio', metavar='RATIO', help="How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)")
 
-		add_argument(name='max_task_requests', type=int, metavar='NUM', help="Maximum number of requests allowed for an entire task")
-		add_argument(name='max_task_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) for an entire task")
-		add_argument(name='max_task_cost', type=float, metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) of an entire task")
-		add_argument(name='max_session_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a session")
-		add_argument(name='max_session_ktokens', type=int, metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) in a session")
-		add_argument(name='max_session_cost', type=float, metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) in a session")
-		add_argument(name='max_batch_requests', type=int, metavar='NUM', help="Maximum number of requests allowed in a batch")
-		add_argument(name='max_batch_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
-		add_argument(name='max_batch_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum number of input tokens (in units of 1000) to include in a single batch")
-		add_argument(name='max_batch_cost', type=float, metavar='COST', help="Maximum allowed cost (input + assumed output tokens) of a batch")
-		add_argument(name='max_unpushed_batches', type=int, metavar='NUM', help="Maximum number of unpushed local batches at any one time")
-		add_argument(name='max_remote_batches', type=int, metavar='NUM', help="Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)")
-		add_argument(name='max_remote_requests', type=int, metavar='NUM', help="Maximum number of requests across all uploaded remote batches at any one time")
-		add_argument(name='max_remote_mb', type=int, metavar='MB', unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
-		add_argument(name='max_remote_ktokens', type=int, metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time")
-		add_argument(name='max_remote_cost', type=float, metavar='COST', help="Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time")
-		add_argument(name='max_mb_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
-		add_argument(name='max_token_safety', type=float, metavar='FACTOR', help="Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
+		add_argument(name='max_task_requests', metavar='NUM', help="Maximum number of requests allowed for an entire task")
+		add_argument(name='max_task_ktokens', metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) for an entire task")
+		add_argument(name='max_task_cost', metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) of an entire task")
+		add_argument(name='max_session_requests', metavar='NUM', help="Maximum number of requests allowed in a session")
+		add_argument(name='max_session_ktokens', metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) in a session")
+		add_argument(name='max_session_cost', metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) in a session")
+		add_argument(name='max_batch_requests', metavar='NUM', help="Maximum number of requests allowed in a batch")
+		add_argument(name='max_batch_mb', metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
+		add_argument(name='max_batch_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum number of input tokens (in units of 1000) to include in a single batch")
+		add_argument(name='max_batch_cost', metavar='COST', help="Maximum allowed cost (input + assumed output tokens) of a batch")
+		add_argument(name='max_unpushed_batches', metavar='NUM', help="Maximum number of unpushed local batches at any one time")
+		add_argument(name='max_remote_batches', metavar='NUM', help="Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)")
+		add_argument(name='max_remote_requests', metavar='NUM', help="Maximum number of requests across all uploaded remote batches at any one time")
+		add_argument(name='max_remote_mb', metavar='MB', unit='MB', help="Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time")
+		add_argument(name='max_remote_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time")
+		add_argument(name='max_remote_cost', metavar='COST', help="Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time")
+		add_argument(name='max_mb_safety', metavar='FACTOR', help="Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
+		add_argument(name='max_token_safety', metavar='FACTOR', help="Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
 
-		add_argument(name='warn_predicted_input_factor', type=float, metavar='FACTOR', help="Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
-		add_argument(name='warn_assumed_completion_factor', type=float, metavar='FACTOR', help="Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
-		add_argument(name='min_pass_ratio', type=float, metavar='RATIO', help="If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)")
-		add_argument(name='max_pass_failures', type=int, metavar='NUM', help="Trigger a processing error if this many consecutive batches do not pass")
+		add_argument(name='warn_predicted_input_factor', metavar='FACTOR', help="Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
+		add_argument(name='warn_assumed_completion_factor', metavar='FACTOR', help="Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
+		add_argument(name='min_pass_ratio', metavar='RATIO', help="If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)")
+		add_argument(name='max_pass_failures', metavar='NUM', help="Trigger a processing error if this many consecutive batches do not pass")
 
 		return group
 

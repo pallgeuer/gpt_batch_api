@@ -11,6 +11,7 @@ import shutil
 import inspect
 import logging
 import pathlib
+import argparse
 import tempfile
 import importlib
 import itertools
@@ -24,11 +25,15 @@ import filelock
 import pydantic
 
 # Types
-DataclassInstance = typing.TypeVar('DataclassInstance')
-T = typing.TypeVar('T')
+DataclassInstance = typing.TypeVar('DataclassInstance')  # Generic dataclass instance
+T = typing.TypeVar('T')                                  # Generic type variable
+C = typing.TypeVar('C', bound=type)                      # Generic type variable for class types
 
 # Logging configuration
 logging.getLogger("filelock").setLevel(logging.WARNING)
+
+# Constants
+NONE = object()  # Sentinel object that can be used to determine whether a (possibly None) keyword argument was passed to a function
 
 #
 # Logging/Printing
@@ -633,6 +638,78 @@ class SerialTypeCache:
 #
 # Miscellaneous
 #
+
+# __init__ keyword argument class
+@dataclasses.dataclass(frozen=True)
+class InitKwarg:
+	annotation: Any  # Type annotation of the __init__ keyword argument
+	base_type: type  # Base type corresponding to the type annotation (takes the first option in the case of a Union)
+	default: Any     # Default value of the __init__ keyword argument
+
+# Decorator that adds __init__ method keyword argument introspection to a class (only considers non-self arguments that have a type annotation and default value)
+def init_kwargs(cls: C) -> C:
+	# cls = Class to decorate
+	# Returns the updated class type, which now contains a __kwargs__ field (dictionary of all __init__ keyword arguments and their types/default values)
+	init_type_hints = typing.get_type_hints(cls.__init__)  # Any __init__ arguments without type annotations simply do not appear in this dict
+	cls.__kwargs__ = {}
+	for name, param in inspect.signature(cls.__init__).parameters.items():
+		if name != 'self' and name in init_type_hints and param.default != inspect.Parameter.empty:
+			annotation = init_type_hints[name]
+			base_type = typing.get_origin(annotation) or annotation
+			if base_type is typing.Union:
+				annotation_args = typing.get_args(annotation)
+				assert annotation_args, "Union type annotation must contain at least one argument"
+				arg_annotation = annotation_args[0]
+				base_type = typing.get_origin(arg_annotation) or arg_annotation
+			assert isinstance(base_type, type), f"Failed to infer __init__ argument type ({base_type}) from annotation: {annotation}"
+			cls.__kwargs__[name] = InitKwarg(annotation=annotation, base_type=base_type, default=param.default)
+	return cls
+
+# If used @init_kwargs on cls: Populate a dictionary of __init__ keyword arguments based on an attribute-based config object (e.g. argparse.Namespace, flat omegaconf.DictConfig)
+def get_init_kwargs(cls: C, cfg: Config, **kwargs) -> dict[str, Any]:
+	# cls = Class type to get the __init__ keyword arguments for
+	# cfg = Attribute-based config object to extract __init__ keyword arguments from (e.g. an instance of argparse.Namespace, or a flat omegaconf.DictConfig)
+	# kwargs = Extra __init__ keyword arguments to set/override
+	# Returns a dictionary of the extracted __init__ keyword arguments
+	init_kwargs_ = {key: getattr(cfg, key) for key in cls.__kwargs__.keys() if hasattr(cfg, key)}
+	init_kwargs_.update(kwargs)
+	return init_kwargs_
+
+# If used @init_kwargs on cls: Add an argument to an argparser or argparse group corresponding to an __init__ keyword argument (can use functools.partial to avoid passing cls, parser, defaults every time in multiple sequential calls)
+def add_init_argparse(
+	cls: C,                                                           # Class type to use as a reference for the __init__ keyword arguments (e.g. types and default values)
+	parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup],  # noqa / Argument parser or group to add an argument to
+	name: str,                                                        # Argument name (as per __init__ method signature)
+	metavar: Union[str, tuple[str, ...], None] = None,                # Metavar to use for the argument
+	unit: str = '',                                                   # String unit to use for the default value if one exists (if a space is needed between the default value and the unit then it must be part of this string)
+	type: Optional[type] = None,                                      # noqa / Override the type specification of the argument (only if required and different to base type of type annotation)
+	default: Any = NONE,                                              # Override the default value specification of the argument (if specified, overrides 'defaults' and cls.__kwargs__)
+	defaults: Optional[dict[str, Any]] = None,                        # A dictionary of custom default values (overrides cls.__kwargs__ and can be overridden by 'default')
+	help: str = '',                                                   # noqa / Argument help string
+):
+	if not help:
+		raise ValueError(f"Help string must be provided for argument '{name}'")
+	if default is NONE and defaults is not None:
+		default = defaults.get(name, NONE)
+	if type is None or default is NONE:
+		if not hasattr(cls, '__kwargs__'):
+			raise ValueError("Class must be decorated by @init_kwargs")
+		elif name not in cls.__kwargs__:
+			raise ValueError(f"Name '{name}' does not correspond to a type-annotated __init__ keyword argument of the class {get_class_str(cls)}")
+		init_kwarg = cls.__kwargs__[name]  # Note: We only access __kwargs__ if it is actually necessary
+		if type is None:
+			type = init_kwarg.base_type  # noqa
+		if default is NONE:
+			default = init_kwarg.default
+	if type is bool:
+		if not (default is None or isinstance(default, bool)):
+			raise ValueError(f"Default value for boolean argument '{name}' must be None or boolean: {get_class_str(type(default))}")
+		if default:
+			parser.add_argument(f'--no_{name}', action='store_false', help=help)
+		else:
+			parser.add_argument(f'--{name}', action='store_true', help=help)
+	else:
+		parser.add_argument(f'--{name}', type=type, default=default, metavar=metavar, help=help if default is None else f'{help} [default: {default}{unit}]')
 
 # Check whether an iterable is in ascending order
 def is_ascending(iterable: Iterable[Any], *, strict: bool) -> bool:

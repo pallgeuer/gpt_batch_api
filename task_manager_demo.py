@@ -16,8 +16,6 @@ import pydantic
 import openai.types.chat as openai_chat
 from . import gpt_requester, task_manager, utils
 
-# TODO: Verify as part of a new demo (debug step) that DataclassListOutputFile works correctly
-
 # TODO: Add any new demos to gpt_batch_api/commands.txt
 # TODO: Demo a basic single opinion/single stage text writing task with simple JSON output
 # TODO: Demo a multi-opinion task (classify emotion of utterances a la MELD or IEMOCAP categories, just hardcode 25 utterances that you generate with ChatGPT)
@@ -73,21 +71,18 @@ class CharCodesTask(task_manager.TaskManager):
 
 	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
 
-		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
-		gpt_requester_kwargs.update(endpoint=cfg.chat_endpoint)
-
 		super().__init__(
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
 			output_factory=CharCodesFile.output_factory(),
-			reinit_meta=cfg.reinit_meta,
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
 				max_completion_tokens=resolve(cfg.max_completion_tokens, default=384),
 				temperature=resolve(cfg.temperature, default=0.2),
 				top_p=resolve(cfg.top_p, default=0.6),
 			),
-			**gpt_requester_kwargs,
+			**utils.get_init_kwargs(cls=task_manager.TaskManager, cfg=cfg),
+			**utils.get_init_kwargs(cls=gpt_requester.GPTRequester, cfg=cfg, endpoint=cfg.chat_endpoint)
 		)
 
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
@@ -198,6 +193,8 @@ class CharCodesTask(task_manager.TaskManager):
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
 def demo_char_codes(cfg: utils.Config, task_dir: str):
+	# cfg = Configuration parameters
+	# task_dir = Path of the task working directory to use
 	CharCodesTask(
 		cfg=cfg,
 		task_dir=task_dir,
@@ -251,37 +248,35 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 
 	def __init__(self, cfg: utils.Config, task_dir: str, utterances: Sequence[str]):
 
-		opinions_min = resolve(cfg.opinions_min, default=3)
-		opinions_max = resolve(cfg.opinions_max, default=5)
-		if not isinstance(opinions_min, int) or not isinstance(opinions_max, int) or opinions_min < 1 or opinions_max < 1 or opinions_max < opinions_min:
-			raise ValueError(f"Invalid opinions specification: Min {opinions_min}, Max {opinions_max}")
-
-		confidence = resolve(cfg.confidence, default=0.78)
-		if not (isinstance(confidence, float) and 0.0 < confidence < 1.0):
-			raise ValueError(f"Invalid confidence specification: {confidence}")
-
-		gpt_requester_kwargs = gpt_requester.GPTRequester.get_kwargs(cfg)
-		gpt_requester_kwargs.update(endpoint=cfg.chat_endpoint)
-
 		super().__init__(
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
 			output_factory=UtterancesFile.output_factory(),
-			reinit_meta=cfg.reinit_meta,
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
 				max_completion_tokens=resolve(cfg.max_completion_tokens, default=32),
 				temperature=resolve(cfg.temperature, default=0.2),
 				top_p=resolve(cfg.top_p, default=0.6),
-				opinions_min=opinions_min,
-				opinions_max=opinions_max,
-				confidence=confidence,
+				opinions_min=resolve(cfg.opinions_min, default=3),
+				opinions_max=resolve(cfg.opinions_max, default=5),
+				confidence=resolve(cfg.confidence, default=0.78),
 			),
-			**gpt_requester_kwargs,
+			**utils.get_init_kwargs(cls=task_manager.TaskManager, cfg=cfg),
+			**utils.get_init_kwargs(cls=gpt_requester.GPTRequester, cfg=cfg, endpoint=cfg.chat_endpoint)
 		)
 
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.utterances = utterances
+
+	def validate_state(self):
+		super().validate_state()
+		opinions_min = self.T.meta['opinions_min']
+		opinions_max = self.T.meta['opinions_max']
+		confidence = self.T.meta['confidence']
+		if not isinstance(opinions_min, int) or not isinstance(opinions_max, int) or opinions_min < 1 or opinions_max < 1 or opinions_max < opinions_min:
+			raise ValueError(f"Invalid opinions specification: Min {opinions_min}, Max {opinions_max}")
+		if not (isinstance(confidence, float) and 0.0 < confidence < 1.0):
+			raise ValueError(f"Invalid confidence specification: {confidence}")
 
 	def generate_requests(self) -> bool:
 
@@ -424,6 +419,8 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 
 # Demonstrate the task manager class on the task of classifying the emotion of utterances
 def demo_utterance_emotion(cfg: utils.Config, task_dir: str):
+	# cfg = Configuration parameters
+	# task_dir = Path of the task working directory to use
 	UtteranceEmotionTask(
 		cfg=cfg,
 		task_dir=task_dir,
@@ -514,8 +511,7 @@ def main():
 	parser.add_argument('--task_prefix', type=str, metavar='PREFIX', help='Name prefix to use for task-related files (default is same as task)')
 	parser.add_argument('--chat_endpoint', type=str, metavar='ENDPOINT', default='/v1/chat/completions', help='Chat completions endpoint to use')
 
-	parser_meta = parser.add_argument_group(title='Task metadata', description='Specifications of the task metadata to be used for new tasks (the default values are defined per-task in the corresponding task implementations).')
-	parser_meta.add_argument('--reinit_meta', action='store_true', help="Force reinitialisation of the task metadata for an existing task (normally the task metadata arguments in this group are only used for initialisation of a new task and remain fixed after that across all future runs)")
+	parser_meta = parser.add_argument_group(title='Task metadata')  # Specifications of the task metadata to be used for new tasks (the default values are defined per-task in the corresponding task implementations)
 	parser_meta.add_argument('--model', type=str, help="LLM model to use")
 	parser_meta.add_argument('--max_completion_tokens', type=int, metavar='NUM', help="Maximum number of generated output tokens per request (including both reasoning and visible tokens)")
 	parser_meta.add_argument('--temperature', type=float, metavar='TEMP', help="What sampling temperature to use")
@@ -524,6 +520,7 @@ def main():
 	parser_meta.add_argument('--opinions_max', type=int, metavar='NUM', help="Maximum number of opinions required")
 	parser_meta.add_argument('--confidence', type=float, metavar='RATIO', help="Opinion-based classification confidence required")
 
+	task_manager.TaskManager.configure_argparse(parser=parser)
 	gpt_requester.GPTRequester.configure_argparse(parser=parser)
 
 	args = parser.parse_args()

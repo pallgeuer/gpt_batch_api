@@ -6,6 +6,7 @@ import os
 import re
 import copy
 import json
+import argparse
 import functools
 import contextlib
 import collections
@@ -452,6 +453,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 #
 
 # Task manager class
+@utils.init_kwargs
 class TaskManager:
 
 	# This abstract base class manages a gpt_requester.GPTRequester instance to complete a certain custom task. Task progress is stored in a task state file as well as a task output file.
@@ -479,12 +481,16 @@ class TaskManager:
 	# Construct a task manager to make use of the OpenAI Batch API to process samples
 	def __init__(
 		self,
-		task_dir: str,                                          # Path to the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
+		task_dir: str,                                          # Path of the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
 		name_prefix: str,                                       # Name prefix to use for all files created in the task working directory (e.g. 'my_task')
 		output_factory: Callable[[str, bool], TaskOutputFile],  # Factory callable to create the required task output file instance (str argument is the required output file path base, e.g. /path/to/NAME_PREFIX_output, bool argument is whether dry run mode is active)
+		init_meta: Optional[dict[str, Any]],                    # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
 		*,                                                      # Keyword arguments only beyond here
-		reinit_meta: bool = False,                              # Whether to force a reinitialisation of the task state meta field even if the task state file already exists
-		init_meta: Optional[dict[str, Any]] = None,             # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
+
+		wipe_task: bool = False,                                # CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_failed and wipe_requests, wipes succeeded samples and task output)
+		wipe_failed: bool = False,                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)
+		reinit_meta: bool = False,                              # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
+
 		**gpt_requester_kwargs,                                 # Keyword arguments to be passed on to the internal GPTRequester instance
 	):
 
@@ -497,6 +503,26 @@ class TaskManager:
 		self.generating = False
 		self.T: Optional[TaskState] = None
 		self.D: Optional[Any] = None
+
+	# Configure an argparse parser to incorporate an argument group for the keyword arguments that can be passed to the init of this class
+	@staticmethod
+	def configure_argparse(
+		parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup],  # noqa / Argument parser or group
+		*,                                                                # Keyword arguments only beyond here
+		title: Optional[str] = 'Task manager',                            # If parser is not already an argument group, the title to use for the created argument group
+		description: Optional[str] = None,                                # If parser is not already an argument group, the description to use for the created argument group
+		group_kwargs: Optional[dict[str, Any]] = None,                    # If parser is not already an argument group, the extra keyword arguments to use for the created argument group
+		**defaults,                                                       # noqa / Keyword arguments that can be used to override individual default argument values
+	) -> argparse._ArgumentGroup:                                         # noqa / Returns the passed or newly created argument group
+
+		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {})) if isinstance(parser, argparse.ArgumentParser) else parser
+		add_argument = functools.partial(utils.add_init_argparse, cls=TaskManager, parser=group, defaults=defaults)
+
+		add_argument(name='wipe_task', help="CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_failed and wipe_requests, wipes succeeded samples and task output)")
+		add_argument(name='wipe_failed', help="CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)")
+		add_argument(name='reinit_meta', help="CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)")
+
+		return group
 
 	# Run the task manager to completion
 	def run(self):
