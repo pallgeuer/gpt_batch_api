@@ -39,7 +39,7 @@ process_failed_batches: 0
 retry_fatal_requests: False
 # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
 wipe_requests: False
-# CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (also triggers task manager actions if requester is being managed by one)
+# CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_requests first, also triggers task manager actions if requester is being managed by one)
 wipe_task: False
 
 # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)

@@ -570,7 +570,7 @@ class GPTRequester:
 		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
 		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
 		wipe_requests: bool = False,                          # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
-		wipe_task: bool = False,                              # CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (also triggers task manager actions if requester is being managed by one)
+		wipe_task: bool = False,                              # CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_requests first, also triggers task manager actions if requester is being managed by one)
 
 		openai_api_key: Optional[str] = None,                 # OpenAI API key (see openai.OpenAI, ends up in request headers)
 		openai_organization: Optional[str] = None,            # OpenAI organization (see openai.OpenAI, ends up in request headers)
@@ -856,7 +856,7 @@ class GPTRequester:
 		add_argument(name='process_failed_batches', metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
 		add_argument(name='retry_fatal_requests', help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
 		add_argument(name='wipe_requests', help="CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)")
-		add_argument(name='wipe_task', help="CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (also triggers task manager actions if requester is being managed by one)")
+		add_argument(name='wipe_task', help="CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_requests first, also triggers task manager actions if requester is being managed by one)")
 
 		add_argument(name='openai_api_key', metavar='KEY', help="OpenAI API key (see openai.OpenAI, ends up in request headers)")
 		add_argument(name='openai_organization', metavar='ID', help="OpenAI organization (see openai.OpenAI, ends up in request headers)")
@@ -1514,6 +1514,12 @@ class GPTRequester:
 				utils.print_in_place(print_str)
 				printed_str = print_str
 
+	# Update and prepare for the processing of remote batches
+	def prepare_process_batches(self):
+		self.update_remote_batch_state(only_check_finished=False, log_save=True)  # Does not do much in case of dry run
+		if (num_finished_batches := self.num_finished_batches()) > 0:
+			log.info(f"There are {self.num_unfinished_batches()} unfinished and {num_finished_batches} finished REMOTE batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)} and {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and batch.remote.finished)} requests respectively")
+
 	# Process and clean up after any finished remote batches (unless dry run)
 	def process_batches(self) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
 		# This method is implemented as a generator that returns the results for one batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
@@ -1524,9 +1530,7 @@ class GPTRequester:
 		#   [DELAYED RAISE] = The fact that this situation occurred is noted, a corresponding exception will be raised later on, and the batch state will be kept as finished/unprocessed
 		#   [RETRYABLE] = The given situation is retryable and thus only needs to be remembered as such
 
-		self.update_remote_batch_state(only_check_finished=False, log_save=True)  # Does not do much in case of dry run
-		if (num_finished_batches := self.num_finished_batches()) > 0:
-			log.info(f"There are {self.num_unfinished_batches()} unfinished and {num_finished_batches} finished REMOTE batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)} and {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and batch.remote.finished)} requests respectively")
+		self.prepare_process_batches()
 
 		delayed_raise = utils.DelayedRaise()
 		for batch in self.S.batches.copy():
