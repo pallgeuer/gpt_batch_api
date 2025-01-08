@@ -138,6 +138,11 @@ class TaskOutputFile:
 		# Initialise the task output file on disk and in memory
 		raise NotImplementedError
 
+	def reset(self, rstack: utils.RevertStack):
+		# rstack = RevertStack to use for safe reversible resetting of the task output file
+		# Reset the task output file to the state it is in right after creation (don't necessarily assume that any self.data is currently already created/loaded)
+		raise NotImplementedError
+
 	def load(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible loading of the task output file
 		# Load the task output file to memory
@@ -214,6 +219,9 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		rstack.callback(setattr, self, 'data', self.data)
 		self.data = self.data_cls()
 		self.save(rstack=rstack)
+
+	def reset(self, rstack: utils.RevertStack):
+		self.create(rstack=rstack)
 
 	def load(self, rstack: utils.RevertStack):
 		rstack.callback(setattr, self, 'data', self.data)
@@ -334,6 +342,12 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 				file_size = utils.get_file_size(file)
 			assert file_size == self.data.last_size == 0
 			log.info(f"Created empty initial task output file: {os.path.basename(path)}")
+
+	def reset(self, rstack: utils.RevertStack):
+		if self.data is not None:
+			for path in self.data.paths:
+				utils.safe_unlink(path=path, rstack=rstack)
+		self.create(rstack=rstack)
 
 	def load(self, rstack: utils.RevertStack):
 
