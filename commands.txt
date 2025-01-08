@@ -39,6 +39,8 @@ Run Commands
 TODO: MODELARGS=(...) --> Use "${MODELARGS[@]}"
 TODO: Pytests
 TODO: Customise model and its costing => Default command for char_codes mis-costs!
+TODO: Direct/debug
+TODO: Tune assumed_completion_ratio using initial minirun
 TODO: only_process=True
 TODO: Process failed batches and other recovery methods
 TODO: Wipe requests / failed / task
