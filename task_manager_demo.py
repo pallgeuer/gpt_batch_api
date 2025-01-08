@@ -16,13 +16,8 @@ import pydantic
 import openai.types.chat as openai_chat
 from . import gpt_requester, task_manager, utils
 
+# TODO: TEST wiping (all three types, both demo tasks)
 # TODO: Add any new demos to gpt_batch_api/commands.txt
-# TODO: Demo a basic single opinion/single stage text writing task with simple JSON output
-# TODO: Demo a multi-opinion task (classify emotion of utterances a la MELD or IEMOCAP categories, just hardcode 25 utterances that you generate with ChatGPT)
-# TODO: Demo a multi-stage task (continuing the conversation after first response)
-# TODO: One demo should have chunked JSONL output (size- and/or line-limited possible)
-# TODO: At least one demo should use structured outputs, and at least one shouldn't
-# TODO: Direct is tested by having an auto-direct thing when an odd small number of samples left at the end (make sure the numbers are such that a small thing is left over)
 
 #
 # Demo: Character codes
@@ -87,6 +82,22 @@ class CharCodesTask(task_manager.TaskManager):
 
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.char_ranges = char_ranges
+
+	def wipe_unfinished(self, wipe_failed: bool):
+		if wipe_failed:
+			sample_keys_keep = self.T.succeeded_samples.keys()
+			self.T.failed_samples.clear()
+		else:
+			sample_keys_keep = self.T.succeeded_samples.keys() | self.T.failed_samples.keys()
+		for sample_key in tuple(self.T.committed_samples):
+			if sample_key not in sample_keys_keep:
+				del self.T.committed_samples[sample_key]
+
+	def validate_state(self, *, clean: bool):
+		super().validate_state(clean=clean)
+		if clean:
+			if unclean_sample_keys := {sample_key for sample_key in self.T.committed_samples.keys() if (sample_key in self.T.succeeded_samples) == (sample_key in self.T.failed_samples)}:
+				raise ValueError(f"Unexpected unclean sample keys: {sorted(unclean_sample_keys)}")
 
 	def generate_requests(self) -> bool:
 
@@ -268,8 +279,21 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.utterances = utterances
 
-	def validate_state(self):
-		super().validate_state()
+	def wipe_unfinished(self, wipe_failed: bool):
+		self.T.committed_samples.clear()
+		for sample_key, opinions in self.T.succeeded_samples.items():
+			self.T.committed_samples[sample_key] = len(opinions)
+		if wipe_failed:
+			self.T.failed_samples.clear()
+		else:
+			for sample_key, num_failed in self.T.failed_samples.items():
+				self.T.committed_samples[sample_key] = self.T.committed_samples.get(sample_key, 0) + num_failed
+
+	def validate_state(self, *, clean: bool):
+		super().validate_state(clean=clean)
+		if clean:
+			if unclean_sample_keys := {sample_key for sample_key, num_committed in self.T.committed_samples.items() if (len(self.T.succeeded_samples[sample_key]) if sample_key in self.T.succeeded_samples else 0) + self.T.failed_samples.get(sample_key, 0) != num_committed}:
+				raise ValueError(f"Unexpected unclean sample keys: {sorted(unclean_sample_keys)}")
 		opinions_min = self.T.meta['opinions_min']
 		opinions_max = self.T.meta['opinions_max']
 		confidence = self.T.meta['confidence']
@@ -386,7 +410,7 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 				else:
 					if sample_key not in succeeded_samples:
 						succeeded_samples[sample_key] = None
-					opinions = self.T.succeeded_samples[sample_key] = [opinion]
+					self.T.succeeded_samples[sample_key] = opinions = [opinion]
 
 				opinions_counter, most_common_emotion, most_common_count = self.resolve_opinions(opinions=opinions)
 				if num_committed == num_responded >= opinions_min and (num_responded >= opinions_max or most_common_count / num_responded >= confidence):

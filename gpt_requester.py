@@ -929,7 +929,7 @@ class GPTRequester:
 			self.session_push_stats = PushStats()
 			self.session_processed_failed_batches = 0
 			self.validate_state_queue(clean=True)
-			self.wipe(wipe_requests=self.wipe_requests, wipe_task=self.wipe_task)
+			self.wipe(wipe_requests=self.wipe_requests, wipe_task=self.wipe_task)  # Only does something if one of the arguments is True
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
 		return self

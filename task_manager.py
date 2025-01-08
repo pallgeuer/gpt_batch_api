@@ -493,6 +493,9 @@ class TaskManager:
 	#  - Given only a single generated request and no further context, it must be possible to correctly update the committed_meta/committed_samples task state to reflect that the request has now been committed (generally implies that each request metadata needs to include the corresponding sample key the request originates from, see commit_cached_request())
 	#  - OPTIONAL: Given only a list of generated requests and no further context, it should be possible to establish a set of sample keys containing all keys of committed_samples that could possibly be added/modified by committing the requests (generally implies that each request metadata needs to include the corresponding sample key the request originates from, see cached_request_keys())
 	#  - Given a gpt_requester.BatchResult (contains request and response) and no further context other than committed_meta/committed_samples, it must be possible to update responded_meta/failed_samples/succeeded_samples in a way compatible with how generate_requests() works (see process_batch_result())
+	#  - Given just the task state, it should be possible to reduce the record of committed samples to just those for which a response was received so far
+	#  - Given just the task state, it should be possible to reduce the record of committed/responded samples to just those for which a succeeded response was received so far (failed samples are wiped)
+	#  - Samples/requests that end up as failed should not make any contribution to the output file (e.g. can be wiped or skipped without affecting the task output)
 	#
 	# The init_meta argument to __init__ specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta).
 
@@ -510,6 +513,10 @@ class TaskManager:
 
 		**gpt_requester_kwargs,                                 # Keyword arguments to be passed on to the internal GPTRequester instance
 	):
+
+		self.wipe_failed = wipe_failed
+		if self.wipe_failed:
+			gpt_requester_kwargs['wipe_requests'] = True
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
 		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta, dryrun=self.GR.dryrun)
@@ -569,17 +576,20 @@ class TaskManager:
 
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
-		with self._enter_stack as enter_stack:
+		with self._enter_stack as enter_stack, utils.DelayKeyboardInterrupt():  # Delay keyboard interrupt in particular for wipe consistency between task manager and GPT requester
+			wipe_requests = self.GR.wipe_requests
+			wipe_task = self.GR.wipe_task
 			enter_stack.enter_context(self.GR)
 			enter_stack.callback(self.on_exit)
 			self.step_num = 0
 			self.generating = False
 			enter_stack.enter_context(self.task)
 			self.T = self.task.state
-			self.validate_state()
+			self.validate_state(clean=False)
 			enter_stack.enter_context(self.output)
 			self.D = self.output.data
 			self.output.validate()
+			self.wipe(wipe_requests=wipe_requests, wipe_task=wipe_task, wipe_failed=self.wipe_failed)  # Only does something if one of the arguments is True
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
 		return self
@@ -593,13 +603,61 @@ class TaskManager:
 		self.step_num = self.T = self.D = None
 		self.generating = False
 
+	# Perform a wipe of samples and/or the entire task
+	def wipe(self, wipe_requests: bool, wipe_task: bool, wipe_failed: bool):
+		# wipe_requests = Whether to wipe all ongoing requests and batches (primarily done by GPT requester already)
+		# wipe_task = Whether to wipe the complete task state
+		# wipe_failed = Whether to wipe the results of all failed samples (requires wipe_requests)
+		# Wiping is NOT a revertible operation, and an indeterminate/inconsistent state in memory/on disk may result if an exception occurs during wiping
+
+		if wipe_task:
+			with utils.DelayKeyboardInterrupt():
+				log.info("Wiping complete task output and state...")
+				with utils.RevertStack() as rstack:
+					self.step_num = 0
+					self.task.create(rstack=rstack)
+					rstack.push_always(self.task.clear_reinit_meta)
+					log.info(f"Task metadata:{''.join(f'\n    {key} = {json.dumps(value, ensure_ascii=False, indent=None)}' for key, value in self.task.state.meta.items())}")
+					self.T = self.task.state
+					self.validate_state(clean=True)
+					self.output.reset(rstack=rstack)
+					self.D = self.output.data
+					self.output.validate()
+				log.info("Wiped complete task output and state")
+
+		elif wipe_requests or wipe_failed:
+			if not wipe_requests:
+				raise ValueError("Wipe failed samples requires all ongoing requests also be wiped")  # As not wipe_requests, it is assumed that the GPTRequester has NOT wiped requests, and thus it is okay to raise an exception (does not result in indeterminate state on disk)
+			with utils.DelayKeyboardInterrupt():
+				log.info(f"Wiping unfinished{' and failed' if wipe_failed else ''} requests/samples...")
+				with utils.RevertStack() as rstack:
+					self.wipe_unfinished(wipe_failed=wipe_failed)
+					self.validate_state(clean=True)
+					self.task.save(rstack=rstack)
+				log.info(f"Wiped unfinished{' and failed' if wipe_failed else ''} requests/samples")
+
+	# Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state (self.T)
+	def wipe_unfinished(self, wipe_failed: bool):
+		# wipe_failed = Whether in addition to the committed-yet-unfinished samples to also wipe the failed samples (i.e. give them another chance)
+		# The implementation should update the task state (self.T), specifically the committed_samples/committed_meta fields, as well as the failed_samples/responded_meta fields if wipe_failed
+		# The task output should not need to be updated at all as unfinished and failed requests/samples should never affect the task output at all (requirement of the task design)
+		# If not wipe_failed, this method should reduce the record of committed samples in self.T to just those committed samples that are responsible for the responses received so far (succeeded or failed)
+		# If wipe_failed, this method should reduce the record of committed/responded samples in self.T to just those committed samples that are responsible for the succeeded samples (failed samples are also cleared)
+		# The task state after this method finishes must pass self.validate_state(clean=True)
+		raise NotImplementedError
+
 	# Validate that there are no obvious issues with the current state
-	def validate_state(self):
-		# Note: This method can be overridden to sanity check task-specific task state conditions
+	def validate_state(self, *, clean: bool):
+		# clean = Whether the current state should be without any unfinished requests/samples (all committed samples should have a response already)
+		# Note: This method can be overridden to sanity check task-specific task state conditions (remember to call this implementation via super() though)
 		if not self.T.committed_samples.keys() >= self.T.failed_samples.keys():
 			raise ValueError(f"Unexpected failed yet not committed samples: {sorted(self.T.failed_samples.keys() - self.T.committed_samples.keys())}")
 		if not self.T.committed_samples.keys() >= self.T.succeeded_samples.keys():
 			raise ValueError(f"Unexpected succeeded yet not committed samples: {sorted(self.T.succeeded_samples.keys() - self.T.committed_samples.keys())}")
+		if clean:
+			responded_sample_keys = self.T.succeeded_samples.keys() | self.T.failed_samples.keys()
+			if self.T.committed_samples.keys() != responded_sample_keys:
+				raise ValueError(f"Unexpected committed relative to responded samples, with disagreement in the keys: {sorted(self.T.committed_samples.keys() ^ responded_sample_keys)}")
 
 	# Log the current task manager status
 	def log_status(self):
@@ -732,7 +790,7 @@ class TaskManager:
 					for cached_req in cached_reqs:
 						self.commit_cached_request(cached_req)
 
-					self.validate_state()
+					self.validate_state(clean=False)
 					self.task.save(rstack=rstack)
 
 			log.info(f"Committed {len(cached_reqs)} generated requests")
@@ -768,7 +826,7 @@ class TaskManager:
 		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history.
 		for rstack, result in self.GR.process_batches():
 			if self.process_batch_result(result=result, rstack=rstack):
-				self.validate_state()
+				self.validate_state(clean=False)
 				self.output.validate()
 				self.task.save(rstack=rstack)
 				self.output.save(rstack=rstack)
@@ -777,9 +835,9 @@ class TaskManager:
 
 	# Process a batch result and accordingly update the task state and output files (must be a perfectly reversible operation managed by the RevertStack rstack)
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
-		# result => The result of a batch
+		# result => The result of a batch, to be processed and used to update the task output file and task state
 		# rstack => A RevertStack so that the actions of this method are perfectly reversible in the case of an exception
-		# Returns whether the task state (self.T) or output (self.D) was modified and thus that both need to be saved
+		# Returns whether the task state (self.T) or output (self.D) was modified and thus that both need to be saved (failed requests should not affect the task output file at all)
 		#
 		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState).
 		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts.
