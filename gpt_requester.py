@@ -290,6 +290,8 @@ class StateFile:
 		self.name = os.path.basename(self.path)
 		log.info(f"GPT requester state file: {self.path}")
 		self.endpoint = endpoint
+		if not self.endpoint:
+			raise ValueError("State API endpoint must be non-empty")
 		self.dryrun = dryrun
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
@@ -927,6 +929,7 @@ class GPTRequester:
 			self.session_push_stats = PushStats()
 			self.session_processed_failed_batches = 0
 			self.validate_state_queue(clean=True)
+			self.wipe(wipe_requests=self.wipe_requests, wipe_task=self.wipe_task)
 			self._enter_stack = enter_stack.pop_all()
 		assert self._enter_stack is not enter_stack
 		return self
@@ -944,6 +947,65 @@ class GPTRequester:
 		self.max_request_id = None
 		self.session_push_stats = None
 		self.session_processed_failed_batches = None
+
+	# Perform a wipe of requests and/or the entire task
+	def wipe(self, wipe_requests: bool, wipe_task: bool):
+		# wipe_requests = Whether to wipe all ongoing requests and batches
+		# wipe_task = Whether to wipe the complete requester state (as pertaining to the task)
+		# Wiping is NOT a revertible operation, and an indeterminate/inconsistent state in memory/on disk/on remote may result if an exception occurs during wiping
+
+		if wipe_requests or wipe_task:
+			with utils.DelayKeyboardInterrupt():
+
+				log.info("Wiping all ongoing requests and batches...")
+
+				self.prepare_process_batches()
+
+				unfinished_batches = {batch.remote.batch.id: None for batch in self.S.batches if batch.remote is not None and not batch.remote.finished}
+				remote_files = {remote_file_id: None for batch in self.S.batches if batch.remote is not None for remote_file_id in (batch.remote.batch.error_file_id, batch.remote.batch.output_file_id, batch.remote.file.id) if remote_file_id is not None}
+				local_files = {batch.local_jsonl: None for batch in self.S.batches}
+
+				self.P.clear()
+				self.Q.clear()
+				self.S.queue.max_request_id = self.max_request_id
+				self.S.queue.request_id_meta = self.PQ.queue_request_id_meta()
+				self.S.batches.clear()
+				self.S.num_pass_failures = 0
+				self.session_processed_failed_batches = 0
+
+				if not wipe_task:
+					with utils.RevertStack() as rstack:
+						self.validate_state_queue(clean=True)
+						self.queue.save(rstack=rstack)
+						self.state.save(rstack=rstack)
+
+				for batch_id in unfinished_batches:
+					self.cancel_remote_batch(batch_id=batch_id)
+				for remote_file_id in remote_files:
+					self.delete_remote_file(file_id=remote_file_id)
+				for local_file in local_files:
+					self.delete_local_file(path=local_file)
+
+				self.wipe_requests = False
+				log.info("Wiped all ongoing requests and batches")
+
+				if wipe_task:
+
+					log.info("Wiping complete requester state...")
+
+					with utils.RevertStack() as rstack:
+						self.state.create(rstack=rstack)
+						self.S = self.state.state
+						self.max_request_id = self.S.queue.max_request_id
+						self.queue.create(rstack=rstack)
+						self.PQ = self.queue.pool_queue
+						self.P = self.PQ.pool
+						self.Q = self.PQ.queue
+						self.session_push_stats = PushStats()
+						self.validate_state_queue(clean=True)
+
+					self.wipe_task = False
+					log.info("Wiped complete requester state")
 
 	# Validate that there are no obvious issues with the current state and queue (clean refers to the expected status right after a commit)
 	def validate_state_queue(self, *, clean: bool):
