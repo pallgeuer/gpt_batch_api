@@ -955,9 +955,10 @@ class GPTRequester:
 		# Wiping is NOT a revertible operation, and an indeterminate/inconsistent state in memory/on disk/on remote may result if an exception occurs during wiping
 
 		if wipe_requests or wipe_task:
+			self.log_status()
 			with utils.DelayKeyboardInterrupt():
 
-				log.info("Wiping all ongoing requests and batches...")
+				log.warning("Wiping all ongoing requests and batches...")
 
 				self.prepare_process_batches()
 
@@ -987,11 +988,11 @@ class GPTRequester:
 					self.delete_local_file(path=local_file)
 
 				self.wipe_requests = False
-				log.info("Wiped all ongoing requests and batches")
+				log.warning("Wiped all ongoing requests and batches")
 
 				if wipe_task:
 
-					log.info("Wiping complete requester state...")
+					log.warning("Wiping complete GPT requester state...")
 
 					with utils.RevertStack() as rstack:
 						self.state.create(rstack=rstack)
@@ -1005,7 +1006,7 @@ class GPTRequester:
 						self.validate_state_queue(clean=True)
 
 					self.wipe_task = False
-					log.info("Wiped complete requester state")
+					log.warning("Wiped complete GPT requester state")
 
 	# Validate that there are no obvious issues with the current state and queue (clean refers to the expected status right after a commit)
 	def validate_state_queue(self, *, clean: bool):

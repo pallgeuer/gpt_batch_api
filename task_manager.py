@@ -611,8 +611,9 @@ class TaskManager:
 		# Wiping is NOT a revertible operation, and an indeterminate/inconsistent state in memory/on disk may result if an exception occurs during wiping
 
 		if wipe_task:
+			self.log_status()
 			with utils.DelayKeyboardInterrupt():
-				log.info("Wiping complete task output and state...")
+				log.warning("Wiping complete task output and state...")
 				with utils.RevertStack() as rstack:
 					self.step_num = 0
 					self.task.create(rstack=rstack)
@@ -623,18 +624,19 @@ class TaskManager:
 					self.output.reset(rstack=rstack)
 					self.D = self.output.data
 					self.output.validate()
-				log.info("Wiped complete task output and state")
+				log.warning("Wiped complete task output and state")
 
 		elif wipe_requests or wipe_failed:
 			if not wipe_requests:
 				raise ValueError("Wipe failed samples requires all ongoing requests also be wiped")  # As not wipe_requests, it is assumed that the GPTRequester has NOT wiped requests, and thus it is okay to raise an exception (does not result in indeterminate state on disk)
+			self.log_status()
 			with utils.DelayKeyboardInterrupt():
-				log.info(f"Wiping unfinished{' and failed' if wipe_failed else ''} requests/samples...")
+				log.warning(f"Wiping unfinished{' and failed' if wipe_failed else ''} requests/samples...")
 				with utils.RevertStack() as rstack:
 					self.wipe_unfinished(wipe_failed=wipe_failed)
 					self.validate_state(clean=True)
 					self.task.save(rstack=rstack)
-				log.info(f"Wiped unfinished{' and failed' if wipe_failed else ''} requests/samples")
+				log.warning(f"Wiped unfinished{' and failed' if wipe_failed else ''} requests/samples")
 
 	# Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state (self.T)
 	def wipe_unfinished(self, wipe_failed: bool):
