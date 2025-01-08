@@ -520,6 +520,41 @@ def SafeOpenForWrite(
 
 		os.replace(src=temp_file.name, dst=path)  # Internally atomic operation
 
+# Safe unlink/delete a file (revertible operation using a RevertStack)
+def safe_unlink(
+	path: Union[str, pathlib.Path],  # path = Path of the file to unlink
+	*,                               # Keyword arguments only beyond here
+	rstack: RevertStack,             # rstack = RevertStack to use to ensure the unlinking is revertible
+	affix: Optional[Affix] = None,   # affix = Affix to use for the backup file path used to ensure revertibility (defaults to a suffix of '.del', will also always have a random suffix added by the tempfile module to ensure a unique new file)
+	missing_ok: bool = True,         # Whether an exception should be raised if the file to unlink does not exist (False) or whether such a case should be silently ignored (True)
+) -> bool:                           # Returns whether a file existed and was revertibly unlinked
+
+	if isinstance(path, pathlib.Path):
+		path = str(path)
+	dirname, basename = os.path.split(path)
+	root, ext = os.path.splitext(basename)
+
+	if affix is None:
+		affix = Affix(prefix=None, root_suffix=None, suffix='.del')
+	backup_base_name = f"{affix.prefix or ''}{root}{affix.root_suffix or ''}{ext}{affix.suffix or ''}."
+
+	with tempfile.NamedTemporaryFile(mode='w', suffix=None, prefix=backup_base_name, dir=dirname, delete=False) as backup_file:
+		@rstack.callback_always
+		def unlink_backup():
+			with contextlib.suppress(FileNotFoundError):
+				os.unlink(backup_file.name)
+
+	try:
+		os.replace(src=path, dst=backup_file.name)
+		@rstack.callback  # noqa
+		def revert_backup():
+			os.replace(src=backup_file.name, dst=path)  # Internally atomic operation
+		return True
+	except FileNotFoundError:
+		if not missing_ok:
+			raise
+		return False
+
 # Lock file class that uses verbose prints to inform about the lock acquisition process in case it isn't quick
 class LockFile:
 

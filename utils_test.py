@@ -216,4 +216,80 @@ def test_text_append_exception_inside_block(tmp_path: pathlib.Path):
 			raise
 	assert file_path.read_text(encoding='utf-8') == file_content_initial
 	assert list(tmp_path.iterdir()) == [file_path]
+
+#
+# Test: safe_unlink
+#
+
+def test_unlink_existing_file(tmp_path: pathlib.Path):
+	# Test that calling safe_unlink on an existing file actually removes it
+	file_path = tmp_path / 'testfile.txt'
+	file_content = "Hello, world!"
+	file_path.write_text(file_content, encoding='utf-8')
+	assert file_path.exists()
+	assert file_path.read_text(encoding='utf-8') == file_content
+	with utils.RevertStack() as rstack:
+		result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=False)
+		assert result is True
+		assert not file_path.exists()
+	assert not file_path.exists()
+	assert list(tmp_path.iterdir()) == []
+
+def test_unlink_missing_file_missing_ok_true(tmp_path: pathlib.Path):
+	# Test that calling safe_unlink on a missing file with missing_ok=True returns False, no error
+	file_path = tmp_path / 'nonexistent.txt'
+	assert not file_path.exists()
+	with utils.RevertStack() as rstack:
+		result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=True)
+		assert result is False
+		assert not file_path.exists()
+	assert not file_path.exists()
+	assert list(tmp_path.iterdir()) == []
+
+def test_unlink_missing_file_missing_ok_false(tmp_path: pathlib.Path):
+	# Test that calling safe_unlink on a missing file with missing_ok=False raises a FileNotFoundError
+	file_path = tmp_path / 'nonexistent.txt'
+	assert not file_path.exists()
+	with utils.RevertStack() as rstack:
+		with pytest.raises(FileNotFoundError):
+			_ = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=False)
+		assert not file_path.exists()
+	assert not file_path.exists()
+	assert list(tmp_path.iterdir()) == []
+
+def test_unlink_with_revert(tmp_path: pathlib.Path):
+	# Test that if we use a RevertStack and an exception occurs later the unlink is reverted, i.e. the file is restored
+	file_path = tmp_path / 'testfile.txt'
+	file_content = "Hello, revertible unlink!"
+	file_path.write_text(file_content, encoding='utf-8')
+	assert file_path.exists()
+	assert file_path.read_text(encoding='utf-8') == file_content
+	try:
+		with utils.RevertStack() as rstack:
+			result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=False)
+			assert result is True
+			assert not file_path.exists()
+			raise RuntimeError("Triggered revert")
+	except RuntimeError as e:
+		if not (len(e.args) == 1 and e.args[0] == "Triggered revert"):
+			raise
+	assert file_path.exists()
+	assert file_path.read_text(encoding='utf-8') == file_content
+	assert list(tmp_path.iterdir()) == [file_path]
+
+def test_unlink_with_revert_missing_file(tmp_path: pathlib.Path):
+	# Test that if the file doesn't exist and missing_ok=True is used, safe_unlink doesn't raise, returns False, and the revert operation is effectively a no-op
+	file_path = tmp_path / 'nonexistent.txt'
+	assert not file_path.exists()
+	try:
+		with utils.RevertStack() as rstack:
+			result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=True)
+			assert result is False
+			assert not file_path.exists()
+			raise RuntimeError("Triggered revert")
+	except RuntimeError as e:
+		if not (len(e.args) == 1 and e.args[0] == "Triggered revert"):
+			raise
+	assert not file_path.exists()
+	assert list(tmp_path.iterdir()) == []
 # EOF
