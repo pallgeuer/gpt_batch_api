@@ -135,18 +135,22 @@ class TaskOutputFile:
 
 	def create(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible creation of the task output file
+		# Initialise the task output file on disk and in memory
 		raise NotImplementedError
 
 	def load(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible loading of the task output file
+		# Load the task output file to memory
 		raise NotImplementedError
 
 	def save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible saving of the task output file
+		# Save the current memory state of the task output file to disk
 		# It is permitted to make changes to self.data (e.g. sorting keys of a dictionary or so) just prior to saving, as long as it is reversible (rstack)
 		raise NotImplementedError
 
 	def unload(self):
+		# Unload the task output file
 		self.data = None
 
 # Dataclass output file class
@@ -252,7 +256,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 		last_size: int             # Current file size in bytes of the last output file (on disk)
 		entries: list[DataclassT]  # Data read from or to be written to the output files
 
-	data: Data  # TaskOutputFile: Current data state (while the class is in the entered state)
+	data: Optional[Data]  # TaskOutputFile: Current data state (while the class is in the entered state)
 
 	@classmethod
 	def read(cls, path_base: str, data_cls: Optional[Type[DataclassT]] = None) -> Self:
