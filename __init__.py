@@ -55,9 +55,4 @@ from .task_manager import (
 	DataclassListOutputFile,
 	TaskManager,
 )
-from .task_manager_demo import (
-	resolve,
-	ColorFormatter,
-	configure_logging,
-)
 # EOF
