@@ -740,9 +740,9 @@ def add_init_argparse(
 		if not (default is None or isinstance(default, bool)):
 			raise ValueError(f"Default value for boolean argument '{name}' must be None or boolean: {get_class_str(type(default))}")
 		if default:
-			parser.add_argument(f'--no_{name}', action='store_false', help=help)
+			parser.add_argument(f'--no_{name}', dest=name, action='store_false', help=help)
 		else:
-			parser.add_argument(f'--{name}', action='store_true', help=help)
+			parser.add_argument(f'--{name}', dest=name, action='store_true', help=help)
 	else:
 		parser.add_argument(f'--{name}', type=type, default=default, metavar=metavar, help=help if default is None else f'{help} [default: {default}{unit}]')
 
