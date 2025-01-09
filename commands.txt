@@ -15,32 +15,62 @@ Run Commands
 ------------
 
 - General:
-	cd /path/to/gpt_batch_api/..
+	cd /path/to/gpt_batch_api/..  # <-- NOTE: Parent directory of gpt_batch_api
 	conda activate gpt_batch_api
 	export OPENAI_API_KEY=sk-...  # <-- NOTE: Replace with actual OpenAI API key
 	export WANDB_API_KEY=...  # <-- NOTE: Replace with actual Wandb API key
+
+- General configuration:
+	MODELARGS=(--model gpt-4o-mini-2024-07-18 --cost_input_direct_mtoken 0.150 --cost_input_cached_mtoken 0.075 --cost_input_batch_mtoken 0.075 --cost_output_direct_mtoken 0.600 --cost_output_batch_mtoken 0.300)
+
+- Run the available pytests:
+	Command:
+		pytest -v gpt_batch_api/utils_test.py
+	Verify:
+		Verify that all tests passed
 
 - Test the token counting class TokenEstimator:
 	Command:
 		python -m gpt_batch_api.tokens_test
 	Verify:
 		Verify that all predicted token totals are equal or close to the actual required number of tokens
+		OpenAI changes things from time to time, so TokenEstimator may occasionally require updates in order to be accurate, especially for new models
 
 - Demo the TaskManager class:
 	Command:
-		python -m gpt_batch_api.task_manager_demo --task char_codes
+		python -m gpt_batch_api.task_manager_demo --help
+		python -m gpt_batch_api.task_manager_demo --task char_codes "${MODELARGS[@]}" --assumed_completion_ratio 0.25
+		python -m gpt_batch_api.task_manager_demo --task utterance_emotion "${MODELARGS[@]}" --assumed_completion_ratio 0.35
 	Args:
 		Refer to --help
 	Output:
 		gpt_batch_api/tasks/char_codes_*
+		gpt_batch_api/tasks/utterance_emotion_*
 	Verify:
-		Verify that the final data output file(s) contain reasonable and complete data (e.g. gpt_batch_api/tasks/char_codes_output*)
+		Verify that the final data output file(s) contain reasonable and complete data (e.g. gpt_batch_api/tasks/char_codes_output*, gpt_batch_api/tasks/utterance_emotion_output*)
 
-TODO: MODELARGS=(...) --> Use "${MODELARGS[@]}"
-TODO: Pytests
-TODO: Customise model and its costing => Default command for char_codes mis-costs!
-TODO: Direct/debug
-TODO: Tune assumed_completion_ratio using initial minirun
-TODO: only_process=True
-TODO: Process failed batches and other recovery methods
-TODO: Wipe requests / failed / task
+- TODO: Safely try out a new task:
+         - dryrun force direct verbose for a few requests (so can see verbose input request)
+         - force direct verbose for a few requests (so can see verbose input request and output response)
+         - force direct verbose-input-output-only-if-errors-or-warnings for a slightly larger number of requests
+         - dryrun medium-sized session-request-limited batches
+         - medium-sized session-request-limited batches
+         - estimate suitable max_completion_tokens and assumed_completion_ratio parameters
+         - session-cost-limited-batches
+         - adjust assumed_completion_ratio if necessary
+         - Wipe task for consistency
+         - Full normal run to completion
+
+- TODO: Debugging, apply changes made to request generation and/or recover from any errors, bad requests or early exits due to failures, or such:
+         - --dryrun => Prevent any API calls and changes to saved disk state, and just show what would be done
+         - --max_remote_ktokens 90 => OpenAI tiers limit how many tokens can be pending in the batch queue at any one time. This can be configured like this
+         - --max_batch_requests 50 => Limit the number of requests per batch (num batches/num requests/num tokens/cost/MB size can be limited for each batch, the remote server, each session, or the entire task, as appropriate)
+         - --max_remote_batches 0 --max_unpushed_batches 3 => Generate local batches without letting them be pushed
+         - --max_retries 5 => Adjust how often a request can be retried before it is declared as failed
+         - --min_pass_ratio 0.8 => At least what ratio of the requests in a batch need to be successful in order for the batch to 'pass' (too many non-passed batches lead to an error and aborting for safety, see --max_pass_failures 2)
+         - --process_failed_batches 2 [--retry_fatal_requests] => If there are failed batches then the task aborts for safety (as manual intervention/code changes/sanity checking is probably required) => This parameter can be used to allow/force up to a certain number of failed batches to be processed anyway, thereby allowing the task to proceed. If supplying --retry_fatal_requests then requests that received fatal errors will be allowed to be retried (normally they are not as fatal errors are ones where it is not expected that a retry has a chance of resolving the issue)
+         - python ... --only_process => Allow all pushed batches to complete and be processed without generating, commiting or pushing any new requests
+         - --reinit_meta => Force the task metadata to be updated (usually task metadata is only captured once when the task is created/initialised) => E.g. Change model, temperature, hyperparameters for parsing, etc (you must ensure that your task implementation can deal with whatever of these parameters you change changing)
+         - --wipe_requests => (only_process first) => Wipe all ongoing requests (e.g. useful if you changed the request generation and want to reconstruct all the requests in the queue/local batches/etc
+         - --wipe_failed => (only_process first) => Wipe all ongoing requests and ant failed samples, allowing them to be attempted again (with the full number of retries available again)
+         - --wipe_task => Wipe entire task and start completely from scratch
