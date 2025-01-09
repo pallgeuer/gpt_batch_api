@@ -49,21 +49,37 @@ Run Commands
 	Verify:
 		Verify that the final data output file(s) contain reasonable and complete data (e.g. gpt_batch_api/tasks/char_codes_output*, gpt_batch_api/tasks/utterance_emotion_output*)
 
-- TODO: Safely try out a new task:
-         - dryrun force direct verbose for a few requests (so can see verbose input request)
-         - force direct verbose for a few requests (so can see verbose input request and output response)
-         - force direct verbose-input-output-only-if-errors-or-warnings for a slightly larger number of requests
-         - dryrun medium-sized session-request-limited batches
-         - medium-sized session-request-limited batches
-         - estimate suitable max_completion_tokens and assumed_completion_ratio parameters
-         - session-cost-limited-batches
-         - adjust assumed_completion_ratio if necessary
-         - Wipe task for consistency
-         - Full normal run to completion
+- Safe steps when trying out a new custom task:
+	Notes:
+		It is assumed for these commands that the custom task manager has been wrapped into a script that uses argparse (including also --model) to configure the task manager and GPT requester.
+		If hydra or a direct programmatic interface is being used instead for the configuration parameters, then the commands below can be easily adjusted to the appropriate form.
+		The generic command is 'python ...', which could for example be 'python -m gpt_batch_api.task_manager_demo --task char_codes'.
+	List all available command line arguments:
+		python ... --help
+	Show 10 verbose examples of generated requests without actually executing them:
+		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --dryrun
+	Show 10 verbose examples of generated requests and responses using the direct API:
+		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10
+	Execute 100 requests using the direct API, and show those examples verbosely that had a warning or error:
+		python ... "${MODELARGS[@]}" --force_direct --direct_verbose warn --max_session_requests 100
+	Execute 250 requests using the batch API:
+		python ... "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 250
+		# <-- Based on the results, estimate suitable values for the request max_completion_tokens, and based on that a suitable value for assumed_completion_ratio, e.g. 0.3
+	Execute 1 USD worth of requests using the batch API (or 1 of whatever currency/unit MODELARGS uses):
+		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --only_process  # <-- If there are any unfinished batches busy on the remote (we don't want to unnecessarily wipe them)
+		python ... --wipe_requests "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --max_batch_cost 1.00 --max_session_cost 1.00
+		# <-- Calculate finetuned assumed_completion_ratio value if required, e.g. 0.32
+	Reset the entire task to scratch and throw away any results obtained so far:
+		python ... --wipe_task --no_run "${MODELARGS[@]}" --assumed_completion_ratio 0.3
+	Run the task normally to completion, respecting a batch queue limit of 5,000,000 tokens (= 5000 ktokens) at a time (refer to the OpenAI tier rate limits):
+		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --max_remote_ktokens 5000
+		# The above command can be interrupted with Ctrl+C and restarted at any time, and it will safely and robustly just pick up where it left off without losing anything (assuming the custom task has been correctly and revertibly implemented like described in the documentation, and demonstrated in task_manager_demo.py)
+	Get the current status of a task without actually executing task steps:
+		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --max_remote_ktokens 5000 --no_run
 
 - TODO: Debugging, apply changes made to request generation and/or recover from any errors, bad requests or early exits due to failures, or such:
          - --dryrun => Prevent any API calls and changes to saved disk state, and just show what would be done
-         - --max_remote_ktokens 90 => OpenAI tiers limit how many tokens can be pending in the batch queue at any one time. This can be configured like this
+         - --max_remote_ktokens 90 (dependent ones?) => OpenAI tiers limit how many tokens can be pending in the batch queue at any one time. This can be configured like this
          - --max_batch_requests 50 => Limit the number of requests per batch (num batches/num requests/num tokens/cost/MB size can be limited for each batch, the remote server, each session, or the entire task, as appropriate)
          - --max_remote_batches 0 --max_unpushed_batches 3 => Generate local batches without letting them be pushed
          - --max_retries 5 => Adjust how often a request can be retried before it is declared as failed
