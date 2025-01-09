@@ -510,12 +510,14 @@ class TaskManager:
 		init_meta: Optional[dict[str, Any]],                    # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
 		*,                                                      # Keyword arguments only beyond here
 
+		run: bool = True,                                       # Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)
 		wipe_failed: bool = False,                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)
 		reinit_meta: bool = False,                              # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
 
 		**gpt_requester_kwargs,                                 # Keyword arguments to be passed on to the internal GPTRequester instance
 	):
 
+		self.run_flag = run
 		self.wipe_failed = wipe_failed
 		if self.wipe_failed:
 			gpt_requester_kwargs['wipe_requests'] = True
@@ -544,6 +546,7 @@ class TaskManager:
 		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {})) if isinstance(parser, argparse.ArgumentParser) else parser
 		add_argument = functools.partial(utils.add_init_argparse, cls=TaskManager, parser=group, defaults=defaults)
 
+		add_argument(name='run', help="Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)")
 		add_argument(name='wipe_failed', help="CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)")
 		add_argument(name='reinit_meta', help="CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)")
 
@@ -560,15 +563,18 @@ class TaskManager:
 			self.log_status()
 			self.GR.log_status()
 
-			while self.step():  # Returns True exactly if condition E*not[D] = PBMF(GQ + C)(not[L] + not[R]), i.e. only if condition F is satisfied => There are no pushed remote batches that are finished yet unprocessed
-				if self.GR.dryrun:
-					log.warning(f"{gpt_requester.DRYRUN}Stopping incomplete task manager as it is a dry run")
-					break
-				elif self.GR.num_unfinished_batches() <= 0:  # If condition RF...
-					log.warning("Stopping incomplete task manager as a step did not result in unfinished pushed remote batches")
-					break
-				else:  # Else if condition not[R]F...
-					self.GR.wait_for_batches()  # Waits (if not a dry run) until condition R + not[F] (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
+			if self.run_flag:
+				while self.step():  # Returns True exactly if condition E*not[D] = PBMF(GQ + C)(not[L] + not[R]), i.e. only if condition F is satisfied => There are no pushed remote batches that are finished yet unprocessed
+					if self.GR.dryrun:
+						log.warning(f"{gpt_requester.DRYRUN}Stopping incomplete task manager as it is a dry run")
+						break
+					elif self.GR.num_unfinished_batches() <= 0:  # If condition RF...
+						log.warning("Stopping incomplete task manager as a step did not result in unfinished pushed remote batches")
+						break
+					else:  # Else if condition not[R]F...
+						self.GR.wait_for_batches()  # Waits (if not a dry run) until condition R + not[F] (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
+			else:
+				log.warning("Not running the task manager due to 'run' flag being False")
 
 			log.info('-' * 80)
 			self.log_status()
