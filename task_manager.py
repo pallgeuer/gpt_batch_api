@@ -584,7 +584,7 @@ class TaskManager:
 
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
-		with self._enter_stack as enter_stack, utils.DelayKeyboardInterrupt():  # Delay keyboard interrupt in particular for wipe consistency between task manager and GPT requester
+		with self._enter_stack as enter_stack:
 			wipe_requests = self.GR.wipe_requests
 			wipe_task = self.GR.wipe_task
 			enter_stack.enter_context(self.GR)
