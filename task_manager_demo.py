@@ -16,9 +16,6 @@ import pydantic
 import openai.types.chat as openai_chat
 from . import gpt_requester, task_manager, utils
 
-# TODO: TEST wiping (all three types, both demo tasks)
-# TODO: Add any new demos to gpt_batch_api/commands.txt
-
 #
 # Demo: Character codes
 #
@@ -526,6 +523,14 @@ class ColorFormatter(logging.Formatter):
 		record.levelname = self.LEVEL_REMAP.get(record.levelname, record.levelname)
 		return super().format(record)
 
+# Configure logging
+def configure_logging() -> logging.Logger:
+	stream_handler = logging.StreamHandler(sys.stdout)
+	stream_handler.set_name('console')
+	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
+	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
+	return logging.getLogger()
+
 # Main function
 def main():
 
@@ -563,12 +568,6 @@ def main():
 
 # Run main function
 if __name__ == "__main__":
-
-	stream_handler = logging.StreamHandler(sys.stdout)
-	stream_handler.set_name('console')
-	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
-	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
-	log = logging.getLogger()
-
+	log = configure_logging()
 	main()
 # EOF

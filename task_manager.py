@@ -479,6 +479,8 @@ class TaskManager:
 	#
 	# In order to use this class, subclass it for a particular task and implement/override:
 	#   - __init__(cfg: utils.Config) => Customize a call to super().__init__(..., **gpt_requester_kwargs) based on an attribute-based cfg (coming from either Python argparse or Hydra, see below) where gpt_requester_kwargs comes from gpt_requester.GPTRequester.get_kwargs(cfg)
+	#   - wipe_unfinished()           => Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state
+	#   - validate_state()            => Validate that there are no obvious issues with the current state (remember to call super())
 	#   - generate_requests()         => Implement request generation based on current task state
 	#   - commit_cached_request()     => Update the committed_meta/committed_samples task state to reflect that a particular request has been committed
 	#   - cached_request_keys()       => Extract from a list of requests a set of sample keys that is enough to cover all possible changes to the committed_samples task state when later supplying these requests to commit_cached_request()
