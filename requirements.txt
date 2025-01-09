@@ -3,6 +3,7 @@ openai
 pillow
 pydantic>=2
 pytest
+python>=3.12
 requests
 tiktoken
 wandb
