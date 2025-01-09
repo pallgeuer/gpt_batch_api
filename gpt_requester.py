@@ -2073,20 +2073,19 @@ class GPTRequester:
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
 
-	# TODO: Allow Ctrl+C if can't acquire lock file
-
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
-	# TODO: In DIRECT mode, an option to make it print very verbosely what was sent/received with exact token stats and everything for the initial/trial/debugging stage
+	# TODO: --direct_verbose never|error|warn|always = In DIRECT mode, an option to make it print very verbosely what was sent/received with exact token stats and everything for the initial/trial/debugging stage
 
-	# TODO: Add FORCE DIRECT mode that can be used to test how the LLM reacts to requests (e.g. approx how many tokens come out on average)
+	# TODO: Add FORCE DIRECT (--min_batch_requests -1 === --force_direct) mode that can be used to test how the LLM reacts to requests (e.g. approx how many tokens come out on average)
 
-	# TODO: min_batch_requests => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
+	# TODO: min_batch_requests (-1 => Always use direct) => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
 	# TODO: Have a batch size threshold below which direct requests are used instead of Batch API (minimum batch size?)
 	# TODO: Allow threshold below which a forced batch/push automatically uses single API requests instead
 
-	# TODO: wandb (conditional import to not require install if don't need it!)
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 
+	# TODO: Sync up with commands.txt
+	# TODO: Test 'safe steps' from commands.txt
 	# TODO: Inspect the entire code
 # EOF
