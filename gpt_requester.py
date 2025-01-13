@@ -1141,7 +1141,7 @@ class GPTRequester:
 		# Returns a list of the associated unique request IDs
 		return [self.add_request(req) for req in reqs]
 
-	# Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
+	# Context manager: Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
 	@contextlib.contextmanager
 	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, rstack: Optional[utils.RevertStack] = None) -> ContextManager[tuple[utils.RevertStack, list[CachedGPTRequest]]]:
 		# reqs = Optional requests to add to the request pool immediately prior to committing
@@ -1583,7 +1583,7 @@ class GPTRequester:
 		if (num_finished_batches := self.num_finished_batches()) > 0:
 			log.info(f"There are {self.num_unfinished_batches()} unfinished and {num_finished_batches} finished REMOTE batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)} and {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and batch.remote.finished)} requests respectively")
 
-	# Process and clean up after any finished remote batches (unless dry run)
+	# Generator: Process and clean up after any finished remote batches (unless dry run)
 	def process_batches(self) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
 		# This method is implemented as a generator that returns the results for one batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
@@ -1854,117 +1854,22 @@ class GPTRequester:
 					if err_line_json.num_msgs > 0 or err_req_out_keys.num_msgs > 0 or err_req_id_fail.num_msgs > 0 or err_req_id_bad.num_msgs > 0 or err_req_id_dupl.num_msgs > 0:
 						batch_failed = True
 
-					batch_models = collections.Counter()
-					batch_system_fingerprints = collections.Counter()
-					batch_predicted_input_tokens = 0
-					batch_predicted_output_tokens = 0
-					batch_predicted_cost = 0.0
-					batch_usage = {}
-					for info in result_info_map.values():
-						if info.resp_info is not None:
-							batch_models[info.resp_info.model] += 1
-							batch_system_fingerprints[info.resp_info.system_fingerprint] += 1
-							RequestMetrics.usage_iadd(self_usage=batch_usage, other_usage=info.resp_info.usage)
-							batch_predicted_input_tokens += info.req_info.tokens_cost.input_tokens
-							batch_predicted_output_tokens += info.req_info.tokens_cost.output_tokens
-							batch_predicted_cost += info.req_info.tokens_cost.cost_batch
-					batch_input_tokens = batch_usage.get('prompt_tokens', 0)
-					batch_completion_tokens = batch_usage.get('completion_tokens', 0)
-					batch_reasoning_tokens = batch_usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0)
-					batch_response_tokens = batch_completion_tokens - batch_reasoning_tokens
-					batch_total_tokens = batch_usage.get('total_tokens', 0)
-					batch_true_tokens_cost = TokensCost(
-						input_tokens=batch_input_tokens,
-						output_tokens=batch_completion_tokens,
-						cost_input_direct=self.token_coster.input_cost(direct=batch_input_tokens),
-						cost_input_batch=self.token_coster.input_cost(batch=batch_input_tokens),
-						cost_output_direct=self.token_coster.output_cost(direct=batch_completion_tokens),
-						cost_output_batch=self.token_coster.output_cost(batch=batch_completion_tokens),
-					)
-					log.info(f"Batch {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens (predicted {batch_predicted_input_tokens}) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_tokens_cost.cost_batch:.3f} true cost (predicted {batch_predicted_cost:.3f})")
-					if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
-						log.warning(f"Batch {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
-					if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
-						log.warning(f"Batch {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens")
-
 					if result_info_map.keys() != batch.request_info.keys():
 						log.error(f"Batch {batch.id} response does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(result_info_map.keys() ^ batch.request_info.keys())}")
 						if raise_if_batch_failed:
 							delayed_raise.add(msg="Batch response does not contain exactly the expected request IDs")  # [DELAYED RAISE]
 						batch_failed = True
 
-					assert result_info_map.keys() <= batch.request_info.keys()
-					for req_id, req_info in batch.request_info.items():
-						if req_id not in result_info_map:
-							req_jsonl_size, req_payload = req_payload_map[req_id]
-							result_info_map[req_id] = ResultInfo(
-								req_id=req_id,
-								req_jsonl_size=req_jsonl_size,
-								req_payload=req_payload,
-								req_info=req_info,
-								resp_info=None,
-								err_info=ErrorInfo(fatal=True, type='ResponseError', subtype='Missing', msg='Response is missing'),
-								warn_infos=[],
-								retry_counts=True,
-								retry=self.retry_fatal_requests and req_info.retry_num < self.max_retries,
-							)
-					assert result_info_map.keys() == batch.request_info.keys()
-
-					num_results = num_success = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0
-					for info in result_info_map.values():
-						num_results += 1
-						if info.err_info is None:
-							assert info.resp_info is not None
-							if info.warn_infos:
-								num_warned += 1
-							else:
-								num_success += 1
-						else:
-							num_errored += 1
-							if info.err_info.fatal:
-								num_fatal += 1
-							else:
-								num_retryable += 1
-							if info.err_info.type == 'RequestError':
-								assert not info.err_info.fatal
-								if info.err_info.subtype == 'batch_cancelled':
-									num_cancelled += 1
-								elif info.err_info.subtype == 'batch_expired':
-									num_expired += 1
-							elif info.err_info.type == 'ResponseError':
-								assert info.err_info.fatal
-								if info.err_info.subtype == 'Missing':
-									num_missing += 1
-					assert num_results == batch.num_requests
-
-					num_pass = num_success + num_expired
-					pass_ratio = num_pass / batch.num_requests
-					duration = max((at for at in (batch.remote.batch.failed_at, batch.remote.batch.completed_at, batch.remote.batch.expired_at, batch.remote.batch.cancelled_at) if at is not None), default=batch.remote.batch.created_at) - batch.remote.batch.created_at
-					result_stats = ResultStats(
-						duration=duration,
-						duration_str=utils.format_duration_hmin(duration),
-						num_requests=batch.num_requests,
-						num_success=num_success,
-						num_warned=num_warned,
-						num_errored=num_errored,
-						num_retryable=num_retryable,
-						num_cancelled=num_cancelled,
-						num_expired=num_expired,
-						num_fatal=num_fatal,
-						num_missing=num_missing,
-						num_pass=num_pass,
-						pass_ratio=pass_ratio,
+					result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed = self.process_result_info_map(
+						batch=batch,
+						batch_errors=batch_errors,
+						result_info_map=result_info_map,
+						req_payload_map=req_payload_map,
+						direct_mode=False,
 					)
 
-					log.info(f"Batch {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) for {result_stats.num_requests} requests = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
-					assert result_stats.num_requests == len(batch.request_info) == len(result_info_map)
-					assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
-					assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
-					assert result_stats.num_retryable >= result_stats.num_cancelled + result_stats.num_expired
-					assert result_stats.num_fatal >= result_stats.num_missing
-
-					if batch.remote.batch.status == 'cancelled' or result_stats.num_cancelled != 0:
-						log.error(f"Batch {batch.id} response contains {result_stats.num_cancelled} cancelled requests")
+					if batch.remote.batch.status == 'cancelled' or result.stats.num_cancelled != 0:
+						log.error(f"Batch {batch.id} response contains {result.stats.num_cancelled} cancelled requests")
 						if raise_if_batch_failed:
 							delayed_raise.add(msg="Batch response contains cancelled requests")  # [DELAYED RAISE]
 						batch_failed = True
@@ -1974,26 +1879,6 @@ class GPTRequester:
 						continue  # [DELAYED RAISE]
 					elif batch_failed:
 						log.warning(f"Processing finished batch {batch.id} ({batch.remote.batch.id}) even though the batch at least partially failed")
-
-					batch_metrics_succeeded = RequestMetrics()
-					batch_metrics_failed = RequestMetrics()
-					for info in result_info_map.values():
-						batch_metrics = (batch_metrics_succeeded if info.resp_info is not None and info.err_info is None and not info.warn_infos else batch_metrics_failed)
-						batch_metrics.num_requests += 1
-						batch_metrics.local_jsonl_size += info.req_jsonl_size
-						if info.resp_info is not None:  # Note: By definition always true for succeeded requests
-							batch_metrics.models[info.resp_info.model] += 1
-							batch_metrics.system_fingerprints[info.resp_info.system_fingerprint] += 1
-							RequestMetrics.usage_iadd(self_usage=batch_metrics.usage, other_usage=info.resp_info.usage)
-							batch_metrics.true_cost += self.token_coster.cost(input_batch=info.resp_info.usage.get('prompt_tokens', 0), output_batch=info.resp_info.usage.get('completion_tokens', 0))
-
-					result = BatchResult(
-						batch=batch,
-						errors=batch_errors,
-						info=dict(sorted(result_info_map.items())),
-						stats=result_stats,
-					)
-					assert all(req_id == info.req_id and not (info.err_info is None and info.retry) for req_id, info in result.info.items())
 
 					def revert_metrics(api_metrics_batch: APIMetrics, api_metrics_all: APIMetrics):
 						self.S.metrics.all = api_metrics_all
@@ -2029,7 +1914,7 @@ class GPTRequester:
 							self.S.batch_history.append(batch)
 							self.S.batch_history.sort()
 							if not batch_failed:  # Note: Failed batches that are explicitly being allowed to clear out should not count towards pass failure, as otherwise clearing out failed batches would almost always lead to a pass failure, which is not the point
-								if result_stats.num_pass <= 0 or result_stats.pass_ratio < self.min_pass_ratio:
+								if result.stats.num_pass <= 0 or result.stats.pass_ratio < self.min_pass_ratio:
 									self.S.num_pass_failures += 1
 								else:
 									self.S.num_pass_failures = 0
@@ -2038,7 +1923,7 @@ class GPTRequester:
 								payload=info.req_payload,
 								meta=info.req_info.meta,
 								retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
-							) for info in result_info_map.values() if info.retry]
+							) for info in result.info.values() if info.retry]
 
 							if retry_reqs:
 								log.info(f"{len(retry_reqs)} requests need to be retried and will be re-committed to the request queue...")
@@ -2072,6 +1957,152 @@ class GPTRequester:
 						delayed_raise.add(msg="Number of consecutive batch pass failures has reached limit")  # [DELAYED RAISE]
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
+
+	# Process a ResultInfo map corresponding to the results of a batch into a BatchResult and associated information required for a state update
+	def process_result_info_map(
+		self,
+		batch: BatchState,                                                # State of the batch
+		batch_errors: list[openai.types.BatchError],                      # Batch-level errors associated with the batch
+		result_info_map: dict[int, ResultInfo],                           # Result info map: Request ID --> Result information
+		req_payload_map: dict[int, tuple[int, dict[str, Any]]],           # Request payload map: Request ID --> (Request JSONL size, Request payload)
+		direct_mode: bool,                                                # Whether the batch was executed using the direct API (True) or batch API (False)
+	) -> tuple[BatchResult, TokensCost, RequestMetrics, RequestMetrics]:  # Returns the overall batch result, the true tokens and cost, the metrics associated with succeeded requests, and the metrics associated with failed requests
+
+		batch_models = collections.Counter()
+		batch_system_fingerprints = collections.Counter()
+		batch_predicted_input_tokens = 0
+		batch_predicted_output_tokens = 0
+		batch_predicted_cost = 0.0
+		batch_usage = {}
+		for info in result_info_map.values():
+			if info.resp_info is not None:
+				batch_models[info.resp_info.model] += 1
+				batch_system_fingerprints[info.resp_info.system_fingerprint] += 1
+				RequestMetrics.usage_iadd(self_usage=batch_usage, other_usage=info.resp_info.usage)
+				batch_predicted_input_tokens += info.req_info.tokens_cost.input_tokens
+				batch_predicted_output_tokens += info.req_info.tokens_cost.output_tokens
+				batch_predicted_cost += info.req_info.tokens_cost.cost_direct if direct_mode else info.req_info.tokens_cost.cost_batch
+
+		batch_input_tokens = batch_usage.get('prompt_tokens', 0)
+		batch_cached_tokens = batch_usage.get('prompt_tokens_details', {}).get('cached_tokens', 0)
+		batch_uncached_tokens = batch_input_tokens - batch_cached_tokens
+		batch_completion_tokens = batch_usage.get('completion_tokens', 0)
+		batch_reasoning_tokens = batch_usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0)
+		batch_response_tokens = batch_completion_tokens - batch_reasoning_tokens
+		batch_total_tokens = batch_usage.get('total_tokens', 0)
+		batch_true_tokens_cost = TokensCost(
+			input_tokens=batch_input_tokens,
+			output_tokens=batch_completion_tokens,
+			cost_input_direct=self.token_coster.input_cost(direct=batch_input_tokens),
+			cost_input_batch=self.token_coster.input_cost(batch=batch_input_tokens),
+			cost_output_direct=self.token_coster.output_cost(direct=batch_completion_tokens),
+			cost_output_batch=self.token_coster.output_cost(batch=batch_completion_tokens),
+		)
+
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens ({batch_cached_tokens} cached and {batch_uncached_tokens} uncached, predicted {batch_predicted_input_tokens} input) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, assumed {batch_predicted_output_tokens} completion) = {batch_total_tokens} total tokens, {batch_true_tokens_cost.cost_direct if direct_mode else batch_true_tokens_cost.cost_batch:.3f} true cost (predicted {batch_predicted_cost:.3f})")
+		if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
+			log.warning(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
+		if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
+			log.warning(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens")
+
+		assert result_info_map.keys() <= batch.request_info.keys()
+		for req_id, req_info in batch.request_info.items():
+			if req_id not in result_info_map:
+				req_jsonl_size, req_payload = req_payload_map[req_id]
+				result_info_map[req_id] = ResultInfo(
+					req_id=req_id,
+					req_jsonl_size=req_jsonl_size,
+					req_payload=req_payload,
+					req_info=req_info,
+					resp_info=None,
+					err_info=ErrorInfo(fatal=True, type='ResponseError', subtype='Missing', msg='Response is missing'),
+					warn_infos=[],
+					retry_counts=True,
+					retry=self.retry_fatal_requests and req_info.retry_num < self.max_retries,
+				)
+		assert result_info_map.keys() == batch.request_info.keys()
+
+		num_results = num_success = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0
+		for info in result_info_map.values():
+			num_results += 1
+			if info.err_info is None:
+				assert info.resp_info is not None
+				if info.warn_infos:
+					num_warned += 1
+				else:
+					num_success += 1
+			else:
+				num_errored += 1
+				if info.err_info.fatal:
+					num_fatal += 1
+				else:
+					num_retryable += 1
+				if info.err_info.type == 'RequestError':
+					assert not info.err_info.fatal
+					if info.err_info.subtype == 'batch_cancelled':
+						num_cancelled += 1
+					elif info.err_info.subtype == 'batch_expired':
+						num_expired += 1
+				elif info.err_info.type == 'ResponseError':
+					assert info.err_info.fatal
+					if info.err_info.subtype == 'Missing':
+						num_missing += 1
+		assert num_results == batch.num_requests
+
+		num_pass = num_success + num_expired
+		pass_ratio = num_pass / batch.num_requests
+		duration = max((at for at in (batch.remote.batch.failed_at, batch.remote.batch.completed_at, batch.remote.batch.expired_at, batch.remote.batch.cancelled_at) if at is not None), default=batch.remote.batch.created_at) - batch.remote.batch.created_at
+		result_stats = ResultStats(
+			duration=duration,
+			duration_str=utils.format_duration_hmin(duration),
+			num_requests=batch.num_requests,
+			num_success=num_success,
+			num_warned=num_warned,
+			num_errored=num_errored,
+			num_retryable=num_retryable,
+			num_cancelled=num_cancelled,
+			num_expired=num_expired,
+			num_fatal=num_fatal,
+			num_missing=num_missing,
+			num_pass=num_pass,
+			pass_ratio=pass_ratio,
+		)
+
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) for {result_stats.num_requests} requests = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
+		assert result_stats.num_requests == len(batch.request_info) == len(result_info_map)
+		assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
+		assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
+		assert result_stats.num_retryable >= result_stats.num_cancelled + result_stats.num_expired
+		assert result_stats.num_fatal >= result_stats.num_missing
+
+		batch_metrics_succeeded = RequestMetrics()
+		batch_metrics_failed = RequestMetrics()
+		for info in result_info_map.values():
+			batch_metrics = (batch_metrics_succeeded if info.resp_info is not None and info.err_info is None and not info.warn_infos else batch_metrics_failed)
+			batch_metrics.num_requests += 1
+			batch_metrics.local_jsonl_size += info.req_jsonl_size
+			if info.resp_info is not None:  # Note: By definition always true for succeeded requests
+				batch_metrics.models[info.resp_info.model] += 1
+				batch_metrics.system_fingerprints[info.resp_info.system_fingerprint] += 1
+				RequestMetrics.usage_iadd(self_usage=batch_metrics.usage, other_usage=info.resp_info.usage)
+				num_prompt_tokens = info.resp_info.usage.get('prompt_tokens', 0)
+				num_cached_tokens = info.resp_info.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0)
+				num_uncached_tokens = num_prompt_tokens - batch_cached_tokens
+				num_completion_tokens = info.resp_info.usage.get('completion_tokens', 0)
+				if direct_mode:
+					batch_metrics.true_cost += self.token_coster.cost(input_direct=num_uncached_tokens, input_cached=num_cached_tokens, output_direct=num_completion_tokens)
+				else:
+					batch_metrics.true_cost += self.token_coster.cost(input_batch=num_prompt_tokens, output_batch=num_completion_tokens)
+
+		result = BatchResult(
+			batch=batch,
+			errors=batch_errors,
+			info=dict(sorted(result_info_map.items())),
+			stats=result_stats,
+		)
+		assert all(req_id == info.req_id and not (info.err_info is None and info.retry) for req_id, info in result.info.items())
+
+		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
 	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
