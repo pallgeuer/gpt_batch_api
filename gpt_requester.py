@@ -271,6 +271,7 @@ class State:
 	endpoint: str = ''                                                         # API endpoint to use (empty string is invalid)
 	queue: QueueState = dataclasses.field(default_factory=QueueState)          # State of the request queue
 	max_batch_id: int = 0                                                      # Maximum batch ID used thus far (0 = No batch ID used so far)
+	max_direct_batch_id: int = 0                                               # Maximum direct batch ID used thus far (0 = No direct batch ID used so far)
 	batches: list[BatchState] = dataclasses.field(default_factory=list)        # States of all batches that are currently pending or in progress (in ascending batch ID order)
 	batch_history: list[BatchState] = dataclasses.field(default_factory=list)  # History of the final states of the completed batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
 	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)  # Task push statistics
@@ -817,6 +818,7 @@ class GPTRequester:
 		self.P: Optional[list[CachedGPTRequest]] = None
 		self.Q: Optional[list[Optional[CachedGPTRequest]]] = None
 		self.max_request_id: Optional[int] = None
+		self.max_direct_batch_id: Optional[int] = None
 		self.session_push_stats: Optional[PushStats] = None
 		self.session_processed_failed_batches: Optional[int] = None
 
@@ -943,6 +945,7 @@ class GPTRequester:
 			enter_stack.enter_context(self.state)
 			self.S = self.state.state
 			self.max_request_id = self.S.queue.max_request_id
+			self.max_direct_batch_id = self.S.max_direct_batch_id
 			enter_stack.enter_context(self.queue)
 			self.PQ = self.queue.pool_queue
 			self.P = self.PQ.pool
@@ -966,6 +969,7 @@ class GPTRequester:
 		self.type_cache = None
 		self.S = self.PQ = self.P = self.Q = None
 		self.max_request_id = None
+		self.max_direct_batch_id = None
 		self.session_push_stats = None
 		self.session_processed_failed_batches = None
 
@@ -1019,6 +1023,7 @@ class GPTRequester:
 						self.state.create(rstack=rstack)
 						self.S = self.state.state
 						self.max_request_id = self.S.queue.max_request_id
+						self.max_direct_batch_id = self.S.max_direct_batch_id
 						self.queue.create(rstack=rstack)
 						self.PQ = self.queue.pool_queue
 						self.P = self.PQ.pool
@@ -1041,6 +1046,8 @@ class GPTRequester:
 			if self.S.queue.max_request_id != self.max_request_id:
 				raise ValueError(f"Maximum request ID is inconsistent between GPT requester and queue state: {self.max_request_id} vs {self.S.queue.max_request_id}")
 
+		if self.S.max_direct_batch_id > self.max_direct_batch_id:
+			raise ValueError(f"Maximum direct batch ID state is inconsistent: {self.S.max_direct_batch_id} > {self.max_direct_batch_id}")
 		if self.S.queue.request_id_meta != self.PQ.queue_request_id_meta():
 			raise ValueError("ID-meta map is inconsistent between the state and queue files for the request queue")
 
@@ -1144,6 +1151,152 @@ class GPTRequester:
 
 		self.max_request_id += 1
 		return GPTRequestItem(id=self.max_request_id, req=req, parse_info=parse_info)
+
+	# Generator: Make a number of sequential synchronous requests using the direct API (responses may return as multiple BatchResult instances if there are many requests)
+	def direct_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest]) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
+		# reqs = The requests to make using the direct API
+		# The provided requests are auto-grouped into virtual batches based on request number limits
+		# This method is implemented as a generator that returns the results for one virtual batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
+		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
+
+		if self.only_process:
+			log.warning("Only-process mode => Not making any direct requests")
+			return
+
+		if isinstance(reqs, GPTRequest):
+			reqs_list = [reqs]
+		else:
+			reqs_list = list(reqs)
+
+		num_reqs = len(reqs_list)
+		log.info(f"Executing {num_reqs} requests using direct API...")
+
+		index = 0
+		while index < len(reqs_list):
+
+			batch = BatchState()
+			cached_reqs: dict[int, CachedGPTRequest] = {}
+
+			while index < len(reqs_list):
+
+				req = reqs_list[index]
+				item = self.create_request_item(req=req)
+				cached_req = CachedGPTRequest.from_item(item=item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
+
+				next_num_requests = batch.num_requests + 1
+				next_tokens_cost = batch.tokens_cost + cached_req.info.tokens_cost
+
+				assert not batch.reasons
+				if next_num_requests > self.max_direct_requests:
+					batch.reasons.append('Max direct requests')
+				if next_tokens_cost.input_tokens > self.max_direct_tokens:
+					batch.reasons.append('Max direct tokens')
+				if next_tokens_cost.cost_direct > self.max_direct_cost:
+					batch.reasons.append('Max direct cost')
+				if batch.reasons:
+					if batch.num_requests <= 0:
+						raise ValueError(f"The direct batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_direct_requests} OR Batch tokens {next_tokens_cost.input_tokens} > {self.max_direct_tokens} OR Batch cost {next_tokens_cost.cost_direct} > {self.max_direct_cost}")
+					batch.full_batch = True
+					break
+
+				req_id = cached_req.item.id
+				batch.local_jsonl_size += cached_req.info.json_size
+				batch.num_requests = next_num_requests
+				assert req_id not in batch.request_info and cached_req.info.tokens_cost.is_valid()
+				batch.request_info[req_id] = RequestInfo(meta=cached_req.item.req.meta, retry_num=cached_req.item.req.retry_num, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
+				batch.tokens_cost = next_tokens_cost
+				assert req_id not in cached_reqs
+				cached_reqs[req_id] = cached_req
+
+				index += 1
+
+			assert batch.num_requests == len(batch.request_info) >= 1
+			assert batch.tokens_cost.equals(TokensCost().add(req_info.tokens_cost for req_info in batch.request_info.values()))
+			assert batch.request_info.keys() == cached_reqs.keys()
+
+			self.max_direct_batch_id += 1
+			batch.id = self.max_direct_batch_id
+			batch.local_jsonl = 'direct.jsonl'  # Note: Dummy file path that generally does not actually exist
+			if not batch.reasons:
+				batch.reasons.append('No more requests')
+			log.info(f"Created direct batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} virtual batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_direct:.3f} assumed cost, due to reasons: {', '.join(sorted(batch.reasons))}")
+			log.info(f"Executing direct batch {batch.id}...")  # TODO: Either remove this or give it a counterpart down below that says how long execution took etc?
+
+			created_time = int(time.time())
+			input_file_id = f'direct-file-input-{batch.id}'
+			batch.remote = RemoteBatchState(
+				file=openai.types.FileObject(
+					id=input_file_id,
+					bytes=batch.local_jsonl_size,
+					created_at=created_time,
+					filename=batch.local_jsonl,
+					object='file',
+					purpose='batch',
+					status='processed',
+				),
+				batch=openai.types.Batch(
+					id=f'direct_batch_{batch.id}',
+					completion_window='24h',
+					created_at=created_time,
+					endpoint=self.endpoint,
+					input_file_id=input_file_id,
+					object='batch',
+					status='in_progress',
+					expires_at=created_time + 86400,
+					in_progress_at=created_time,
+					metadata=self.generate_batch_metadata(batch=batch),
+				),
+				finished=False,
+			)
+
+			# TODO: Actually EXECUTE!!! (dryrun => What do you actually do if dryrun? Just skip the actual API call and all subsequent code that requires the result?)
+			# TODO: Be as exception-safe as possible (except Exception) when making request API calls to avoid unnecessary failure
+			# TODO: Session/task push statistics
+			# TODO: 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
+			# TODO: Ideally want to produce output so that can refactor/reuse processing code as of 'resp_info = None' (line ~1873), which expects a dict that checks 'response', 'status_code', etc keys --> Refactored code ends with a ResultInfo being returned
+			# TODO: Need own error/log summarizers and delay-raisers (probably across ALL virtual batches, as it makes no sense to do it batch by batch here when we're looping through all samples essentially anyway)
+
+			# TODO: LOG Session/Task push statistics are now BLAH... (CAREFUL: cost_batch vs cost_direct => Should always everywhere report TOTAL cost?? => Change last paragraph of push_batches()?)
+
+			completed_time = int(time.time())
+			batch.remote.status = 'completed'
+			batch.remote.batch.completed_at = completed_time
+			if ANY_REQUESTS_HAD_OPENAI_ERRORS:
+				batch.remote.batch.error_file_id = f'direct-file-error-{batch.id}'
+			batch.remote.batch.finalizing_at = completed_time
+			if ANY_REQUESTS_HAD_NO_OPENAI_ERRORS:
+				batch.remote.batch.output_file_id = f'direct-file-output-{batch.id}'
+			batch.remote.batch.request_counts = openai.types.BatchRequestCounts(
+				completed=TODO,  # TODO: How many requests did not have any openai errors
+				failed=TODO,  # TODO: How many requests had openai errors
+				total=TODO,   # TODO: This should both be the sum of completed and failed, and equal to batch.num_requests actually! (make sure, e.g. logic or assert!)
+			)
+			batch.remote.finished = True
+
+			# TODO: Populate batch.true_tokens_cost / batch.metrics (both were initialised to None!)
+			# TODO: Go through entire add/commit/push/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
+			result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed = self.process_result_info_map(
+				batch=batch,
+				batch_errors=batch_errors,  # TODO: Always empty list
+				result_info_map=result_info_map,
+				req_payload_map=req_payload_map,
+				direct_mode=True,
+			)
+
+			# TODO: Trigger retries by appending them to reqs_list
+
+			with utils.AtomicRevertStack() as rstack:  # TODO: Do NOT delay keyboard interrupt across the making of all requests (just way too long, accept the lost requests if exception, an unanticipated exception could easily happen anyway so it wouldn't be a guarantee anyway)
+
+				rstack.callback(setattr, self.S, 'max_direct_batch_id', self.S.max_direct_batch_id)  # TODO: Refactor this to revert_state()?
+				self.S.max_direct_batch_id = self.max_direct_batch_id
+
+				yield rstack, result  # TODO: Recall that this can affect whether something is retried or not, and even possibly what payload is retried!!
+
+				# TODO: Add to batch history?! (make sure no validate checks of the history fail because of that)
+
+		# TODO: IMPLEMENT, yield, only process mode, show non-tqdm 10s-like progress as direct requests are completed, dry run (verbose still shows REQUEST), retries! (need to detect and collect retries and append them to local list of requests left to do), resolve reqs to list?, virtual batch-ify up to min(max_batch_requests, max_direct_requests)?
+
+		log.info(f"Executed {num_reqs} requests ({len(reqs_list)} including retries) using direct API")
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest) -> int:
@@ -1328,6 +1481,27 @@ class GPTRequester:
 
 		return self.num_unpushed_batches()
 
+	# Generate a string metadata dict to pass along with a batch to the remote
+	def generate_batch_metadata(self, batch: BatchState) -> dict[str, str]:
+		# batch = Batch to generate metadata for
+		# Returns a pure-str key/value dict of metadata associated with the batch
+
+		try:
+			current_user = getpass.getuser()
+		except OSError:
+			current_user = str(os.getuid())
+
+		return dict(
+			host=os.uname().nodename,
+			user=current_user,
+			script=__file__,
+			pid=str(os.getpid()),
+			name_prefix=self.name_prefix,
+			batch_id=str(batch.id),
+			local_jsonl=batch.local_jsonl,
+			state_file=self.state.path,
+		)
+
 	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
 	def push_batches(self) -> bool:
 		# Returns whether the batch pipeline is (now) congested
@@ -1347,11 +1521,6 @@ class GPTRequester:
 				remote_requests += batch.num_requests
 				remote_size += batch.local_jsonl_size
 				remote_tokens_cost += batch.tokens_cost
-
-		try:
-			current_user = getpass.getuser()
-		except OSError:
-			current_user = str(os.getuid())
 
 		num_pushed = 0
 		reasons_nopush = set()
@@ -1420,16 +1589,7 @@ class GPTRequester:
 								completion_window='24h',
 								endpoint=self.endpoint,
 								input_file_id=file_object.id,
-								metadata=dict(
-									host=os.uname().nodename,
-									user=current_user,
-									script=__file__,
-									pid=str(os.getpid()),
-									name_prefix=self.name_prefix,
-									batch_id=str(batch.id),
-									local_jsonl=batch.local_jsonl,
-									state_file=self.state.path,
-								),
+								metadata=self.generate_batch_metadata(batch=batch),
 							)
 							rstack.callback(self.cancel_remote_batch, batch_id=batch_object.id)
 

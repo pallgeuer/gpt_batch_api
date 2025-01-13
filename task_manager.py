@@ -12,7 +12,7 @@ import contextlib
 import collections
 import dataclasses
 import typing
-from typing import Any, Optional, Self, Type, Callable, Generic, Iterable
+from typing import Any, Optional, Self, Type, Callable, Generic, Iterable, Union
 from .logger import log
 from . import gpt_requester, utils
 
@@ -829,6 +829,17 @@ class TaskManager:
 		# cached_reqs = List of CachedGPTRequest's to extract all relevant sample key strings from
 		# Return a set of sample key strings (the set or superset of sample key strings that will be modified by commit_cached_request()), or None (caller must assume all sample keys could be modified)
 		return None
+
+	# Make and process a series of direct requests
+	def direct_requests(self, reqs: Union[Iterable[gpt_requester.GPTRequest], gpt_requester.GPTRequest]):
+		# reqs = The requests to make and process using the direct API
+		# This method performs direct API calls and updates the task/requester state
+		for rstack, result in self.GR.direct_requests(reqs=reqs):
+			if self.process_batch_result(result=result, rstack=rstack):
+				self.validate_state(clean=False)
+				self.output.validate()
+				self.task.save(rstack=rstack)
+				self.output.save(rstack=rstack)
 
 	# Process and clean up after any finished remote batches
 	def process_batches(self) -> int:
