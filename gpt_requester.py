@@ -607,11 +607,14 @@ class GPTRequester:
 		max_session_requests: int = 5000000,                  # Maximum number of requests allowed in a session
 		max_session_ktokens: int = 1000000,                   # Maximum allowed total number of input tokens (in units of 1000) in a session
 		max_session_cost: float = 500.0,                      # Maximum allowed total cost (input + assumed output tokens) in a session
+		max_direct_requests: int = 50,                        # Maximum number of requests allowed in a virtual batch when using the direct API
+		max_direct_ktokens: int = 200,                        # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
+		max_direct_cost: float = 5.0,                         # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
 		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
 		max_batch_ktokens: int = 2000,                        # Maximum number of input tokens (in units of 1000) to include in a single batch
 		max_batch_cost: float = 50.0,                         # Maximum allowed cost (input + assumed output tokens) of a batch
-		max_unpushed_batches: int = 10,                       # Maximum number of unpushed local batches at any one time
+		max_unpushed_batches: int = 5,                        # Maximum number of unpushed local batches at any one time
 		max_remote_batches: int = 100,                        # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
 		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
 		max_remote_mb: int = 10000,                           # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
@@ -738,6 +741,15 @@ class GPTRequester:
 		self.max_session_cost = max_session_cost
 		if self.max_session_cost < 0:
 			raise ValueError(f"Maximum session cost must be at least 0: {self.max_session_cost:.3f}")
+		self.max_direct_requests = max_direct_requests
+		if self.max_direct_requests < 1:
+			raise ValueError(f"Maximum number of requests in a direct virtual batch must be at least 1: {self.max_direct_requests}")
+		self.max_direct_ktokens = max_direct_ktokens
+		if self.max_direct_ktokens < 1:
+			raise ValueError(f"Maximum direct virtual batch ktokens must be at least 1: {self.max_direct_ktokens}")
+		self.max_direct_cost = max_direct_cost
+		if self.max_direct_cost < 0.01:
+			raise ValueError(f"Maximum direct virtual batch cost must be at least 0.01: {self.max_direct_cost}")
 		self.max_batch_requests = max_batch_requests
 		if self.max_batch_requests < 1:
 			raise ValueError(f"Maximum number of requests in a batch must be at least 1: {self.max_batch_requests}")
@@ -776,6 +788,7 @@ class GPTRequester:
 			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety:.3g}")
 
 		log.info(f"Using safety factors (SF) of {self.max_mb_safety:.3g} for MB size, {self.max_token_safety:.3g} for tokens")
+		log.info(f"Using direct batch limits of {self.max_direct_requests} requests, {self.max_direct_tokens} tokens, {self.max_direct_cost:.3f} assumed cost")
 		log.info(f"Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens, {self.max_batch_cost:.3f} assumed cost")
 		log.info(f"Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} assumed cost")
 		log.info(f"Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
@@ -816,6 +829,11 @@ class GPTRequester:
 	def max_session_tokens(self) -> int:
 		# Returns the maximum number of tokens allowed in a session (including possible reduction due to the token safety factor)
 		return max(round(self.max_session_ktokens * 1000 / self.max_token_safety), 0)
+
+	@property
+	def max_direct_tokens(self) -> int:
+		# Returns the maximum number of tokens allowed in a direct virtual batch (including possible reduction due to the token safety factor)
+		return max(round(self.max_direct_ktokens * 1000 / self.max_token_safety), 1000)
 
 	@property
 	def max_batch_size(self) -> int:
@@ -888,11 +906,14 @@ class GPTRequester:
 		add_argument(name='assumed_completion_ratio', metavar='RATIO', help="How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)")
 
 		add_argument(name='max_task_requests', metavar='NUM', help="Maximum number of requests allowed for an entire task")
-		add_argument(name='max_task_ktokens', metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) for an entire task")
+		add_argument(name='max_task_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of input tokens (in units of 1000) for an entire task")
 		add_argument(name='max_task_cost', metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) of an entire task")
 		add_argument(name='max_session_requests', metavar='NUM', help="Maximum number of requests allowed in a session")
-		add_argument(name='max_session_ktokens', metavar='KTOK', help="Maximum allowed total number of input tokens (in units of 1000) in a session")
+		add_argument(name='max_session_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of input tokens (in units of 1000) in a session")
 		add_argument(name='max_session_cost', metavar='COST', help="Maximum allowed total cost (input + assumed output tokens) in a session")
+		add_argument(name='max_direct_requests', metavar='NUM', help="Maximum number of requests allowed in a virtual batch when using the direct API")
+		add_argument(name='max_direct_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API")
+		add_argument(name='max_direct_cost', metavar='COST', help="Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API")
 		add_argument(name='max_batch_requests', metavar='NUM', help="Maximum number of requests allowed in a batch")
 		add_argument(name='max_batch_mb', metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
 		add_argument(name='max_batch_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum number of input tokens (in units of 1000) to include in a single batch")

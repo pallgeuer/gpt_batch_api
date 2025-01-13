@@ -102,3 +102,6 @@ Run Commands
 		Wipe all ongoing requests and failed samples, allowing them to be attempted again (with the full number of retries available again) => It is recommended to execute a separate run first with --only_process to avoid unnecessarily losing already-pushed requests and responses
 	--wipe_task
 		Wipe entire task and start completely from scratch (can be combined with --no_run in order to not actually run the task after wiping)
+
+TODO: UPDATE everything based on direct mode
+TODO: UPDATE everything based on wandb feature

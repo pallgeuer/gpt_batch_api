@@ -91,6 +91,12 @@ max_session_requests: 5000000
 max_session_ktokens: 1000000
 # Maximum allowed total cost (input + assumed output tokens) in a session
 max_session_cost: 500.0
+# Maximum number of requests allowed in a virtual batch when using the direct API
+max_direct_requests: 50
+# Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
+max_direct_ktokens: 200
+# Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
+max_direct_cost: 5.0
 # Maximum number of requests allowed in a batch
 max_batch_requests: 50000
 # Maximum allowed batch size in MB (not MiB)
@@ -100,7 +106,7 @@ max_batch_ktokens: 2000
 # Maximum allowed cost (input + assumed output tokens) of a batch
 max_batch_cost: 50.0
 # Maximum number of unpushed local batches at any one time
-max_unpushed_batches: 10
+max_unpushed_batches: 5
 # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
 max_remote_batches: 100
 # Maximum number of requests across all uploaded remote batches at any one time
