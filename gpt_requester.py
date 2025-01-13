@@ -1216,11 +1216,12 @@ class GPTRequester:
 
 			self.max_direct_batch_id += 1
 			batch.id = self.max_direct_batch_id
-			batch.local_jsonl = 'direct.jsonl'  # Note: Dummy file path that generally does not actually exist
+			batch.local_jsonl = 'direct.jsonl'  # Note: Dummy file path that of course in general does not actually exist
 			if not batch.reasons:
 				batch.reasons.append('No more requests')
 			log.info(f"Created direct batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} virtual batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_direct:.3f} assumed cost, due to reasons: {', '.join(sorted(batch.reasons))}")
-			log.info(f"Executing direct batch {batch.id}...")  # TODO: Either remove this or give it a counterpart down below that says how long execution took etc?
+
+			log.info(f"Executing direct batch {batch.id}...")
 
 			created_time = int(time.time())
 			input_file_id = f'direct-file-input-{batch.id}'
@@ -1273,8 +1274,10 @@ class GPTRequester:
 			)
 			batch.remote.finished = True
 
+			log.info(f"Finished executing direct batch {batch.id}")
+
 			# TODO: Populate batch.true_tokens_cost / batch.metrics (both were initialised to None!)
-			# TODO: Go through entire add/commit/push/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
+			# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
 			result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed = self.process_result_info_map(
 				batch=batch,
 				batch_errors=batch_errors,  # TODO: Always empty list
@@ -1283,8 +1286,6 @@ class GPTRequester:
 				direct_mode=True,
 			)
 
-			# TODO: Trigger retries by appending them to reqs_list
-
 			with utils.AtomicRevertStack() as rstack:  # TODO: Do NOT delay keyboard interrupt across the making of all requests (just way too long, accept the lost requests if exception, an unanticipated exception could easily happen anyway so it wouldn't be a guarantee anyway)
 
 				rstack.callback(setattr, self.S, 'max_direct_batch_id', self.S.max_direct_batch_id)  # TODO: Refactor this to revert_state()?
@@ -1292,6 +1293,7 @@ class GPTRequester:
 
 				yield rstack, result  # TODO: Recall that this can affect whether something is retried or not, and even possibly what payload is retried!!
 
+				# TODO: Trigger retries by appending them to reqs_list
 				# TODO: Add to batch history?! (make sure no validate checks of the history fail because of that)
 
 		# TODO: IMPLEMENT, yield, only process mode, show non-tqdm 10s-like progress as direct requests are completed, dry run (verbose still shows REQUEST), retries! (need to detect and collect retries and append them to local list of requests left to do), resolve reqs to list?, virtual batch-ify up to min(max_batch_requests, max_direct_requests)?
