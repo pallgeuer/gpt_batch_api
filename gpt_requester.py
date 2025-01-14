@@ -34,7 +34,7 @@ from . import tokens, utils
 DRYRUN = '\x1b[38;5;226m[DRYRUN]\x1b[0m '
 DEFAULT_ENDPOINT = '/v1/chat/completions'
 FINISHED_BATCH_STATUSES = {'failed', 'completed', 'expired', 'cancelled'}
-RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {200, 408, 429, 500, 502, 503, 504}
 RETRYABLE_ERROR_CODES = {'batch_expired', 'batch_cancelled'}
 FINISH_REASON_NORMAL = 'stop'  # Finish reason that corresponds to normal response termination
 FINISH_REASONS_FAILED = {'length', 'content_filter'}  # Finish reasons that correpond to a retryable failure
@@ -48,6 +48,10 @@ logging.getLogger('openai').setLevel(logging.WARNING)
 #
 # Common types
 #
+
+# Endpoint error
+class EndpointError(Exception):
+	pass
 
 # GPT request class
 @dataclasses.dataclass(frozen=True)
@@ -674,7 +678,7 @@ class GPTRequester:
 		if self.endpoint is None:
 			self.endpoint = DEFAULT_ENDPOINT
 		log.info(f"Using client base URL '{self.client.base_url}' with endpoint '{self.endpoint}'")
-		if self.client.base_url == 'https://api.openai.com/v1/':
+		if self.client.base_url.host == 'api.openai.com':
 			log.info("View the OpenAI rate/usage limits: https://platform.openai.com/settings/organization/limits")
 			log.info("Manage OpenAI file storage: https://platform.openai.com/storage")
 			log.info("Manage OpenAI batches: https://platform.openai.com/batches")
@@ -1216,7 +1220,7 @@ class GPTRequester:
 
 			self.max_direct_batch_id += 1
 			batch.id = self.max_direct_batch_id
-			batch.local_jsonl = 'direct.jsonl'  # Note: Dummy file path that of course in general does not actually exist
+			batch.local_jsonl = f'direct-{batch.id}.jsonl'  # Note: Dummy file path that of course in general does not actually exist
 			if not batch.reasons:
 				batch.reasons.append('No more requests')
 			log.info(f"Created direct batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} virtual batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_direct:.3f} assumed cost, due to reasons: {', '.join(sorted(batch.reasons))}")
@@ -1884,29 +1888,7 @@ class GPTRequester:
 								err_info = ErrorInfo(fatal=True, type='StatusCode', subtype='MissingNull', msg='Response HTTP status code is missing or null')
 							elif status_code != 200:
 
-								try:
-									status_code_phrase = http.HTTPStatus(status_code).phrase
-								except ValueError:
-									status_code_phrase = 'Unknown Error'
-								msg_parts = [f"Response HTTP {status_code} ({status_code_phrase})"]
-
-								try:
-									response_error = response['body']['error']
-								except (KeyError, TypeError):
-									pass
-								else:
-									if isinstance(response_error, dict):
-										if (response_error_type := response_error.get('type', None)) is not None:
-											msg_parts.append(f' with error of type {response_error_type}')
-											if (response_error_code := response_error.get('code', None)) is not None:
-												msg_parts.append(f'.{response_error_code}')
-											if (response_error_param := response_error.get('param', None)) is not None:
-												msg_parts.append(f"(param='{response_error_param}')")
-										if (response_error_message := response_error.get('message', None)) is not None:
-											msg_parts.append(f': {response_error_message}')
-
-								err_info = ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='StatusCode', subtype='NotOK', data=status_code, msg=''.join(msg_parts))
-
+								err_info = self.construct_status_code_err_info(status_code=status_code, response_error=response.get('body', {}).get('error', None))
 							elif not (resp_body := response.get('body', None)):
 								err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='MissingEmpty', msg='Response body is missing or empty')
 							else:
@@ -1914,7 +1896,7 @@ class GPTRequester:
 								resp_payload: Union[None, openai_chat.ChatCompletion, openai_chat.ParsedChatCompletion[object]] = None
 								resp_model = resp_system_fingerprint = resp_usage = None
 
-								if self.endpoint == '/v1/chat/completions':
+								if self.endpoint == '/v1/chat/completions':  # Chat completions endpoint
 
 									if resp_body.get('object', None) != 'chat.completion':
 										err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ObjectIncorrect', data=resp_body.get('object', None), msg="Chat completion response body object field is not 'chat.completion'")
@@ -1974,7 +1956,7 @@ class GPTRequester:
 												err_info = ErrorInfo(fatal=False, type='MessageChoices', subtype='NoneValid', msg="No valid response message choices")
 
 								else:
-									raise ValueError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
+									raise EndpointError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
 
 								if resp_payload is not None:
 									assert resp_model is not None and resp_system_fingerprint is not None and resp_usage is not None
@@ -2140,6 +2122,32 @@ class GPTRequester:
 						delayed_raise.add(msg="Number of consecutive batch pass failures has reached limit")  # [DELAYED RAISE]
 
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing finished remote batches")
+
+	# Construct an ErrorInfo based on a HTTP status code (must be non-OK, i.e. not 200)
+	@classmethod
+	def construct_status_code_err_info(cls, status_code: int, response_error: Union[dict[str, Any], Any]) -> ErrorInfo:
+		# status_code = Non-OK HTTP status code
+		# response_error = Optional dictionary with details of the response error, potentially containing keys like message, type, code, param (anything other than a dict is ignored)
+		# Returns the constructed ErrorInfo
+
+		assert status_code != 200
+		try:
+			status_code_phrase = http.HTTPStatus(status_code).phrase
+		except ValueError:
+			status_code_phrase = 'Unknown Error'
+		msg_parts = [f"Response HTTP {status_code} ({status_code_phrase})"]
+
+		if isinstance(response_error, dict):
+			if (response_error_type := response_error.get('type', None)) is not None:
+				msg_parts.append(f' with error of type {response_error_type}')
+				if (response_error_code := response_error.get('code', None)) is not None:
+					msg_parts.append(f'.{response_error_code}')
+				if (response_error_param := response_error.get('param', None)) is not None:
+					msg_parts.append(f"(param='{response_error_param}')")
+			if (response_error_message := response_error.get('message', None)) is not None:
+				msg_parts.append(f': {'\\n'.join(format(response_error_message).splitlines())}')
+
+		return ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='StatusCode', subtype='NotOK', data=status_code, msg=''.join(msg_parts))
 
 	# Process a ResultInfo map corresponding to the results of a batch into a BatchResult and associated information required for a state update
 	def process_result_info_map(
