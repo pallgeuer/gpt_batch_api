@@ -1177,8 +1177,8 @@ class GPTRequester:
 		return GPTRequestItem(id=self.max_request_id, req=req, parse_info=parse_info)
 
 	# Generator: Make a number of sequential synchronous requests using the direct API (responses may return as multiple BatchResult instances if there are many requests)
-	def direct_requests(self, reqs: Union[Iterable[Union[GPTRequest, CachedGPTRequest]], GPTRequest, CachedGPTRequest]) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
-		# reqs = The requests to make using the direct API (both raw and cached requests can be provided)
+	def direct_requests(self, reqs: Union[Iterable[Union[GPTRequest, GPTRequestItem, CachedGPTRequest]], GPTRequest, GPTRequestItem, CachedGPTRequest]) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
+		# reqs = The requests to make using the direct API (raw, itemized and/or cached requests can be provided)
 		# The provided requests are auto-grouped into virtual batches based on request number limits
 		# This method is implemented as a generator that returns the results for one virtual batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
@@ -1187,7 +1187,7 @@ class GPTRequester:
 			log.warning("Only-process mode => Not making any direct requests")
 			return
 
-		if isinstance(reqs, (GPTRequest, CachedGPTRequest)):
+		if isinstance(reqs, (GPTRequest, GPTRequestItem, CachedGPTRequest)):
 			reqs_list = [reqs]
 		else:
 			reqs_list = list(reqs)
@@ -1209,7 +1209,9 @@ class GPTRequester:
 
 				cached_req = reqs_list[index]
 				if isinstance(cached_req, GPTRequest):
-					cached_req = CachedGPTRequest.from_item(item=self.create_request_item(req=cached_req), endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
+					cached_req = self.create_request_item(req=cached_req)
+				if isinstance(cached_req, GPTRequestItem):
+					cached_req = CachedGPTRequest.from_item(item=cached_req, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
 				if not isinstance(cached_req, CachedGPTRequest):
 					raise TypeError(f"Expected a CachedGPTRequest but got a {utils.get_class_str(type(cached_req))}")
 

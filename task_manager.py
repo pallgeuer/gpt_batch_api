@@ -831,8 +831,8 @@ class TaskManager:
 		return None
 
 	# Make and process a series of direct requests
-	def direct_requests(self, reqs: Union[Iterable[Union[gpt_requester.GPTRequest, gpt_requester.CachedGPTRequest]], gpt_requester.GPTRequest, gpt_requester.CachedGPTRequest]):
-		# reqs = The requests to make and process using the direct API (both raw and cached requests can be provided)
+	def direct_requests(self, reqs: Union[Iterable[Union[gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]], gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]):
+		# reqs = The requests to make and process using the direct API (raw, itemized and/or cached requests can be provided)
 		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history.
 		for rstack, result in self.GR.direct_requests(reqs=reqs):
 			if self.process_batch_result(result=result, rstack=rstack):
