@@ -1175,8 +1175,12 @@ class GPTRequester:
 		num_reqs = len(reqs_list)
 		log.info(f"Executing {num_reqs} requests using direct API...")
 
+		delayed_raise = utils.DelayedRaise()
+
 		index = 0
 		while index < len(reqs_list):
+
+			delayed_raise.new_section()
 
 			batch = BatchState()
 			cached_reqs: dict[int, CachedGPTRequest] = {}
@@ -1225,84 +1229,179 @@ class GPTRequester:
 				batch.reasons.append('No more requests')
 			log.info(f"Created direct batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} virtual batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_direct:.3f} assumed cost, due to reasons: {', '.join(sorted(batch.reasons))}")
 
-			log.info(f"Executing direct batch {batch.id}...")
+			if self.dryrun:
+				log.warning(f"{DRYRUN}Not executing direct batch {batch.id}")
+			else:
 
-			created_time = int(time.time())
-			input_file_id = f'direct-file-input-{batch.id}'
-			batch.remote = RemoteBatchState(
-				file=openai.types.FileObject(
-					id=input_file_id,
-					bytes=batch.local_jsonl_size,
-					created_at=created_time,
-					filename=batch.local_jsonl,
-					object='file',
-					purpose='batch',
-					status='processed',
-				),
-				batch=openai.types.Batch(
-					id=f'direct_batch_{batch.id}',
-					completion_window='24h',
-					created_at=created_time,
-					endpoint=self.endpoint,
-					input_file_id=input_file_id,
-					object='batch',
-					status='in_progress',
-					expires_at=created_time + 86400,
-					in_progress_at=created_time,
-					metadata=self.generate_batch_metadata(batch=batch),
-				),
-				finished=False,
-			)
+				log.info(f"Executing direct batch {batch.id}...")
 
-			# TODO: Actually EXECUTE!!! (dryrun => What do you actually do if dryrun? Just skip the actual API call and all subsequent code that requires the result?)
-			# TODO: Be as exception-safe as possible (except Exception) when making request API calls to avoid unnecessary failure
-			# TODO: Session/task push statistics
-			# TODO: 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
-			# TODO: Ideally want to produce output so that can refactor/reuse processing code as of 'resp_info = None' (line ~1873), which expects a dict that checks 'response', 'status_code', etc keys --> Refactored code ends with a ResultInfo being returned
-			# TODO: Need own error/log summarizers and delay-raisers (probably across ALL virtual batches, as it makes no sense to do it batch by batch here when we're looping through all samples essentially anyway)
+				created_time = int(time.time())
+				input_file_id = f'direct-file-input-{batch.id}'
+				batch.remote = RemoteBatchState(
+					file=openai.types.FileObject(
+						id=input_file_id,
+						bytes=batch.local_jsonl_size,
+						created_at=created_time,
+						filename=batch.local_jsonl,
+						object='file',
+						purpose='batch',
+						status='processed',
+					),
+					batch=openai.types.Batch(
+						id=f'direct_batch_{batch.id}',
+						completion_window='24h',
+						created_at=created_time,
+						endpoint=self.endpoint,
+						input_file_id=input_file_id,
+						object='batch',
+						status='in_progress',
+						expires_at=created_time + 86400,
+						in_progress_at=created_time,
+						metadata=self.generate_batch_metadata(batch=batch),
+					),
+					finished=False,
+				)
 
-			# TODO: LOG Session/Task push statistics are now BLAH... (CAREFUL: cost_batch vs cost_direct => Should always everywhere report TOTAL cost?? => Change last paragraph of push_batches()?)
+				raise_if_batch_failed = self.session_processed_failed_batches >= self.process_failed_batches >= 0
+				batch_failed = False
 
-			completed_time = int(time.time())
-			batch.remote.status = 'completed'
-			batch.remote.batch.completed_at = completed_time
-			if ANY_REQUESTS_HAD_OPENAI_ERRORS:
-				batch.remote.batch.error_file_id = f'direct-file-error-{batch.id}'
-			batch.remote.batch.finalizing_at = completed_time
-			if ANY_REQUESTS_HAD_NO_OPENAI_ERRORS:
-				batch.remote.batch.output_file_id = f'direct-file-output-{batch.id}'
-			batch.remote.batch.request_counts = openai.types.BatchRequestCounts(
-				completed=TODO,  # TODO: How many requests did not have any openai errors
-				failed=TODO,  # TODO: How many requests had openai errors
-				total=TODO,   # TODO: This should both be the sum of completed and failed, and equal to batch.num_requests actually! (make sure, e.g. logic or assert!)
-			)
-			batch.remote.finished = True
+				result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
+				warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
+				err_resp_retry, err_resp_fatal = [utils.LogSummarizer(log_fn=log.error, show_msgs=self.show_errors) for _ in range(2)]
 
-			log.info(f"Finished executing direct batch {batch.id}")
+				for req_id, req_info in batch.request_info.items():
 
-			# TODO: Populate batch.true_tokens_cost / batch.metrics (both were initialised to None!)
-			# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
-			result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed = self.process_result_info_map(
-				batch=batch,
-				batch_errors=batch_errors,  # TODO: Always empty list
-				result_info_map=result_info_map,
-				req_payload_map=req_payload_map,
-				direct_mode=True,
-			)
+					cached_req = cached_reqs[req_id]
 
-			with utils.AtomicRevertStack() as rstack:  # TODO: Do NOT delay keyboard interrupt across the making of all requests (just way too long, accept the lost requests if exception, an unanticipated exception could easily happen anyway so it wouldn't be a guarantee anyway)
+					resp_info = None
+					warn_infos = []
 
-				rstack.callback(setattr, self.S, 'max_direct_batch_id', self.S.max_direct_batch_id)  # TODO: Refactor this to revert_state()?
-				self.S.max_direct_batch_id = self.max_direct_batch_id
+					try:
 
-				yield rstack, result  # TODO: Recall that this can affect whether something is retried or not, and even possibly what payload is retried!!
+						resp_payload: Union[None, openai_chat.ChatCompletion, openai_chat.ParsedChatCompletion[object]]
+						if self.endpoint == '/v1/chat/completions':  # Chat completions endpoint
+							resp_payload = self.client.post(
+								path='/chat/completions',
+								body=openai_utils.maybe_transform(data=cached_req.item.req.payload, expected_type=openai_chat.CompletionCreateParams),
+								options={},
+								cast_to=openai_chat.ChatCompletion,
+								stream=False,
+								stream_cls=openai.Stream[openai_chat.ChatCompletionChunk],
+							)
+						else:
+							raise EndpointError(f"Cannot post request to unrecognised endpoint: {self.endpoint}")
 
-				# TODO: Trigger retries by appending them to reqs_list
-				# TODO: Add to batch history?! (make sure no validate checks of the history fail because of that)
+					except openai.APIError as e:
+						status_code = getattr(e, 'status_code', 200)
+						if status_code == 200:
+							err_info = ErrorInfo(fatal=True, type='PostError', subtype='APIError', msg=f"Post of request to endpoint '{self.endpoint}' failed with {utils.get_class_str(e)}: {e}")
+						else:
+							err_info = self.construct_status_code_err_info(status_code=status_code, response_error=e.body)
 
-		# TODO: IMPLEMENT, yield, only process mode, show non-tqdm 10s-like progress as direct requests are completed, dry run (verbose still shows REQUEST), retries! (need to detect and collect retries and append them to local list of requests left to do), resolve reqs to list?, virtual batch-ify up to min(max_batch_requests, max_direct_requests)?
+					except Exception as e:  # noqa
+						if isinstance(e, EndpointError):
+							raise
+						else:
+							err_info = ErrorInfo(fatal=True, type='PostError', subtype='Exception', msg=f"Post of request to endpoint '{self.endpoint}' failed with {utils.get_class_str(e)}: {e}")
+
+					else:
+						resp_payload, err_info, resp_model, resp_system_fingerprint, resp_usage = self.process_response_payload(req_info=req_info, req_payload=cached_req.item.req.payload, resp_payload=resp_payload, warn_infos=warn_infos, request_id=None)
+						assert resp_model is not None and resp_system_fingerprint is not None and resp_usage is not None
+						resp_info = ResponseInfo(payload=resp_payload, model=resp_model, system_fingerprint=resp_system_fingerprint, usage=resp_usage)
+
+					for warn_info in warn_infos:
+						warn_resp.log(f"Direct batch {batch.id} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
+
+					if err_info is not None:
+						err_msg = f"Direct batch {batch.id} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
+						if err_info.fatal:
+							err_resp_fatal.log(err_msg)
+							if raise_if_batch_failed:
+								delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")
+							batch_failed = True
+						else:
+							err_resp_retry.log(err_msg)
+
+					assert resp_info is not None or err_info is not None
+					result_info_map[req_id] = ResultInfo(
+						req_id=req_id,
+						req_jsonl_size=cached_req.info.json_size,
+						req_payload=cached_req.item.req.payload,
+						req_info=req_info,
+						resp_info=resp_info,
+						err_info=err_info,
+						warn_infos=warn_infos,
+						retry_counts=True,
+						retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests) and req_info.retry_num < self.max_retries,
+					)
+
+				warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further warnings for direct batch {batch.id} (total {num_total} warnings)")
+				err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further retryable errors for direct batch {batch.id} (total {num_total} errors)")
+				err_resp_fatal.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further fatal errors for direct batch {batch.id} (total {num_total} errors)")
+
+				assert result_info_map.keys() == batch.request_info.keys()
+
+				completed_time = int(time.time())
+				batch.remote.status = 'completed'
+				batch.remote.batch.completed_at = completed_time
+				result_has_err_info = tuple(result_info.err_info is not None for result_info in result_info_map.values())
+				if any(result_has_err_info):
+					batch.remote.batch.error_file_id = f'direct-file-error-{batch.id}'
+				batch.remote.batch.finalizing_at = completed_time
+				if not all(result_has_err_info):
+					batch.remote.batch.output_file_id = f'direct-file-output-{batch.id}'
+				assert len(result_info_map) == batch.num_requests
+				num_err_infos = sum(result_has_err_info)
+				batch.remote.batch.request_counts = openai.types.BatchRequestCounts(
+					completed=len(result_info_map) - num_err_infos,
+					failed=num_err_infos,
+					total=len(result_info_map),
+				)
+				batch.remote.finished = True
+
+				log.info(f"Finished executing direct batch {batch.id}")
+
+				result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed = self.process_result_info_map(
+					batch=batch,
+					batch_errors=[],
+					result_info_map=result_info_map,
+					req_payload_map={req_id: (cached_req.info.json_size, cached_req.item.req.payload) for req_id, cached_req in cached_reqs.items()},
+					direct_mode=True,
+				)
+
+				if delayed_raise.have_section_errors():
+					log.error(f"Aborting processing of direct batch {batch.id} results as errors were encountered (not updating saved state)")
+					continue
+				elif batch_failed:
+					log.warning(f"Processing direct batch {batch.id} results even though the direct batch at least partially failed")
+
+				# TODO: CONTINUE HERE
+				with utils.AtomicRevertStack() as rstack:
+
+					rstack.callback(setattr, self.S, 'max_direct_batch_id', self.S.max_direct_batch_id)  # TODO: Refactor this to revert_state()?
+					self.S.max_direct_batch_id = self.max_direct_batch_id
+
+					# TODO: Populate batch.true_tokens_cost / batch.metrics (both were initialised to None!)
+
+					yield rstack, result  # TODO: Recall that this can affect whether something is retried or not, and even possibly what payload is retried!!
+
+					# TODO: Trigger retries by appending them to reqs_list
+					# TODO: Add to batch history?! (make sure no validate checks of the history fail because of that)
 
 		log.info(f"Executed {num_reqs} requests ({len(reqs_list)} including retries) using direct API")
+		delayed_raise.raise_on_error(base_msg="Encountered errors while processing direct batches")
+
+		# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
+		# TODO: IMPLEMENT, yield, only process mode, show non-tqdm 10s-like progress as direct requests are completed, dry run (verbose still shows REQUEST), retries! (need to detect and collect retries and append them to local list of requests left to do), resolve reqs to list?, virtual batch-ify up to min(max_batch_requests, max_direct_requests)?
+		# TODO: DRY RUN / verbose mode
+		# TODO: Consider: 1) openai API function, 2) call something more internal than the exposed openai API function, 3) Raw requests requests so can get status_code and everything (bad in the sense that I need to do own parsing of error conditions and stuff?)
+		# TODO: Actually EXECUTE!!! (dryrun => What do you actually do if dryrun? Just skip the actual API call and all subsequent code that requires the result?)
+		# TODO: Be as exception-safe as possible (except Exception) when making request API calls to avoid unnecessary failure
+		# TODO: Session/task push statistics
+		# TODO: 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
+		# TODO: Ideally want to produce output so that can refactor/reuse processing code as of 'resp_info = None' (line ~1873), which expects a dict that checks 'response', 'status_code', etc keys --> Refactored code ends with a ResultInfo being returned
+		# TODO: Need own error/log summarizers and delay-raisers (probably across ALL virtual batches, as it makes no sense to do it batch by batch here when we're looping through all samples essentially anyway)
+		# TODO: LOG Session/Task push statistics are now BLAH (at very end?)... (CAREFUL: cost_batch vs cost_direct => Should always everywhere report TOTAL cost?? => Change last paragraph of push_batches()?)
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest) -> int:
@@ -1879,7 +1978,6 @@ class GPTRequester:
 								continue  # [DELAYED RAISE]
 
 							resp_info = None
-							err_info = None
 							warn_infos = []
 
 							if not (response := request_output['response']):
@@ -1887,7 +1985,6 @@ class GPTRequester:
 							elif (status_code := response.get('status_code', None)) is None:
 								err_info = ErrorInfo(fatal=True, type='StatusCode', subtype='MissingNull', msg='Response HTTP status code is missing or null')
 							elif status_code != 200:
-
 								err_info = self.construct_status_code_err_info(status_code=status_code, response_error=response.get('body', {}).get('error', None))
 							elif not (resp_body := response.get('body', None)):
 								err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='MissingEmpty', msg='Response body is missing or empty')
@@ -1908,64 +2005,14 @@ class GPTRequester:
 										except pydantic.ValidationError as e:
 											err_info = ErrorInfo(fatal=True, type='ResponseBody', subtype='ValidationError', msg=f"Validation of chat completion response body as {utils.get_class_str(openai_chat.ChatCompletion)} model failed with {utils.get_class_str(e)}: {e}")
 										else:
-
-											if req_info.parse_info is not None:
-												response_format = self.type_cache.retrieve_type(serial=req_info.parse_info['response_format_type']) if 'response_format_type' in req_info.parse_info else req_payload.get('response_format', openai.NOT_GIVEN)
-												input_tools = req_payload.get('tools', openai.NOT_GIVEN)
-												try:
-													# Converts response payload: openai_chat.ChatCompletion -> openai_chat.ParsedChatCompletion[object]
-													# The 'parsed' field of the choice messages CAN be None (e.g. if response_format is not given or a dict, if the raw choice message content is None, or if the message has a refusal)
-													resp_payload = openai_parsing.parse_chat_completion(response_format=response_format, input_tools=input_tools, chat_completion=resp_payload)
-												except (openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError) as e:
-													err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='FinishReason', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
-												except (json.JSONDecodeError, pydantic.ValidationError) as e:
-													err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='ValidationError', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
-												except Exception as e:  # noqa
-													err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='UnexpectedError', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
-												else:
-													if isinstance(response_format, type):
-														if num_parsed_none := sum(1 for choice in resp_payload.choices if choice.message.parsed is None):
-															err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='ParsedNone', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {num_parsed_none} missing parsed messages (e.g. due to refusals or missing content)")
-														elif unexpected_parsed_types := collections.Counter(utils.get_class_str(type(choice.message.parsed)) for choice in resp_payload.choices if not isinstance(choice.message.parsed, response_format)):
-															err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='ParsedIncorrectType', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {unexpected_parsed_types.total()} parsed messages of incorrect type: {', '.join(sorted(unexpected_parsed_types.keys()))}")
-
-											openai_models.add_request_id(obj=resp_payload, request_id=request_output.get('id', None))
-
-											resp_model = resp_payload.model
-											resp_system_fingerprint = resp_payload.system_fingerprint if resp_payload.system_fingerprint is not None else ''
-											resp_usage = resp_body['usage']
-
-											if len(resp_payload.choices) != req_payload.get('n', 1):
-												warn_infos.append(ErrorInfo(fatal=False, type='MessageChoices', subtype='IncorrectNum', msg=f"Expected {req_payload.get('n', 1)} response message choices but got {len(resp_payload.choices)}"))
-
-											valid_choice = False
-											for c, choice in enumerate(resp_payload.choices):
-												if choice.finish_reason not in FINISH_REASONS_ALL:
-													if err_info is None or not err_info.fatal:
-														err_info = ErrorInfo(fatal=True, type='MessageChoice', subtype='FinishReason', data=c, msg=f"Choice {c} has the unrecognized finish reason '{choice.finish_reason}'")
-												elif choice.finish_reason not in FINISH_REASONS_NOCONTENT and choice.message.content is None and choice.message.refusal is None and choice.message.audio is None:
-													if err_info is None or not err_info.fatal:
-														err_info = ErrorInfo(fatal=True, type='MessageChoice', subtype='NoContent', data=c, msg=f"Choice {c} has no content")
-												elif choice.message.refusal is not None:
-													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoice', subtype='Refusal', data=c, msg=f"Choice {c} got refusal message: {choice.message.refusal}"))
-												elif choice.finish_reason in FINISH_REASONS_FAILED:
-													warn_infos.append(ErrorInfo(fatal=False, type='MessageChoice', subtype='FinishReason', data=c, msg=f"Choice {c} has the failed finish reason '{choice.finish_reason}'"))
-												else:
-													valid_choice = True
-											if resp_payload.choices and not valid_choice and err_info is None:
-												err_info = ErrorInfo(fatal=False, type='MessageChoices', subtype='NoneValid', msg="No valid response message choices")
+											resp_payload, err_info, resp_model, resp_system_fingerprint, resp_usage = self.process_response_payload(req_info=req_info, req_payload=req_payload, resp_payload=resp_payload, warn_infos=warn_infos, request_id=request_output.get('id', None))
 
 								else:
 									raise EndpointError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
 
 								if resp_payload is not None:
 									assert resp_model is not None and resp_system_fingerprint is not None and resp_usage is not None
-									resp_info = ResponseInfo(
-										payload=resp_payload,
-										model=resp_model,
-										system_fingerprint=resp_system_fingerprint,
-										usage=resp_usage,
-									)
+									resp_info = ResponseInfo(payload=resp_payload, model=resp_model, system_fingerprint=resp_system_fingerprint, usage=resp_usage)
 
 							request_error = request_output['error']
 							if request_error is not None:
@@ -2148,6 +2195,73 @@ class GPTRequester:
 				msg_parts.append(f': {'\\n'.join(format(response_error_message).splitlines())}')
 
 		return ErrorInfo(fatal=status_code not in RETRYABLE_STATUS_CODES, type='StatusCode', subtype='NotOK', data=status_code, msg=''.join(msg_parts))
+
+	# Process a response payload in an endpoint-specific manner (e.g. to apply auto-parsing)
+	def process_response_payload(
+		self,
+		req_info: RequestInfo,                            # Request information
+		req_payload: dict[str, Any],                      # Request payload
+		resp_payload: Union[openai_chat.ChatCompletion],  # Validated response payload
+		warn_infos: list[ErrorInfo],                      # List of warnings (mutable)
+		request_id: Optional[str],                        # Request ID to write into the final response payload if the input response payload doesn't specify one (may edit the input response payload if no auto-parsing occurs)
+	) -> tuple[Union[openai_chat.ChatCompletion, openai_chat.ParsedChatCompletion[object]], ErrorInfo, str, str, dict[str, Any]]:
+		# Returns the final response payload (possibly untouched, possibly parsed), what error occurred (if any), the model used for the response, the system fingerprint of the system that generated the response (may be empty string if unknown), and the usage information as a possibly nested dict
+
+		err_info = None
+		if self.endpoint == '/v1/chat/completions':  # Chat completions endpoint
+
+			request_id = getattr(resp_payload, '_request_id', request_id)
+
+			if req_info.parse_info is not None:
+				response_format = self.type_cache.retrieve_type(serial=req_info.parse_info['response_format_type']) if 'response_format_type' in req_info.parse_info else req_payload.get('response_format', openai.NOT_GIVEN)
+				input_tools = req_payload.get('tools', openai.NOT_GIVEN)
+				try:
+					# Converts response payload: openai_chat.ChatCompletion -> openai_chat.ParsedChatCompletion[object]
+					# The 'parsed' field of the choice messages CAN be None (e.g. if response_format is not given or a dict, if the raw choice message content is None, or if the message has a refusal)
+					resp_payload = openai_parsing.parse_chat_completion(response_format=response_format, input_tools=input_tools, chat_completion=resp_payload)
+				except (openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError) as e:
+					err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='FinishReason', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
+				except (json.JSONDecodeError, pydantic.ValidationError) as e:
+					err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='ValidationError', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
+				except Exception as e:  # noqa
+					err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='UnexpectedError', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
+				else:
+					if isinstance(response_format, type):
+						if num_parsed_none := sum(1 for choice in resp_payload.choices if choice.message.parsed is None):
+							err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='ParsedNone', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {num_parsed_none} missing parsed messages (e.g. due to refusals or missing content)")
+						elif unexpected_parsed_types := collections.Counter(utils.get_class_str(type(choice.message.parsed)) for choice in resp_payload.choices if not isinstance(choice.message.parsed, response_format)):
+							err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='ParsedIncorrectType', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {unexpected_parsed_types.total()} parsed messages of incorrect type: {', '.join(sorted(unexpected_parsed_types.keys()))}")
+
+			openai_models.add_request_id(obj=resp_payload, request_id=request_id)
+
+			resp_model = resp_payload.model
+			resp_system_fingerprint = resp_payload.system_fingerprint if resp_payload.system_fingerprint is not None else ''
+			resp_usage = resp_payload.usage.to_dict(mode='json', use_api_names=False)
+
+			if len(resp_payload.choices) != req_payload.get('n', 1):
+				warn_infos.append(ErrorInfo(fatal=False, type='MessageChoices', subtype='IncorrectNum', msg=f"Expected {req_payload.get('n', 1)} response message choices but got {len(resp_payload.choices)}"))
+
+			valid_choice = False
+			for c, choice in enumerate(resp_payload.choices):
+				if choice.finish_reason not in FINISH_REASONS_ALL:
+					if err_info is None or not err_info.fatal:
+						err_info = ErrorInfo(fatal=True, type='MessageChoice', subtype='FinishReason', data=c, msg=f"Choice {c} has the unrecognized finish reason '{choice.finish_reason}'")
+				elif choice.finish_reason not in FINISH_REASONS_NOCONTENT and choice.message.content is None and choice.message.refusal is None and choice.message.audio is None:
+					if err_info is None or not err_info.fatal:
+						err_info = ErrorInfo(fatal=True, type='MessageChoice', subtype='NoContent', data=c, msg=f"Choice {c} has no content")
+				elif choice.message.refusal is not None:
+					warn_infos.append(ErrorInfo(fatal=False, type='MessageChoice', subtype='Refusal', data=c, msg=f"Choice {c} got refusal message: {choice.message.refusal}"))
+				elif choice.finish_reason in FINISH_REASONS_FAILED:
+					warn_infos.append(ErrorInfo(fatal=False, type='MessageChoice', subtype='FinishReason', data=c, msg=f"Choice {c} has the failed finish reason '{choice.finish_reason}'"))
+				else:
+					valid_choice = True
+			if resp_payload.choices and not valid_choice and err_info is None:
+				err_info = ErrorInfo(fatal=False, type='MessageChoices', subtype='NoneValid', msg="No valid response message choices")
+
+		else:
+			raise EndpointError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
+
+		return resp_payload, err_info, resp_model, resp_system_fingerprint, resp_usage
 
 	# Process a ResultInfo map corresponding to the results of a batch into a BatchResult and associated information required for a state update
 	def process_result_info_map(
