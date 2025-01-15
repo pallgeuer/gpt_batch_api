@@ -833,7 +833,7 @@ class TaskManager:
 	# Make and process a series of direct requests
 	def direct_requests(self, reqs: Union[Iterable[gpt_requester.GPTRequest], gpt_requester.GPTRequest]):
 		# reqs = The requests to make and process using the direct API
-		# This method performs direct API calls and updates the task/requester state
+		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history.
 		for rstack, result in self.GR.direct_requests(reqs=reqs):
 			if self.process_batch_result(result=result, rstack=rstack):
 				self.validate_state(clean=False)
@@ -844,7 +844,7 @@ class TaskManager:
 	# Process and clean up after any finished remote batches
 	def process_batches(self) -> int:
 		# Returns the current number of unfinished remote batches (after the remote batch status updates)
-		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history.
+		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history
 		for rstack, result in self.GR.process_batches():
 			if self.process_batch_result(result=result, rstack=rstack):
 				self.validate_state(clean=False)

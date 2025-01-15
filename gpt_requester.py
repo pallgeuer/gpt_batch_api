@@ -81,6 +81,11 @@ class TokensCost:
 		# Returns the total input + output cost for batch mode
 		return self.cost_input_batch + self.cost_output_batch
 
+	@property
+	def cost(self) -> float:
+		# Returns the total input + output cost for all modes together
+		return self.cost_input_direct + self.cost_input_batch + self.cost_output_direct + self.cost_output_batch
+
 	def equals(self, other: TokensCost, cost_tol: float = 1e-7) -> bool:
 		# other = TokensCost instance to compare equality to (while avoiding exact floating point comparison)
 		# cost_tol = Absolute tolerance to permit in cost comparisons
@@ -266,21 +271,22 @@ class BatchState:
 @dataclasses.dataclass
 class PushStats:
 	total_requests: int = 0                                                        # Total number of requests pushed
-	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)  # Total token count and cost pushed
+	total_tokens_cost: TokensCost = dataclasses.field(default_factory=TokensCost)  # Total token count and cost pushed (cost is added only in the fields corresponding to the API that was used in the push)
 
 # State class
 @dataclasses.dataclass
 class State:
-	version: int = 1                                                           # Data format version number
-	endpoint: str = ''                                                         # API endpoint to use (empty string is invalid)
-	queue: QueueState = dataclasses.field(default_factory=QueueState)          # State of the request queue
-	max_batch_id: int = 0                                                      # Maximum batch ID used thus far (0 = No batch ID used so far)
-	max_direct_batch_id: int = 0                                               # Maximum direct batch ID used thus far (0 = No direct batch ID used so far)
-	batches: list[BatchState] = dataclasses.field(default_factory=list)        # States of all batches that are currently pending or in progress (in ascending batch ID order)
-	batch_history: list[BatchState] = dataclasses.field(default_factory=list)  # History of the final states of the completed batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
-	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)  # Task push statistics
-	metrics: Metrics = dataclasses.field(default_factory=Metrics)              # Completed request metrics
-	num_pass_failures: int = 0                                                 # Current number of consecutive batch pass failures
+	version: int = 1                                                            # Data format version number
+	endpoint: str = ''                                                          # API endpoint to use (empty string is invalid)
+	queue: QueueState = dataclasses.field(default_factory=QueueState)           # State of the request queue
+	max_batch_id: int = 0                                                       # Maximum batch ID used thus far (0 = No batch ID used so far)
+	max_direct_batch_id: int = 0                                                # Maximum direct batch ID used thus far (0 = No direct batch ID used so far)
+	batches: list[BatchState] = dataclasses.field(default_factory=list)         # States of all batches that are currently pending or in progress (in ascending batch ID order)
+	batch_history: list[BatchState] = dataclasses.field(default_factory=list)   # History of the final states of the completed batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
+	direct_history: list[BatchState] = dataclasses.field(default_factory=list)  # History of the final states of the completed direct batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
+	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)   # Task push statistics
+	metrics: Metrics = dataclasses.field(default_factory=Metrics)               # Completed request metrics
+	num_pass_failures: int = 0                                                  # Current number of consecutive batch pass failures
 
 # State file class
 class StateFile:
@@ -1087,6 +1093,15 @@ class GPTRequester:
 		if not utils.is_ascending(batch_id_history, strict=True):
 			raise ValueError(f"The batch IDs in the batch history are not strictly ascending: {batch_id_history}")
 
+		for batch in self.S.direct_history:
+			if batch.request_info:
+				raise ValueError(f"The request IDs in historical direct batch {batch.id} were not cleared")
+			if batch.true_tokens_cost is None or batch.metrics is None:
+				raise ValueError(f"Historical direct batch {batch.id} does not have true cost and metrics")
+		direct_id_history = [batch.id for batch in self.S.direct_history]
+		if not utils.is_ascending(direct_id_history, strict=True):
+			raise ValueError(f"The batch IDs in the direct history are not strictly ascending: {direct_id_history}")
+
 		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in (*(batch.request_info.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
 		flat_req_id_bounds = [req_id for req_id_interval in req_id_intervals for req_id in req_id_interval if req_id is not None]
 		if not utils.is_ascending(flat_req_id_bounds, strict=True):
@@ -1113,12 +1128,17 @@ class GPTRequester:
 		log.info(f"There are {self.PQ.pool_len} POOLED requests and {self.PQ.queue_len} QUEUED requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"There are {self.num_unpushed_batches()} unpushed LOCAL batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} input tokens, {self.session_push_stats.total_tokens_cost.cost:.3f} assumed cost")
+		log.info(f"TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} input tokens, {self.S.task_push_stats.total_tokens_cost.cost:.3f} assumed cost")
 		batch_metrics, direct_metrics, all_metrics = self.S.metrics.batch.total, self.S.metrics.direct.total, self.S.metrics.all.total
 		log.info(f"{batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {batch_metrics.true_cost:.3f} true cost")
 		log.info(f"{direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {direct_metrics.true_cost:.3f} true cost")
 		log.info(f"A total of {all_metrics.num_requests} requests have been COMPLETED, entailing {len(all_metrics.models)} models, {len(all_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(all_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := all_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {all_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := all_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {all_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {all_metrics.usage.get('total_tokens', 0)} total tokens, {all_metrics.true_cost:.3f} true cost")
+
+	# Log the push statistics after an update has occurred
+	def log_push_stats(self):
+		log.info(f"Session push statistics are now {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} input tokens, {self.session_push_stats.total_tokens_cost.cost:.3f} assumed cost")
+		log.info(f"Task push statistics are now {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} input tokens, {self.S.task_push_stats.total_tokens_cost.cost:.3f} assumed cost")
 
 	# Create a GPT request item
 	def create_request_item(self, req: GPTRequest) -> GPTRequestItem:
@@ -1208,7 +1228,7 @@ class GPTRequester:
 					break
 
 				req_id = cached_req.item.id
-				batch.local_jsonl_size += cached_req.info.json_size
+				batch.local_jsonl_size += cached_req.info.json_size  # noqa
 				batch.num_requests = next_num_requests
 				assert req_id not in batch.request_info and cached_req.info.tokens_cost.is_valid()
 				batch.request_info[req_id] = RequestInfo(meta=cached_req.item.req.meta, retry_num=cached_req.item.req.retry_num, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
@@ -1269,6 +1289,7 @@ class GPTRequester:
 				warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
 				err_resp_retry, err_resp_fatal = [utils.LogSummarizer(log_fn=log.error, show_msgs=self.show_errors) for _ in range(2)]
 
+				num_api_calls = 0
 				for req_id, req_info in batch.request_info.items():
 
 					cached_req = cached_reqs[req_id]
@@ -1290,6 +1311,7 @@ class GPTRequester:
 							)
 						else:
 							raise EndpointError(f"Cannot post request to unrecognised endpoint: {self.endpoint}")
+						num_api_calls += 1
 
 					except openai.APIError as e:
 						status_code = getattr(e, 'status_code', 200)
@@ -1375,33 +1397,89 @@ class GPTRequester:
 				elif batch_failed:
 					log.warning(f"Processing direct batch {batch.id} results even though the direct batch at least partially failed")
 
-				# TODO: CONTINUE HERE
+				def revert_push_stats(task_requests: int, task_tokens_cost: TokensCost, session_requests: int, session_tokens_cost: TokensCost):
+					self.S.task_push_stats.total_requests = task_requests
+					self.S.task_push_stats.total_tokens_cost = task_tokens_cost
+					self.session_push_stats.total_requests = session_requests
+					self.session_push_stats.total_tokens_cost = session_tokens_cost
+
+				def revert_metrics(api_metrics_direct: APIMetrics, api_metrics_all: APIMetrics):
+					self.S.metrics.all = api_metrics_all
+					self.S.metrics.direct = api_metrics_direct
+
+				def revert_state(max_direct_batch_id: int, direct_history: list[BatchState]):
+					self.S.direct_history[:] = direct_history
+					self.S.max_direct_batch_id = max_direct_batch_id
+
 				with utils.AtomicRevertStack() as rstack:
 
-					rstack.callback(setattr, self.S, 'max_direct_batch_id', self.S.max_direct_batch_id)  # TODO: Refactor this to revert_state()?
+					rstack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_requests=self.session_push_stats.total_requests, session_tokens_cost=self.session_push_stats.total_tokens_cost)
+					self.S.task_push_stats.total_requests += batch.num_requests
+					self.session_push_stats.total_requests += batch.num_requests
+					self.S.task_push_stats.total_tokens_cost = TokensCost(
+						input_tokens=self.S.task_push_stats.total_tokens_cost.input_tokens + batch.tokens_cost.input_tokens,
+						output_tokens=self.S.task_push_stats.total_tokens_cost.output_tokens + batch.tokens_cost.output_tokens,
+						cost_input_direct=self.S.task_push_stats.total_tokens_cost.cost_input_direct + batch.tokens_cost.cost_input_direct,
+						cost_input_batch=self.S.task_push_stats.total_tokens_cost.cost_input_batch,
+						cost_output_direct=self.S.task_push_stats.total_tokens_cost.cost_output_direct + batch.tokens_cost.cost_output_direct,
+						cost_output_batch=self.S.task_push_stats.total_tokens_cost.cost_output_batch,
+					)
+					self.session_push_stats.total_tokens_cost = TokensCost(
+						input_tokens=self.session_push_stats.total_tokens_cost.input_tokens + batch.tokens_cost.input_tokens,
+						output_tokens=self.session_push_stats.total_tokens_cost.output_tokens + batch.tokens_cost.output_tokens,
+						cost_input_direct=self.session_push_stats.total_tokens_cost.cost_input_direct + batch.tokens_cost.cost_input_direct,
+						cost_input_batch=self.session_push_stats.total_tokens_cost.cost_input_batch,
+						cost_output_direct=self.session_push_stats.total_tokens_cost.cost_output_direct + batch.tokens_cost.cost_output_direct,
+						cost_output_batch=self.session_push_stats.total_tokens_cost.cost_output_batch,
+					)
+
+					rstack.callback(revert_metrics, api_metrics_direct=copy.deepcopy(self.S.metrics.direct), api_metrics_all=copy.deepcopy(self.S.metrics.all))
+					batch.true_tokens_cost = batch_true_tokens_cost
+					batch.metrics = APIMetrics()
+					for api_metrics in (batch.metrics, self.S.metrics.direct, self.S.metrics.all):
+						api_metrics.num_api_calls += num_api_calls
+						api_metrics.succeeded.add_metrics(batch_metrics_succeeded)
+						api_metrics.failed.add_metrics(batch_metrics_failed)
+						api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
+
+					yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
+
+					rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy())
 					self.S.max_direct_batch_id = self.max_direct_batch_id
+					batch.request_info = {}
+					self.S.direct_history.append(batch)
+					self.S.direct_history.sort()
 
-					# TODO: Populate batch.true_tokens_cost / batch.metrics (both were initialised to None!)
+					retry_reqs = [GPTRequest(
+						payload=info.req_payload,
+						meta=info.req_info.meta,
+						retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
+					) for info in result.info.values() if info.retry]
 
-					yield rstack, result  # TODO: Recall that this can affect whether something is retried or not, and even possibly what payload is retried!!
+					if retry_reqs:
+						log.info(f"{len(retry_reqs)} requests need to be retried and will be appended to the direct request queue...")
+						reqs_list.extend(retry_reqs)
 
-					# TODO: Trigger retries by appending them to reqs_list
-					# TODO: Add to batch history?! (make sure no validate checks of the history fail because of that)
+					self.validate_state_queue(clean=False)
+					self.state.save(rstack=rstack)
+
+					if batch_failed:
+						rstack.callback(setattr, self, 'session_processed_failed_batches', self.session_processed_failed_batches)
+						self.session_processed_failed_batches += 1
+						log.warning(f"Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
 
 		log.info(f"Executed {num_reqs} requests ({len(reqs_list)} including retries) using direct API")
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing direct batches")
 
+		if reqs_list:
+			self.log_push_stats()
+
 		# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
-		# TODO: IMPLEMENT, yield, only process mode, show non-tqdm 10s-like progress as direct requests are completed, dry run (verbose still shows REQUEST), retries! (need to detect and collect retries and append them to local list of requests left to do), resolve reqs to list?, virtual batch-ify up to min(max_batch_requests, max_direct_requests)?
-		# TODO: DRY RUN / verbose mode
-		# TODO: Consider: 1) openai API function, 2) call something more internal than the exposed openai API function, 3) Raw requests requests so can get status_code and everything (bad in the sense that I need to do own parsing of error conditions and stuff?)
-		# TODO: Actually EXECUTE!!! (dryrun => What do you actually do if dryrun? Just skip the actual API call and all subsequent code that requires the result?)
-		# TODO: Be as exception-safe as possible (except Exception) when making request API calls to avoid unnecessary failure
-		# TODO: Session/task push statistics
-		# TODO: 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
-		# TODO: Ideally want to produce output so that can refactor/reuse processing code as of 'resp_info = None' (line ~1873), which expects a dict that checks 'response', 'status_code', etc keys --> Refactored code ends with a ResultInfo being returned
-		# TODO: Need own error/log summarizers and delay-raisers (probably across ALL virtual batches, as it makes no sense to do it batch by batch here when we're looping through all samples essentially anyway)
-		# TODO: LOG Session/Task push statistics are now BLAH (at very end?)... (CAREFUL: cost_batch vs cost_direct => Should always everywhere report TOTAL cost?? => Change last paragraph of push_batches()?)
+		# TODO: Show non-tqdm 10s-like progress as direct requests are completed / 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
+		# TODO: Verbose mode (still shows request even if dry run!!!)
+		# TODO: What guarantees do you have/need when calling this method? Maybe: Either ALL requests get yielded even if failed (updates task state) OR exception raised OR only_process/dryrun
+		# TODO: Direct -> Respect session/task push limits? would need to raise, or does the step() naturally end when returning early (BAD, irrevocably lost some requests!)
+		# TODO: If using direct mode on committed samples/requests, somehow need to guarantee that they really get done, but sometimes they don't (e.g. task limits)? How to deal with that? Don't want to FAIL them!!
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest) -> int:
@@ -1633,9 +1711,23 @@ class GPTRequester:
 			if batch.remote is None:
 
 				next_task_requests = self.S.task_push_stats.total_requests + batch.num_requests
-				next_task_tokens_cost = self.S.task_push_stats.total_tokens_cost + batch.tokens_cost
 				next_session_requests = self.session_push_stats.total_requests + batch.num_requests
-				next_session_tokens_cost = self.session_push_stats.total_tokens_cost + batch.tokens_cost
+				next_task_tokens_cost = TokensCost(
+					input_tokens=self.S.task_push_stats.total_tokens_cost.input_tokens + batch.tokens_cost.input_tokens,
+					output_tokens=self.S.task_push_stats.total_tokens_cost.output_tokens + batch.tokens_cost.output_tokens,
+					cost_input_direct=self.S.task_push_stats.total_tokens_cost.cost_input_direct,
+					cost_input_batch=self.S.task_push_stats.total_tokens_cost.cost_input_batch + batch.tokens_cost.cost_input_batch,
+					cost_output_direct=self.S.task_push_stats.total_tokens_cost.cost_output_direct,
+					cost_output_batch=self.S.task_push_stats.total_tokens_cost.cost_output_batch + batch.tokens_cost.cost_output_batch,
+				)
+				next_session_tokens_cost = TokensCost(
+					input_tokens=self.session_push_stats.total_tokens_cost.input_tokens + batch.tokens_cost.input_tokens,
+					output_tokens=self.session_push_stats.total_tokens_cost.output_tokens + batch.tokens_cost.output_tokens,
+					cost_input_direct=self.session_push_stats.total_tokens_cost.cost_input_direct,
+					cost_input_batch=self.session_push_stats.total_tokens_cost.cost_input_batch + batch.tokens_cost.cost_input_batch,
+					cost_output_direct=self.session_push_stats.total_tokens_cost.cost_output_direct,
+					cost_output_batch=self.session_push_stats.total_tokens_cost.cost_output_batch + batch.tokens_cost.cost_output_batch,
+				)
 
 				next_remote_batches = remote_batches + 1
 				next_remote_requests = remote_requests + batch.num_requests
@@ -1647,13 +1739,13 @@ class GPTRequester:
 					reasons.add('Max task requests')
 				if next_task_tokens_cost.input_tokens > self.max_task_tokens:
 					reasons.add('Max task tokens')
-				if next_task_tokens_cost.cost_batch > self.max_task_cost:
+				if next_task_tokens_cost.cost > self.max_task_cost:
 					reasons.add('Max task cost')
 				if next_session_requests > self.max_session_requests:
 					reasons.add('Max session requests')
 				if next_session_tokens_cost.input_tokens > self.max_session_tokens:
 					reasons.add('Max session tokens')
-				if next_session_tokens_cost.cost_batch > self.max_session_cost:
+				if next_session_tokens_cost.cost > self.max_session_cost:
 					reasons.add('Max session cost')
 				if next_remote_batches > self.max_remote_batches:
 					reasons.add('Max remote batches')
@@ -1730,8 +1822,7 @@ class GPTRequester:
 		log.info(f"Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
 		if num_pushed > 0:
 			log.info(f"There are {remote_batches} remote batches with a total of {remote_requests} requests, {utils.format_size_si(remote_size)}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
-			log.info(f"Session push statistics are now {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} tokens, {self.session_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
-			log.info(f"Task push statistics are now {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} tokens, {self.S.task_push_stats.total_tokens_cost.cost_batch:.3f} assumed cost")
+			self.log_push_stats()
 
 		return batch_congestion
 
@@ -2410,7 +2501,6 @@ class GPTRequester:
 		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
 	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
-	# TODO: When making isolated single requests, retrieve the client base_url and add the endpoint on the end, omitting a URL path component if one ends with the same one another one starts with? OR something to a similar effect?
 	# TODO: --direct_verbose never|error|warn|always = In DIRECT mode, an option to make it print very verbosely what was sent/received with exact token stats and everything for the initial/trial/debugging stage
 
 	# TODO: Add FORCE DIRECT (--min_batch_requests -1 === --force_direct) mode that can be used to test how the LLM reacts to requests (e.g. approx how many tokens come out on average)
