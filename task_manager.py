@@ -703,6 +703,9 @@ class TaskManager:
 		log.info('-' * 80)
 		log.info(f"Step {self.step_num}...")
 
+		# Initial push of any available local batches in order to get them going while we potentially spend time processing batches
+		self.push_batches()
+
 		while True:
 
 			# Process all finished remote batches (nullifies then ensures condition F, nullifies conditions M and C), and update the task state (nullifies condition G)
@@ -714,11 +717,7 @@ class TaskManager:
 				break
 
 			# Push local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
-			if self.GR.num_unpushed_batches() > 0:
-				log.info("Checking whether any local batches can be pushed to the remote server...")
-				batch_congestion = self.GR.push_batches()  # C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
-			else:
-				batch_congestion = False
+			batch_congestion = self.push_batches()  # Condition C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
 
 			# Generate requests based on the available samples and task state (sets condition G if generation_done is True) and add them to the request pool (nullifies condition P)
 			if batch_congestion:
@@ -729,7 +728,7 @@ class TaskManager:
 			# Commit all pooled requests to the request queue (may also happen intermittently inside generate_requests() call above, ensures condition P, nullifies conditions Q and B)
 			# Create local batches out of the requests in the request queue, including a non-full trailing batch if condition G, otherwise some requests may remain in the queue (ensures condition B, ensures condition Q if G, nullifies conditions L, M and C)
 			# Push any local batches to the server up to the extent of the push limits (ensures condition M, sets condition L if no push limits were reached, nullifies condition R)
-			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
+			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # Condition C = Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
 
 			# Check whether the step and/or entire task is completed (nothing more to do)
 			assert self.GR.PQ.pool_len <= 0 and self.GR.num_finished_batches() <= 0  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
@@ -739,6 +738,17 @@ class TaskManager:
 
 		log.info(f"Finished step {self.step_num}")
 		return not all_done
+
+	# Make and process a series of direct requests
+	def direct_requests(self, reqs: Union[Iterable[Union[gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]], gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]):
+		# reqs = The requests to make and process using the direct API (raw, itemized and/or cached requests can be provided)
+		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history.
+		for rstack, result in self.GR.direct_requests(reqs=reqs):
+			if self.process_batch_result(result=result, rstack=rstack):
+				self.validate_state(clean=False)
+				self.output.validate()
+				self.task.save(rstack=rstack)
+				self.output.save(rstack=rstack)
 
 	# Call the generate requests implementation
 	def call_generate_requests(self) -> bool:
@@ -811,9 +821,8 @@ class TaskManager:
 			if num_unpushed_batches > 0:
 				log.info(f"The total number of unpushed local batches is now {num_unpushed_batches}")
 
-		if push and self.GR.num_unpushed_batches() > 0:
-			log.info("Checking whether any local batches can be pushed to the remote server...")
-			batch_congestion = self.GR.push_batches()
+		if push:
+			batch_congestion = self.push_batches()
 		else:
 			batch_congestion = False
 
@@ -830,16 +839,14 @@ class TaskManager:
 		# Return a set of sample key strings (the set or superset of sample key strings that will be modified by commit_cached_request()), or None (caller must assume all sample keys could be modified)
 		return None
 
-	# Make and process a series of direct requests
-	def direct_requests(self, reqs: Union[Iterable[Union[gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]], gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]):
-		# reqs = The requests to make and process using the direct API (raw, itemized and/or cached requests can be provided)
-		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history.
-		for rstack, result in self.GR.direct_requests(reqs=reqs):
-			if self.process_batch_result(result=result, rstack=rstack):
-				self.validate_state(clean=False)
-				self.output.validate()
-				self.task.save(rstack=rstack)
-				self.output.save(rstack=rstack)
+	# Push as many local batches as possible to the remote server
+	def push_batches(self) -> bool:
+		# Returns whether the batch pipeline is (now) congested
+		if self.GR.num_unpushed_batches() > 0:
+			log.info("Checking whether any local batches can be pushed to the remote server...")
+			return self.GR.push_batches()  # Returns whether no further local batches can be pushed due to push limits having been reached despite there being at least a certain threshold (>=1) of local batches waiting to be pushed
+		else:
+			return False  # Batch congestion is not possible if there are no unpushed local batches at all
 
 	# Process and clean up after any finished remote batches
 	def process_batches(self) -> int:
@@ -858,7 +865,7 @@ class TaskManager:
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 		# result => The result of a batch, to be processed and used to update the task output file and task state
 		# rstack => A RevertStack so that the actions of this method are perfectly reversible in the case of an exception
-		# Returns whether the task state (self.T) or output (self.D) was modified and thus that both need to be saved (failed requests should not affect the task output file at all)
+		# Returns whether either the task state (self.T) or output (self.D) was modified, and thus that both need to be saved (failed requests should NOT affect the task output file at all)
 		#
 		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState).
 		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts.
