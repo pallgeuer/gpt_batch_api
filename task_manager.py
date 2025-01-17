@@ -695,7 +695,7 @@ class TaskManager:
 		# Condition V = Either there are no unpushable batches, or no single direct request is possible anymore for the remainder of the run/session due to session/task limits (nullified whenever a local batch is created)
 		# Condition M = No pushable local batch can currently be pushed, either because there are no pushable local batches or because push limits have been reached (nullified whenever a local batch is created, or a finished remote batch is processed)
 		# Condition R = There are no pushed remote batches that are unfinished (nullified whenever a local batch is pushed)
-		# Condition F = There are no pushed remote batches that are finished yet unprocessed (nullified if self.GR.update_remote_batch_state() is internally called)
+		# Condition F = There are no pushed remote batches that are finished yet unprocessed, or it is a dry run (nullified if self.GR.update_remote_batch_state() is internally called)
 		# Condition C = [Batch pipeline congestion] Condition M, and there are at least some configured threshold (>=1) of (pushable or unpushable) local batches available (nullified whenever a local batch is created, a finished remote batch is processed, or an unpushable batch is processed)
 		#
 		# Condition relations: Q implies B, C implies not[L], C implies M
@@ -738,7 +738,7 @@ class TaskManager:
 			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # Condition C = Returns whether the batch pipeline is congested
 
 			# Check whether the step and/or entire task is completed (nothing more to do)
-			assert self.GR.PQ.pool_len <= 0 and self.GR.num_finished_batches() <= 0  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
+			assert self.GR.PQ.pool_len <= 0 and (self.GR.num_finished_batches() <= 0 or self.GR.dryrun)  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
 			if (self.GR.num_unpushable_batches() <= 0 or direct_limits_reached) and ((generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion):  # Condition E = PBVMF(GQ + C) = V(GQ + C) as conditions P, B, M and F are all guaranteed due to the commands above, by just reaching this line
 				all_done = (self.GR.num_unpushed_batches() <= 0 and self.GR.num_unfinished_batches() <= 0)  # Condition D = ELR = There are no unpushed local batches and no unfinished remote batches (condition E must be met simply by reaching this line)
 				break
@@ -872,7 +872,7 @@ class TaskManager:
 		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history
 		for rstack, result in self.GR.process_batches():
 			self.call_process_batch_result(result=result, rstack=rstack)
-		assert self.GR.num_finished_batches() <= 0  # Condition F
+		assert self.GR.num_finished_batches() <= 0 or self.GR.dryrun  # Condition F
 		return self.GR.num_unfinished_batches()
 
 	# Call the process batch result implementation

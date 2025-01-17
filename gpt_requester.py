@@ -1265,7 +1265,7 @@ class GPTRequester:
 				batch.reasons.append('No more requests')
 			log.info(f"Created direct batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} virtual batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_direct:.3f} assumed cost, due to reasons: {', '.join(sorted(batch.reasons))}")
 
-			if self.dryrun:
+			if self.dryrun:  # TODO: CHANGE this implementation so that it gets as far as PRINTING the requests that would be sent off (self.endpoint AND cached_req.item.req.payload)
 				log.warning(f"{DRYRUN}Not executing direct batch {batch.id}")
 			else:
 
