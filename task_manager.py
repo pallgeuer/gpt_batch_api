@@ -682,7 +682,7 @@ class TaskManager:
 		#
 		# Assumption: The available samples, on the basis of which generate_requests() generates requests, are fixed for the entire session (duration that a task manager is entered), e.g. for an entire call to run()
 		# Assumption: When finished remote batches are processed, they do not have any direct influence on the push limits anymore, and thus on whether the batch pipeline is congested or not
-		# Assumption: Local batches are mutually exclusively either 'direct' (executed via the direct API) or 'pushable' (pushed to the remote server and executed via the batch API), and this never changes for any particular batch during a session
+		# Assumption: Local batches are mutually exclusively either 'pushable' (pushed to the remote server and executed via the batch API) or 'unpushable' (executed via the direct API), and this never changes for any particular batch during a session
 		# Assumption: The task/session/remote/batch/push limits never change during a session
 		#
 		# Conditions are boolean variables that are true if the condition is definitely true, and false if something occurs (nullification) that could POSSIBLY make the condition untrue, and rechecking is needed to have it set to true again (all conditions start as untrue as they are unchecked)
@@ -691,12 +691,12 @@ class TaskManager:
 		# Condition P = The request pool is empty (nullified if requests are added to the pool)
 		# Condition Q = The request queue is empty (nullified if requests from the pool are committed to the queue)
 		# Condition B = The request queue does not have enough requests to automatically trigger a full local batch (nullified if requests from the pool are committed to the queue)
-		# Condition L = There are no unpushed local batches, whether pushable or direct (nullified whenever a local batch is created)
-		# Condition V = Either there are no direct batches, or no single direct request is possible anymore for the remainder of the run/session due to session/task limits (nullified whenever a local batch is created)
+		# Condition L = There are no unpushed local batches, whether pushable or unpushable (nullified whenever a local batch is created)
+		# Condition V = Either there are no unpushable batches, or no single direct request is possible anymore for the remainder of the run/session due to session/task limits (nullified whenever a local batch is created)
 		# Condition M = No pushable local batch can currently be pushed, either because there are no pushable local batches or because push limits have been reached (nullified whenever a local batch is created, or a finished remote batch is processed)
 		# Condition R = There are no pushed remote batches that are unfinished (nullified whenever a local batch is pushed)
 		# Condition F = There are no pushed remote batches that are finished yet unprocessed (nullified if self.GR.update_remote_batch_state() is internally called)
-		# Condition C = [Batch pipeline congestion] Condition M, and there are at least some configured threshold (>=1) of (direct or pushable) local batches available (nullified whenever a local batch is created, a finished remote batch is processed, or a direct batch is processed)
+		# Condition C = [Batch pipeline congestion] Condition M, and there are at least some configured threshold (>=1) of (pushable or unpushable) local batches available (nullified whenever a local batch is created, a finished remote batch is processed, or an unpushable batch is processed)
 		#
 		# Condition relations: Q implies B, C implies not[L], C implies M
 		# Condition for batch pipeline congestion = C = M * "number of unpushed local batches >= threshold" (where we know that threshold >= 1)
@@ -717,11 +717,11 @@ class TaskManager:
 				all_done = False
 				break
 
-			# Push local batches to the server up to the extent of the push limits (ensures condition M, potentially sets conditions L, nullifies condition R)
+			# Push pushable local batches to the server up to the extent of the push limits (ensures condition M, potentially sets conditions L, nullifies condition R)
 			self.push_batches()
 
-			# Process all direct local batches up to the extent possible with the session/task limits (ensures condition V, potentially sets condition L, nullifies condition C), and update the task state (nullifies condition G)
-			num_direct_batches, direct_limit_reached = self.process_direct_batches()  # Returns how many direct batches are still left after processing (will only ever be non-zero if direct_limit_reached, note that condition V = num_direct_batches <= 0 or direct_limit_reached), and whether direct limits were reached
+			# Process all unpushable local batches up to the extent possible with the direct limits (ensures condition V, potentially sets condition L, nullifies condition C), and update the task state (nullifies condition G)
+			num_unpushable_batches, direct_limits_reached = self.process_unpushable_batches()  # Returns how many unpushable batches are still left after processing (will only ever be non-zero if direct_limits_reached, note that condition V = num_unpushable_batches <= 0 or direct_limits_reached), and whether direct limits were reached
 
 			# Determine whether the batch pipeline is congested
 			batch_congestion = (self.GR.num_unpushed_batches() >= self.GR.max_unpushed_batches)  # Condition C = Whether the batch pipeline is congested (condition M is already guaranteed from pushing batches above, so only need to check the second half of condition C)
@@ -734,12 +734,12 @@ class TaskManager:
 
 			# Commit all pooled requests to the request queue (may also happen intermittently inside generate_requests() call above, ensures condition P, nullifies conditions Q and B)
 			# Create local batches out of the requests in the request queue, including a non-full trailing batch if condition G, otherwise some requests may remain in the queue (ensures condition B, ensures condition Q if G, nullifies conditions L, M and C, potentially nullifies condition V)
-			# Push any local batches to the server up to the extent of the push limits (ensures condition M, potentially sets condition L, nullifies condition R)
+			# Push any pushable local batches to the server up to the extent of the push limits (ensures condition M, potentially sets condition L, nullifies condition R)
 			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # Condition C = Returns whether the batch pipeline is congested
 
 			# Check whether the step and/or entire task is completed (nothing more to do)
 			assert self.GR.PQ.pool_len <= 0 and self.GR.num_finished_batches() <= 0  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
-			if (self.GR.num_direct_batches() <= 0 or direct_limit_reached) and ((generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion):  # Condition E = PBVMF(GQ + C) = V(GQ + C) as conditions P, B, M and F are all guaranteed due to the commands above, by just reaching this line
+			if (self.GR.num_unpushable_batches() <= 0 or direct_limits_reached) and ((generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion):  # Condition E = PBVMF(GQ + C) = V(GQ + C) as conditions P, B, M and F are all guaranteed due to the commands above, by just reaching this line
 				all_done = (self.GR.num_unpushed_batches() <= 0 and self.GR.num_unfinished_batches() <= 0)  # Condition D = ELR = There are no unpushed local batches and no unfinished remote batches (condition E must be met simply by reaching this line)
 				break
 
@@ -823,7 +823,7 @@ class TaskManager:
 			log.info(f"Attempting to {'force-' if force_batch else ''}create local batches from {len(self.GR.Q)} available committed requests...")
 			num_unpushed_batches = self.GR.batch_requests(force=force_batch)
 			if num_unpushed_batches > 0:
-				log.info(f"The total number of unpushed local batches is now {num_unpushed_batches} ({self.GR.num_direct_batches()} direct and {self.GR.num_pushable_batches()} pushable)")
+				log.info(f"The total number of unpushed local batches is now {num_unpushed_batches} ({self.GR.num_pushable_batches()} pushable and {self.GR.num_unpushable_batches()} unpushable)")
 
 		if push:
 			batch_congestion = self.push_batches()
@@ -852,19 +852,19 @@ class TaskManager:
 		else:
 			return False  # Batch congestion is not possible if there are no unpushed local batches at all
 
-	# Execute, process and clean up after as many direct local batches as possible (up to direct limits)
-	def process_direct_batches(self) -> tuple[int, bool]:
-		# Returns how many direct local batches are still left after processing, and whether direct limits were reached (irrevocable for the current session)
-		# There will only ever be direct local batches left over if the direct limits were reached
-		direct_limit_reached = False
-		for rstack, result, limited in self.GR.process_direct_batches():
+	# Execute, process and clean up after as many unpushable local batches as possible (up to direct limits)
+	def process_unpushable_batches(self) -> tuple[int, bool]:
+		# Returns how many unpushable local batches are still left after processing, and whether direct limits were reached (irrevocable for the current session)
+		# There will only ever be unpushable local batches left over if the direct limits were reached
+		direct_limits_reached = False
+		for rstack, result, limited in self.GR.process_unpushable_batches():
 			self.call_process_batch_result(result=result, rstack=rstack)
 			if limited:
-				direct_limit_reached = True
-			assert direct_limit_reached == limited
-		num_direct_batches = self.GR.num_direct_batches()
-		assert num_direct_batches <= 0 or direct_limit_reached
-		return num_direct_batches, direct_limit_reached
+				direct_limits_reached = True
+			assert direct_limits_reached == limited
+		num_unpushable_batches = self.GR.num_unpushable_batches()
+		assert num_unpushable_batches <= 0 or direct_limits_reached  # Condition V
+		return num_unpushable_batches, direct_limits_reached
 
 	# Process and clean up after any finished remote batches
 	def process_batches(self) -> int:
