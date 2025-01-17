@@ -823,7 +823,7 @@ class TaskManager:
 			log.info(f"Attempting to {'force-' if force_batch else ''}create local batches from {len(self.GR.Q)} available committed requests...")
 			num_unpushed_batches = self.GR.batch_requests(force=force_batch)
 			if num_unpushed_batches > 0:
-				log.info(f"The total number of unpushed local batches is now {num_unpushed_batches}")
+				log.info(f"The total number of unpushed local batches is now {num_unpushed_batches} ({self.GR.num_direct_batches()} direct and {self.GR.num_pushable_batches()} pushable)")
 
 		if push:
 			batch_congestion = self.push_batches()

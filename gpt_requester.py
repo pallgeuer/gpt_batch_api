@@ -1138,7 +1138,7 @@ class GPTRequester:
 		local_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is None)
 		remote_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.S.batches if batch.remote is not None)
 		log.info(f"There are {self.PQ.pool_len} POOLED requests and {self.PQ.queue_len} QUEUED requests with a combined total of {self.PQ.pool_len + self.PQ.queue_len} requests, {utils.format_size_si(sum(cached_req.info.json_size for cached_req in self.P) + sum(cached_req.info.json_size for cached_req in self.Q if cached_req is not None))}, {pool_queue_tokens_cost.input_tokens} tokens, {pool_queue_tokens_cost.cost_batch:.3f} assumed cost")
-		log.info(f"There are {self.num_unpushed_batches()} unpushed LOCAL batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
+		log.info(f"There are {self.num_unpushed_batches()} unpushed LOCAL batches ({self.num_direct_batches()} direct and {self.num_pushable_batches()} pushable) with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is None))}, {local_tokens_cost.input_tokens} tokens, {local_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a combined total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None)} requests, {utils.format_size_si(sum(batch.local_jsonl_size for batch in self.S.batches if batch.remote is not None))}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
 		log.info(f"SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} input tokens, {self.session_push_stats.total_tokens_cost.cost:.3f} assumed cost")
 		log.info(f"TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} input tokens, {self.S.task_push_stats.total_tokens_cost.cost:.3f} assumed cost")
@@ -1772,6 +1772,8 @@ class GPTRequester:
 				next_remote_tokens_cost = remote_tokens_cost + batch.tokens_cost
 
 				reasons = set()
+				if self.batch_is_direct(batch=batch):
+					reasons.add('Direct batch')
 				if next_task_requests > self.max_task_requests:
 					reasons.add('Max task requests')
 				if next_task_tokens_cost.input_tokens > self.max_task_tokens:
@@ -1849,14 +1851,18 @@ class GPTRequester:
 						num_pushed += 1
 
 		num_unpushed_batches = self.num_unpushed_batches()
+		num_direct_batches = self.num_direct_batches()
+		num_pushable_batches = self.num_pushable_batches()
 		num_unfinished_batches = self.num_unfinished_batches()
 		num_finished_batches = self.num_finished_batches()
+		assert num_direct_batches + num_pushable_batches == num_unpushed_batches
 		assert num_unfinished_batches + num_finished_batches == remote_batches
+
 		batch_congestion = (num_unpushed_batches >= self.max_unpushed_batches)  # Condition C = Whether the batch pipeline is congested (condition M is already guaranteed from pushing pushable batches above, so only need to check the second half of condition C)
 
 		if reasons_nopush:
 			log.info(f"Reasons encountered not to push certain batches right now: {', '.join(sorted(reasons_nopush))}")
-		log.info(f"Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local, {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
+		log.info(f"Pushed {num_pushed} batch(es) resulting in {num_unpushed_batches} unpushed local ({num_direct_batches} direct and {num_pushable_batches} pushable), {num_unfinished_batches} unfinished remote, and {num_finished_batches} finished remote batches{' [CONGESTED]' if batch_congestion else ''}")
 		if num_pushed > 0:
 			log.info(f"There are {remote_batches} remote batches with a total of {remote_requests} requests, {utils.format_size_si(remote_size)}, {remote_tokens_cost.input_tokens} tokens, {remote_tokens_cost.cost_batch:.3f} assumed cost")
 			self.log_push_stats()
