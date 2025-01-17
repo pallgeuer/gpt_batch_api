@@ -1819,7 +1819,7 @@ class GPTRequester:
 		num_unfinished_batches = self.num_unfinished_batches()
 		num_finished_batches = self.num_finished_batches()
 		assert num_unfinished_batches + num_finished_batches == remote_batches
-		batch_congestion = (num_unpushed_batches >= self.max_unpushed_batches)
+		batch_congestion = (num_unpushed_batches >= self.max_unpushed_batches)  # Condition C = Whether the batch pipeline is congested (condition M is already guaranteed from pushing pushable batches above, so only need to check the second half of condition C)
 
 		if reasons_nopush:
 			log.info(f"Reasons encountered not to push certain batches right now: {', '.join(sorted(reasons_nopush))}")
