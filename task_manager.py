@@ -721,7 +721,7 @@ class TaskManager:
 			self.push_batches()
 
 			# Process all direct local batches up to the extent possible with the session/task limits (ensures condition V, potentially sets condition L, nullifies condition C), and update the task state (nullifies condition G)
-			num_direct_batches_left, direct_limit_reached = self.process_direct_batches()  # Returns how many direct batches are still left after processing (will only ever be non-zero if direct_limit_reached, note that condition V = num_direct_batches_left <= 0 or direct_limit_reached)
+			num_direct_batches, direct_limit_reached = self.process_direct_batches()  # Returns how many direct batches are still left after processing (will only ever be non-zero if direct_limit_reached, note that condition V = num_direct_batches <= 0 or direct_limit_reached), and whether direct limits were reached
 
 			# Determine whether the batch pipeline is congested
 			batch_congestion = (self.GR.num_unpushed_batches() >= self.GR.max_unpushed_batches)  # Condition C = Whether the batch pipeline is congested (condition M is already guaranteed from pushing batches above, so only need to check the second half of condition C)
@@ -843,7 +843,7 @@ class TaskManager:
 		# Return a set of sample key strings (the set or superset of sample key strings that will be modified by commit_cached_request()), or None (caller must assume all sample keys could be modified)
 		return None
 
-	# Push as many local batches as possible to the remote server
+	# Push as many pushable local batches as possible to the remote server
 	def push_batches(self) -> bool:
 		# Returns whether the batch pipeline is (now) congested
 		if self.GR.num_unpushed_batches() > 0:
@@ -851,6 +851,20 @@ class TaskManager:
 			return self.GR.push_batches()  # Returns whether the batch pipeline is congested
 		else:
 			return False  # Batch congestion is not possible if there are no unpushed local batches at all
+
+	# Execute, process and clean up after as many direct local batches as possible (up to direct limits)
+	def process_direct_batches(self) -> tuple[int, bool]:
+		# Returns how many direct local batches are still left after processing, and whether direct limits were reached (irrevocable for the current session)
+		# There will only ever be direct local batches left over if the direct limits were reached
+		direct_limit_reached = False
+		for rstack, result, limited in self.GR.process_direct_batches():
+			self.call_process_batch_result(result=result, rstack=rstack)
+			if limited:
+				direct_limit_reached = True
+			assert direct_limit_reached == limited
+		num_direct_batches = self.GR.num_direct_batches()
+		assert num_direct_batches <= 0 or direct_limit_reached
+		return num_direct_batches, direct_limit_reached
 
 	# Process and clean up after any finished remote batches
 	def process_batches(self) -> int:

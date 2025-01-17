@@ -1722,7 +1722,7 @@ class GPTRequester:
 			state_file=self.state.path,
 		)
 
-	# Push as many batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
+	# Push as many pushable batches as possible for remote processing and return whether the batch pipeline is currently congested (i.e. a certain number of batches are complete and pending but cannot be pushed yet due to thresholds)
 	def push_batches(self) -> bool:
 		# Returns whether the batch pipeline is (now) congested
 		# Note: Call can be skipped if self.num_unpushed_batches() <= 0
