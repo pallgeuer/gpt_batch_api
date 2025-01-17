@@ -423,7 +423,7 @@ class PoolQueue:
 	@property
 	def queue_len(self) -> int:
 		# Returns the number of requests in the request queue
-		return sum(1 for cached_req in self.queue if cached_req is not None)
+		return sum(cached_req is not None for cached_req in self.queue)
 
 	def queue_request_id_meta(self) -> dict[int, Optional[dict[str, Any]]]:
 		# Returns an ID to metadata map for the current state of the request queue
@@ -621,6 +621,7 @@ class GPTRequester:
 		max_direct_requests: int = 50,                        # Maximum number of requests allowed in a virtual batch when using the direct API
 		max_direct_ktokens: int = 200,                        # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
 		max_direct_cost: float = 5.0,                         # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
+		min_batch_requests: int = 50,                         # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
 		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
 		max_batch_ktokens: int = 2000,                        # Maximum number of input tokens (in units of 1000) to include in a single batch
@@ -633,6 +634,7 @@ class GPTRequester:
 		max_remote_cost: float = 150.0,                       # Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time
 		max_mb_safety: float = 1.01,                          # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
 		max_token_safety: float = 1.05,                       # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
+		force_direct: bool = False,                           # Whether to force all batches to be executed using the direct API instead of the batch API
 
 		warn_predicted_input_factor: float = 1.2,             # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
 		warn_assumed_completion_factor: float = 2.0,          # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
@@ -761,6 +763,9 @@ class GPTRequester:
 		self.max_direct_cost = max_direct_cost
 		if self.max_direct_cost < 0.01:
 			raise ValueError(f"Maximum direct virtual batch cost must be at least 0.01: {self.max_direct_cost}")
+		self.min_batch_requests = min_batch_requests
+		if self.min_batch_requests < 0:
+			raise ValueError(f"Minimum number of requests in a remote batch must be at least 0: {self.min_batch_requests}")
 		self.max_batch_requests = max_batch_requests
 		if self.max_batch_requests < 1:
 			raise ValueError(f"Maximum number of requests in a batch must be at least 1: {self.max_batch_requests}")
@@ -797,11 +802,16 @@ class GPTRequester:
 		self.max_token_safety = max_token_safety
 		if self.max_token_safety < 1.0:
 			raise ValueError(f"The number of tokens safety factor must be at least 1.0: {self.max_token_safety:.3g}")
+		self.force_direct = force_direct
 
 		log.info(f"Using safety factors (SF) of {self.max_mb_safety:.3g} for MB size, {self.max_token_safety:.3g} for tokens")
 		log.info(f"Using direct batch limits of {self.max_direct_requests} requests, {self.max_direct_tokens} tokens, {self.max_direct_cost:.3f} assumed cost")
 		log.info(f"Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens, {self.max_batch_cost:.3f} assumed cost")
 		log.info(f"Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} assumed cost")
+		if self.force_direct:
+			log.info("Using direct API for all batches (FORCED)")
+		elif self.min_batch_requests > 0:
+			log.info(f"Using direct API for all batches strictly under {self.min_batch_requests} requests in size")
 		log.info(f"Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
 		log.info(f"Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens, {self.max_session_cost:.3f} assumed cost per session")
 		log.info(f"Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} assumed cost per task")
@@ -926,6 +936,7 @@ class GPTRequester:
 		add_argument(name='max_direct_requests', metavar='NUM', help="Maximum number of requests allowed in a virtual batch when using the direct API")
 		add_argument(name='max_direct_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API")
 		add_argument(name='max_direct_cost', metavar='COST', help="Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API")
+		add_argument(name='min_batch_requests', metavar='NUM', help="Minimum number of requests in a batch in order to use the batch API (otherwise fall back to the direct API)")
 		add_argument(name='max_batch_requests', metavar='NUM', help="Maximum number of requests allowed in a batch")
 		add_argument(name='max_batch_mb', metavar='MB', unit='MB', help="Maximum allowed batch size in MB (not MiB)")
 		add_argument(name='max_batch_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum number of input tokens (in units of 1000) to include in a single batch")
@@ -938,6 +949,7 @@ class GPTRequester:
 		add_argument(name='max_remote_cost', metavar='COST', help="Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time")
 		add_argument(name='max_mb_safety', metavar='FACTOR', help="Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)")
 		add_argument(name='max_token_safety', metavar='FACTOR', help="Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)")
+		add_argument(name='force_direct', help="Whether to force all batches to be executed using the direct API instead of the batch API")
 
 		add_argument(name='warn_predicted_input_factor', metavar='FACTOR', help="Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
 		add_argument(name='warn_assumed_completion_factor', metavar='FACTOR', help="Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)")
@@ -1571,7 +1583,7 @@ class GPTRequester:
 
 			num_unpushed_batches = self.num_unpushed_batches()
 			if num_unpushed_batches >= self.max_unpushed_batches:
-				log.info(f"Not batching {sum(1 for cached_req in itertools.islice(self.Q, index, None) if cached_req is not None)} requests left in the request queue as there are already {num_unpushed_batches} unpushed batches (max {self.max_unpushed_batches} allowed)")
+				log.info(f"Not batching {sum(cached_req is not None for cached_req in itertools.islice(self.Q, index, None))} requests left in the request queue as there are already {num_unpushed_batches} unpushed batches (max {self.max_unpushed_batches} allowed)")
 				break
 
 			batch_index = index
@@ -1667,6 +1679,27 @@ class GPTRequester:
 			log.info(f"The {batch.num_requests} available requests with {utils.format_size_si(batch.local_jsonl_size)}, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost are currently not enough to trigger a batch")
 
 		return self.num_unpushed_batches()
+
+	# Check whether a batch is direct or pushable
+	def batch_is_direct(self, batch: BatchState) -> bool:
+		# batch = The batch in question
+		# Return whether the batch is direct (True = Direct API) or pushable (False = Batch API)
+		return self.force_direct or batch.num_requests < self.min_batch_requests
+
+	# Retrieve the number of unpushed local batches
+	def num_unpushed_batches(self) -> int:
+		# Returns the current number of unpushed local batches
+		return sum(batch.remote is None for batch in self.S.batches)
+
+	# Retrieve the number of unpushed local batches that are direct
+	def num_direct_batches(self) -> int:
+		# Returns the current number of unpushed local batches that are direct
+		return sum(batch.remote is None and self.batch_is_direct(batch=batch) for batch in self.S.batches)
+
+	# Retrieve the number of unpushed local batches that are pushable
+	def num_pushable_batches(self) -> int:
+		# Returns the current number of unpushed local batches that are pushable
+		return sum(batch.remote is None and not self.batch_is_direct(batch=batch) for batch in self.S.batches)
 
 	# Generate a string metadata dict to pass along with a batch to the remote
 	def generate_batch_metadata(self, batch: BatchState) -> dict[str, str]:
@@ -1865,15 +1898,20 @@ class GPTRequester:
 			except Exception as e:  # noqa
 				log.error(f"Failed to cancel remote batch '{batch_id}' due to {utils.get_class_str(e)}: {e}")
 
-	# Retrieve the number of unpushed local batches
-	def num_unpushed_batches(self) -> int:
-		# Returns the current number of unpushed local batches
-		return sum(1 for batch in self.S.batches if batch.remote is None)
-
 	# Return how many remote batches there are
 	def num_remote_batches(self) -> int:
 		# Returns the current number of remote batches (whether finished or unfinished)
-		return sum(1 for batch in self.S.batches if batch.remote is not None)
+		return sum(batch.remote is not None for batch in self.S.batches)
+
+	# Return how many unfinished remote batches there are according to the latest local state of information (see update_remote_batch_state())
+	def num_unfinished_batches(self) -> int:
+		# Returns the current number of unfinished remote batches
+		return sum(batch.remote is not None and not batch.remote.finished for batch in self.S.batches)
+
+	# Return how many finished remote batches there are according to the latest local state of information (see update_remote_batch_state())
+	def num_finished_batches(self) -> int:
+		# Returns the current number of finished remote batches
+		return sum(batch.remote is not None and batch.remote.finished for batch in self.S.batches)
 
 	# Update the current state of all pushed remote batches (unless dry run)
 	def update_remote_batch_state(self, only_check_finished: bool, log_save: bool) -> tuple[bool, int]:
@@ -1921,16 +1959,6 @@ class GPTRequester:
 				self.state.save(rstack=rstack, show_log=log_save)
 
 		return any_finished, num_status_updates
-
-	# Return how many unfinished remote batches there are according to the latest local state of information (see update_remote_batch_state())
-	def num_unfinished_batches(self) -> int:
-		# Returns the current number of unfinished remote batches
-		return sum(1 for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)
-
-	# Return how many finished remote batches there are according to the latest local state of information (see update_remote_batch_state())
-	def num_finished_batches(self) -> int:
-		# Returns the current number of finished remote batches
-		return sum(1 for batch in self.S.batches if batch.remote is not None and batch.remote.finished)
 
 	# Wait until there is at least one finished yet unprocessed remote batch or no more unfinished remote batches (unless dry run)
 	def wait_for_batches(self):
@@ -2322,7 +2350,7 @@ class GPTRequester:
 					err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='UnexpectedError', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format) if openai_utils.is_given(response_format) else 'no'} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools failed with {utils.get_class_str(e)}: {e}")
 				else:
 					if isinstance(response_format, type):
-						if num_parsed_none := sum(1 for choice in resp_payload.choices if choice.message.parsed is None):
+						if num_parsed_none := sum(choice.message.parsed is None for choice in resp_payload.choices):
 							err_info = ErrorInfo(fatal=False, type='AutoParse', subtype='ParsedNone', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {num_parsed_none} missing parsed messages (e.g. due to refusals or missing content)")
 						elif unexpected_parsed_types := collections.Counter(utils.get_class_str(type(choice.message.parsed)) for choice in resp_payload.choices if not isinstance(choice.message.parsed, response_format)):
 							err_info = ErrorInfo(fatal=True, type='AutoParse', subtype='ParsedIncorrectType', msg=f"Auto-parsing of chat completion response as {utils.get_class_str(response_format)} format with {len(input_tools) if openai_utils.is_given(input_tools) else 'no'} tools yielded {unexpected_parsed_types.total()} parsed messages of incorrect type: {', '.join(sorted(unexpected_parsed_types.keys()))}")

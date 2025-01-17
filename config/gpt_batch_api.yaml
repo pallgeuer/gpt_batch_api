@@ -97,6 +97,8 @@ max_direct_requests: 50
 max_direct_ktokens: 200
 # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
 max_direct_cost: 5.0
+# Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
+min_batch_requests: 50
 # Maximum number of requests allowed in a batch
 max_batch_requests: 50000
 # Maximum allowed batch size in MB (not MiB)
@@ -121,6 +123,8 @@ max_remote_cost: 150.0
 max_mb_safety: 1.01
 # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
 max_token_safety: 1.05
+# Whether to force all batches to be executed using the direct API instead of the batch API
+force_direct: False
 
 # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
 warn_predicted_input_factor: 1.2
