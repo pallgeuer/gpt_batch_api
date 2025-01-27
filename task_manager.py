@@ -856,12 +856,15 @@ class TaskManager:
 	def process_unpushable_batches(self) -> tuple[int, bool]:
 		# Returns how many unpushable local batches are still left after processing, and whether direct limits were reached (irrevocable for the current session)
 		# There will only ever be unpushable local batches left over if the direct limits were reached
+
 		direct_limits_reached = False
-		for rstack, result, limited in self.GR.process_unpushable_batches():
-			self.call_process_batch_result(result=result, rstack=rstack)
+		for rstack, result, limited in self.GR.process_unpushable_batches():  # Note: If only-process mode or dry run, and there is at least one unpushable batch, then at least one item with limited=True is expected
+			if rstack is not None and result is not None:
+				self.call_process_batch_result(result=result, rstack=rstack)
 			if limited:
 				direct_limits_reached = True
-			assert direct_limits_reached == limited
+			assert direct_limits_reached == limited  # Once direct limits have been reached, there should be no way back (irrevocable)
+
 		num_unpushable_batches = self.GR.num_unpushable_batches()
 		assert num_unpushable_batches <= 0 or direct_limits_reached  # Condition V
 		return num_unpushable_batches, direct_limits_reached
