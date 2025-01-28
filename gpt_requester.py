@@ -1686,6 +1686,40 @@ class GPTRequester:
 
 		return self.num_unpushed_batches()
 
+	# Load the local JSONL file of a batch
+	def load_local_jsonl(self, batch: BatchState) -> dict[int, tuple[int, dict[str, Any]]]:
+		# batch = Batch to load the local JSONL file of
+		# Returns a map of Request ID --> (Request JSONL size, Request payload), whose keys are guaranteed to exactly match batch.request_info
+
+		log.info(f"Loading batch {batch.id} input JSONL: {batch.local_jsonl}")
+
+		req_payload_map: dict[int, tuple[int, dict[str, Any]]] = {}
+		with open(batch.local_jsonl, 'rb') as file:
+			file_size = utils.get_file_size(file)
+			try:
+				for line_bytes in file:
+					req = json.loads(line_bytes.decode(encoding='utf-8'))
+					if req['url'] != self.endpoint:
+						raise ValueError(f"Endpoint mismatch: {req['url']} vs {self.endpoint}")
+					req_id = int(re.fullmatch(r'id-([0-9]+)', req['custom_id']).group(1))
+					if req_id in req_payload_map:
+						raise ValueError(f"Duplicate request ID: {req_id}")
+					req_payload_map[req_id] = (len(line_bytes), req['body'])
+			except (json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError) as e:
+				raise ValueError("Unexpected input JSONL data") from e
+
+		total_line_size = sum(req_jsonl_size for req_jsonl_size, req_payload in req_payload_map.values())
+		if len(req_payload_map) != batch.num_requests:
+			raise ValueError(f"Input JSONL has unexpected number of requests: {len(req_payload_map)} vs {batch.num_requests}")
+		elif req_payload_map.keys() != batch.request_info.keys():
+			raise ValueError(f"Input JSONL does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(req_payload_map.keys() ^ batch.request_info.keys())}")
+		elif not file_size == total_line_size == batch.local_jsonl_size:
+			raise ValueError(f"Input JSONL has unexpected file size: {file_size} vs {total_line_size} vs {batch.local_jsonl_size}")
+
+		log.info(f"Loaded {batch.num_requests} requests of endpoint '{self.endpoint}' from batch {batch.id} input JSONL of size {utils.format_size_si(batch.local_jsonl_size)}")
+
+		return req_payload_map
+
 	# Check whether a batch is pushable
 	def batch_is_pushable(self, batch: BatchState) -> bool:
 		# batch = The batch in question
@@ -2041,29 +2075,7 @@ class GPTRequester:
 						# [COVERED] If this occurs then we just log an error, and continue trying to parse the batch anyway and deal with any errors that we encounter doing that, because that's the only thing that actually matters (e.g. expired and cancelled batches can still have valid results)
 						(log.error if batch_errors else log.warning)(f"Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
 
-					log.info(f"Loading batch {batch.id} input JSONL: {batch.local_jsonl}")
-					req_payload_map: dict[int, tuple[int, dict[str, Any]]] = {}  # Maps: Request ID --> (Request JSONL size, Request payload)
-					with open(batch.local_jsonl, 'rb') as file:
-						file_size = utils.get_file_size(file)
-						try:
-							for line_bytes in file:
-								req = json.loads(line_bytes.decode(encoding='utf-8'))
-								if req['url'] != self.endpoint:
-									raise ValueError(f"Endpoint mismatch: {req['url']} vs {self.endpoint}")
-								req_id = int(re.fullmatch(r'id-([0-9]+)', req['custom_id']).group(1))
-								if req_id in req_payload_map:
-									raise ValueError(f"Duplicate request ID: {req_id}")
-								req_payload_map[req_id] = (len(line_bytes), req['body'])
-						except (json.JSONDecodeError, TypeError, ValueError, KeyError, AttributeError) as e:
-							raise ValueError("Unexpected input JSONL data") from e
-					total_line_size = sum(req_jsonl_size for req_jsonl_size, req_payload in req_payload_map.values())
-					if len(req_payload_map) != batch.num_requests:
-						raise ValueError(f"Input JSONL has unexpected number of requests: {len(req_payload_map)} vs {batch.num_requests}")
-					elif req_payload_map.keys() != batch.request_info.keys():
-						raise ValueError(f"Input JSONL does not contain exactly the expected request IDs, with disagreement in the keys: {sorted(req_payload_map.keys() ^ batch.request_info.keys())}")
-					elif not file_size == total_line_size == batch.local_jsonl_size:
-						raise ValueError(f"Input JSONL has unexpected file size: {file_size} vs {total_line_size} vs {batch.local_jsonl_size}")
-					log.info(f"Loaded {batch.num_requests} requests of endpoint '{self.endpoint}' from batch {batch.id} input JSONL of size {utils.format_size_si(batch.local_jsonl_size)}")
+					req_payload_map = self.load_local_jsonl(batch=batch)
 
 					result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
 					warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
