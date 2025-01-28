@@ -1216,13 +1216,26 @@ class GPTRequester:
 		# Note: Calling close() prior to complete iteration or executing break or return statements while iterating in a for-loop causes a GeneratorExit exception to internally be raised, which makes the currently active RevertStack unwind with an exception and thereby revert all currently performed work!
 		# TODO: Ensure the DOC above is the ACTUAL behaviour
 
-		# TODO: If EMPTY reqs then MUST output a single dud BatchResult yield (plus associated retry_reqs) (limited=False as NOT at least one request that couldn't be finished) --> Try to NOT make this a special case, for rstack, guarantees of state SAVE preserved, retry_reqs, etc...
 		# TODO: Limited is true ONLY if only_process mode OR it was NOT possible to execute at least ONE request (or retry)
 		# TODO: yield_retry_reqs => Yield a fourth tuple element Optional[list[CachedGPTRequest]] -> retry_reqs must be GUARANTEED if activated (to make sure SAVEs occur)
 		# TODO: This must internally stop iterating (and LOG a warning) as SOON as it reaches direct limits (and that virtual batch has been finished up, taking it to the very limit)
 		# TODO: Dry run should have direct limits reached always False, and NO trailing limited=True or so! (unlike previously thought)
 		# TODO: LOG when direct limits are reached! (warning)
 		# TODO: Go through and clear out text file (more TODOs and checks and ideas)
+		# TODO: REQUIRE:
+		#  - direct_requests(yield_retry_reqs=True): Returns result.info for all passed reqs and emitted retry_reqs in yields with retry_reqs is not None OR limited=True yielded at some point OR dryrun (last is NOTTTT limited=True anyway) OR Raise exception
+		#  - direct_requests should respect session/task limits EVEN if dryrun
+		#  - Requests need to increment max_request_id
+		#  - Retries need to count towards session/task limits
+		#  - Every non-retry with a batch result IS followed by a retry with the same BatchResult
+		#  - dry run just yields (None, None, False, None) for every virtual batch
+		#  - All internal loops must break on first limited=True
+		# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
+		# TODO: Show non-tqdm 10s-like progress as direct requests are completed / 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
+		# TODO: Verbose mode (still shows request even if dry run!!!)
+		# TODO: What guarantees do you have/need when calling this method? Maybe: Either ALL requests get yielded even if failed (updates task state) OR exception raised OR only_process/dryrun
+		# TODO: Direct -> Respect session/task push limits? would need to raise, or does the step() naturally end when returning early (BAD, irrevocably lost some requests!)
+		# TODO: If using direct mode on committed samples/requests, somehow need to guarantee that they really get done, but sometimes they don't (e.g. task limits)? How to deal with that? Don't want to FAIL them!!
 
 		if self.only_process:
 			log.warning("Only-process mode => Not making any direct requests")
@@ -1523,13 +1536,6 @@ class GPTRequester:
 
 		if reqs_list:
 			self.log_push_stats()
-
-		# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
-		# TODO: Show non-tqdm 10s-like progress as direct requests are completed / 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
-		# TODO: Verbose mode (still shows request even if dry run!!!)
-		# TODO: What guarantees do you have/need when calling this method? Maybe: Either ALL requests get yielded even if failed (updates task state) OR exception raised OR only_process/dryrun
-		# TODO: Direct -> Respect session/task push limits? would need to raise, or does the step() naturally end when returning early (BAD, irrevocably lost some requests!)
-		# TODO: If using direct mode on committed samples/requests, somehow need to guarantee that they really get done, but sometimes they don't (e.g. task limits)? How to deal with that? Don't want to FAIL them!!
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
 	def add_request(self, req: GPTRequest) -> int:
@@ -2087,69 +2093,85 @@ class GPTRequester:
 				log.info(f"Converting unpushable batch {batch.id} into direct batches for direct execution and processing...")
 				batch_wiped = False
 
-				req_payload_map = self.load_local_jsonl(batch=batch)
+				if batch.request_info:
 
-				cached_req_map: dict[int, CachedGPTRequest] = {}
-				for req_id, req_info in batch.request_info.items():
-					_, req_payload = req_payload_map[req_id]
-					req_item = GPTRequestItem(id=req_id, req=GPTRequest(payload=req_payload, meta=req_info.meta, retry_num=req_info.retry_num), parse_info=req_info.parse_info)
-					cached_req_map[req_id] = CachedGPTRequest.from_item(item=req_item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
+					req_payload_map = self.load_local_jsonl(batch=batch)
 
-				for rstack, result, limited, retry_reqs in self.direct_requests(reqs=cached_req_map.values(), yield_retry_reqs=True):  # Note: direct_requests() makes an internal list copy of the value of reqs, so it's okay to modify cached_req_map inside this loop
+					cached_req_map: dict[int, CachedGPTRequest] = {}
+					for req_id, req_info in batch.request_info.items():
+						_, req_payload = req_payload_map[req_id]
+						req_item = GPTRequestItem(id=req_id, req=GPTRequest(payload=req_payload, meta=req_info.meta, retry_num=req_info.retry_num), parse_info=req_info.parse_info)
+						cached_req_map[req_id] = CachedGPTRequest.from_item(item=req_item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
 
-					assert not batch_wiped or result is None
+					for rstack, result, limited, retry_reqs in self.direct_requests(reqs=cached_req_map.values(), yield_retry_reqs=True):  # Note: direct_requests() makes an internal list copy of the value of reqs, so it's okay to modify cached_req_map inside this loop
 
-					if retry_reqs is None:
+						assert not batch_wiped or result is None
 
-						assert limited is not None and (rstack is None) == (result is None)
+						if retry_reqs is None:
 
-						yield rstack, result, limited  # Note: The task is permitted to update whether a request is retried or not
+							assert limited is not None and (rstack is None) == (result is None)
 
-						if limited:
-							direct_limits_reached = True
+							yield rstack, result, limited  # Note: The task is permitted to update whether a request is retried or not
 
-					else:
+							if limited:
+								direct_limits_reached = True
 
-						assert rstack is not None and result is not None and limited is None and not self.dryrun
-
-						def revert_batch(orig_batch: BatchState):
-							for field in dataclasses.fields(BatchState):  # noqa
-								setattr(batch, field.name, getattr(orig_batch, field.name))
-						rstack.callback(revert_batch, orig_batch=copy.deepcopy(batch))
-
-						for req_id, info in result.info.items():
-							del cached_req_map[req_id]
-							del batch.request_info[req_id]
-
-						for cached_req in retry_reqs:
-							req_id = cached_req.item.id
-							assert req_id not in cached_req_map and req_id not in batch.request_info
-							cached_req_map[req_id] = cached_req
-							batch.request_info[req_id] = cached_req.get_request_info()
-
-						assert cached_req_map.keys() == batch.request_info.keys()
-
-						batch.local_jsonl_size = sum(cached_req.info.json_size for cached_req in cached_req_map.values())
-						batch.num_requests = len(cached_req_map)
-						batch.tokens_cost = TokensCost().add(cached_req.info.tokens_cost for cached_req in cached_req_map.values())
-						if (result.info or retry_reqs) and 'Direct updated' not in batch.reasons:
-							batch.full_batch = False
-							batch.reasons.append('Direct updated')
-						assert batch.true_tokens_cost is None and batch.metrics is None
-
-						if batch.num_requests > 0:
-							with utils.SafeOpenForWrite(path=batch.local_jsonl, rstack=rstack) as file:
-								file.writelines(cached_req.info.json for cached_req in cached_req_map.values())
-								file_size = utils.get_file_size(file)
-							assert file_size == batch.local_jsonl_size
-							log.info(f"Updated batch {batch.id} = Unpushable local batch now of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}]")
 						else:
-							rstack.callback(self.S.batches.__setitem__, slice(None), self.S.batches.copy())  # noqa
-							self.S.batches.remove(batch)
+
+							assert rstack is not None and result is not None and limited is None and not self.dryrun
+
+							def revert_batch(orig_batch: BatchState):
+								for field in dataclasses.fields(BatchState):  # noqa
+									setattr(batch, field.name, getattr(orig_batch, field.name))
+							rstack.callback(revert_batch, orig_batch=copy.deepcopy(batch))
+
+							for req_id, info in result.info.items():
+								del cached_req_map[req_id]
+								del batch.request_info[req_id]
+
+							for cached_req in retry_reqs:
+								req_id = cached_req.item.id
+								assert req_id not in cached_req_map and req_id not in batch.request_info
+								cached_req_map[req_id] = cached_req
+								batch.request_info[req_id] = cached_req.get_request_info()
+
+							assert cached_req_map.keys() == batch.request_info.keys()
+
+							batch.local_jsonl_size = sum(cached_req.info.json_size for cached_req in cached_req_map.values())
+							batch.num_requests = len(cached_req_map)
+							batch.tokens_cost = TokensCost().add(cached_req.info.tokens_cost for cached_req in cached_req_map.values())
+							if (result.info or retry_reqs) and 'Direct updated' not in batch.reasons:
+								batch.full_batch = False
+								batch.reasons.append('Direct updated')
+							assert batch.true_tokens_cost is None and batch.metrics is None
+
+							if batch.num_requests > 0:
+								with utils.SafeOpenForWrite(path=batch.local_jsonl, rstack=rstack) as file:
+									file.writelines(cached_req.info.json for cached_req in cached_req_map.values())
+									file_size = utils.get_file_size(file)
+								assert file_size == batch.local_jsonl_size
+								log.info(f"Updated batch {batch.id} = Unpushable local batch now of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}]")
+							else:
+								rstack.callback(self.S.batches.__setitem__, slice(None), self.S.batches.copy())  # noqa
+								self.S.batches.remove(batch)
+								utils.safe_unlink(path=batch.local_jsonl, rstack=rstack)
+								log.info(f"Removed batch {batch.id} = Unpushable local batch that became empty [{os.path.basename(batch.local_jsonl)}]")
+								num_batches_finished += 1
+								batch_wiped = True
+
+				else:
+					with utils.AtomicRevertStack() as rstack:
+						rstack.callback(self.S.batches.__setitem__, slice(None), self.S.batches.copy())  # noqa
+						self.S.batches.remove(batch)
+						if self.dryrun:
+							log.warning(f"{DRYRUN}Did not remove {batch.id} = Unpushable local batch that was already empty [{os.path.basename(batch.local_jsonl)}]")
+						else:
 							utils.safe_unlink(path=batch.local_jsonl, rstack=rstack)
-							num_batches_finished += 1
-							batch_wiped = True
-							log.info(f"Removed batch {batch.id} = Unpushable local batch that became empty [{os.path.basename(batch.local_jsonl)}]")
+							log.info(f"Removed batch {batch.id} = Unpushable local batch that was already empty [{os.path.basename(batch.local_jsonl)}]")
+						num_batches_finished += 1
+						batch_wiped = True
+						self.validate_state_queue(clean=False)
+						self.state.save(rstack=rstack)
 
 				if batch_wiped:
 					log.info(f"Finished direct execution and processing of unpushable batch {batch.id}")
