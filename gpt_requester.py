@@ -408,6 +408,10 @@ class CachedGPTRequest:
 			),
 		)
 
+	def get_request_info(self) -> RequestInfo:
+		# Returns a newly created (shallow) RequestInfo based on the CachedGPTRequest
+		return RequestInfo(meta=self.item.req.meta, retry_num=self.item.req.retry_num, tokens_cost=self.info.tokens_cost, parse_info=self.item.parse_info)
+
 # Pool/queue class
 @dataclasses.dataclass(frozen=True)
 class PoolQueue:
@@ -1249,7 +1253,7 @@ class GPTRequester:
 				batch.local_jsonl_size += cached_req.info.json_size  # noqa
 				batch.num_requests = next_num_requests
 				assert req_id not in batch.request_info and cached_req.info.tokens_cost.is_valid()
-				batch.request_info[req_id] = RequestInfo(meta=cached_req.item.req.meta, retry_num=cached_req.item.req.retry_num, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
+				batch.request_info[req_id] = cached_req.get_request_info()
 				batch.tokens_cost = next_tokens_cost
 				assert req_id not in cached_reqs
 				cached_reqs[req_id] = cached_req
@@ -1624,7 +1628,7 @@ class GPTRequester:
 					batch.local_jsonl_size = next_local_jsonl_size
 					batch.num_requests = next_num_requests
 					assert req_id not in batch.request_info and cached_req.info.tokens_cost.is_valid()
-					batch.request_info[req_id] = RequestInfo(meta=cached_req.item.req.meta, retry_num=cached_req.item.req.retry_num, tokens_cost=cached_req.info.tokens_cost, parse_info=cached_req.item.parse_info)
+					batch.request_info[req_id] = cached_req.get_request_info()
 					batch.tokens_cost = next_tokens_cost
 
 				index += 1
