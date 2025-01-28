@@ -1195,14 +1195,37 @@ class GPTRequester:
 		return GPTRequestItem(id=self.max_request_id, req=req, parse_info=parse_info)
 
 	# Generator: Make a number of sequential synchronous requests using the direct API (responses may return as multiple BatchResult instances if there are many requests)
-	def direct_requests(self, reqs: Union[Iterable[Union[GPTRequest, GPTRequestItem, CachedGPTRequest]], GPTRequest, GPTRequestItem, CachedGPTRequest]) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
+	def direct_requests(self, reqs: Union[Iterable[Union[GPTRequest, GPTRequestItem, CachedGPTRequest]], GPTRequest, GPTRequestItem, CachedGPTRequest], yield_retry_reqs: bool) -> Iterable[tuple[Optional[utils.RevertStack], Optional[BatchResult], Optional[bool], Optional[list[CachedGPTRequest]]]]:
 		# reqs = The requests to make using the direct API (raw, itemized and/or cached requests can be provided)
-		# The provided requests are auto-grouped into virtual batches based on request number limits
-		# This method is implemented as a generator that returns the results for one virtual batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
+		# yield_retry_reqs = Whether to yield tuples (for complete transparency of operations) containing any retry requests that are generated and will be internally executed (in addition to, and generally alternating with, the tuples containing the virtual batch results for which the retry behaviour can still be modified)
+		# The provided requests are auto-split into virtual batches based on direct request number/token limits and such
+		# Either processes and returns results for all requests (plus associated retries) one virtual batch at a time, or eventually yields limited=True and discontinues (after a possible trailing retry requests yield), or dry run is active, or raises an exception if an unresolvable issue occurs
+		# This method is implemented as a generator that returns tuples of:
+		#   - A RevertStack that should be used to reversibly update and save the task state and output file(s)
+		#   - The results for one virtual batch at a time (the total number of results obtained may exceed the number of requests given due to retries)
+		#   - A boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode is active)
+		#   - A list of retry requests generated based on the results of the batch, that will be internally executed in a further virtual batch
+		# The possible combinations of yielded types are:
+		#   - tuple[utils.RevertStack, BatchResult, bool, None] => The result of a virtual batch, ready to be processed (the retry behaviour can still be modified by editing BatchResult while processing the results)
+		#   - tuple[None, None, bool, None] => Status update whether the direct limits have been reached (generally when the bool is True but there is no BatchResult available that this update to the limited state can be yielded as part of)
+		#   - tuple[utils.RevertStack, BatchResult, None, list[CachedGPTRequest]] => If yield_retry_reqs, a tuple containing a list of retry requests that were generated from the immediately previously yielded batch result
+		# If the boolean is ever True that direct limits were reached, then no further batch results are sent
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
+		# Note: Calling close() prior to complete iteration or executing break or return statements while iterating in a for-loop causes a GeneratorExit exception to internally be raised, which makes the currently active RevertStack unwind with an exception and thereby revert all currently performed work!
+		# TODO: Ensure the DOC above is the ACTUAL behaviour
+
+		# TODO: MOVE max_request_id OUT of QueueState
+		# TODO: If EMPTY reqs then MUST output a single dud BatchResult yield (plus associated retry_reqs) (limited=False as NOT at least one request that couldn't be finished) --> Try to NOT make this a special case, for rstack, guarantees of state SAVE preserved, retry_reqs, etc...
+		# TODO: Limited is true ONLY if only_process mode OR it was NOT possible to execute at least ONE request (or retry)
+		# TODO: yield_retry_reqs => Yield a fourth tuple element Optional[list[CachedGPTRequest]] -> retry_reqs must be GUARANTEED if activated (to make sure SAVEs occur)
+		# TODO: This must internally stop iterating (and LOG a warning) as SOON as it reaches direct limits (and that virtual batch has been finished up, taking it to the very limit)
+		# TODO: Dry run should have direct limits reached always False, and NO trailing limited=True or so! (unlike previously thought)
+		# TODO: LOG when direct limits are reached! (warning)
+		# TODO: Go through and clear out text file (more TODOs and checks and ideas)
 
 		if self.only_process:
 			log.warning("Only-process mode => Not making any direct requests")
+			yield None, None, True  # Direct limits have immediately been reached if only-process mode
 			return
 
 		if isinstance(reqs, (GPTRequest, GPTRequestItem, CachedGPTRequest)):
@@ -1464,7 +1487,7 @@ class GPTRequester:
 						api_metrics.failed.add_metrics(batch_metrics_failed)
 						api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
 
-					yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
+					yield rstack, result, LIMITED, None  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
 					rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy())
 					self.S.max_direct_batch_id = self.max_direct_batch_id
@@ -1472,6 +1495,8 @@ class GPTRequester:
 					self.S.direct_history.append(batch)
 					self.S.direct_history.sort()
 
+					# TODO: ISSUE: Is the state-saved max_request_id appropriately updated?! REQUIRE: self.S.queue.max_request_id = self.max_request_id (normally happens during commit)
+					# TODO: Need to already assign new IDs here right! (create item + cached_req) So that can yield it (yield is list[CachedGPTRequest])
 					retry_reqs = [GPTRequest(
 						payload=info.req_payload,
 						meta=info.req_info.meta,
@@ -1481,6 +1506,8 @@ class GPTRequester:
 					if retry_reqs:
 						log.info(f"{len(retry_reqs)} requests need to be retried and will be appended to the direct request queue...")
 						reqs_list.extend(retry_reqs)
+
+					# TODO: Always yield if yield_retry_reqs (prior to SAVE of state)
 
 					self.validate_state_queue(clean=False)
 					self.state.save(rstack=rstack)
