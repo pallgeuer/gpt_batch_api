@@ -1114,10 +1114,12 @@ class GPTRequester:
 		if not utils.is_ascending(direct_id_history, strict=True):
 			raise ValueError(f"The batch IDs in the direct history are not strictly ascending: {direct_id_history}")
 
-		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in (*(batch.request_info.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)]
+		req_id_blocks = (*(batch.request_info.keys() for batch in self.S.batches), self.S.queue.request_id_meta.keys(), pool_request_ids)
+		all_req_ids = collections.Counter(itertools.chain.from_iterable(req_id_blocks))
+		if any(count > 1 for count in all_req_ids.values()):
+			raise ValueError(f"There are reused request ID(s): {', '.join(f'{count} \xD7 {req_id}' for req_id, count in sorted(all_req_ids.items()) if count > 1)}")
+		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in req_id_blocks]
 		flat_req_id_bounds = [req_id for req_id_interval in req_id_intervals for req_id in req_id_interval if req_id is not None]
-		if not utils.is_ascending(flat_req_id_bounds, strict=True):
-			raise ValueError(f"The request ID intervals overlap between the batches, request queue and request pool: {req_id_intervals}")
 		if any(req_id > self.S.queue.max_request_id for req_id in flat_req_id_bounds):
 			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.S.queue.max_request_id}: {req_id_intervals}")
 
