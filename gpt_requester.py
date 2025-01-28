@@ -1720,7 +1720,7 @@ class GPTRequester:
 
 		return req_payload_map
 
-	# Check whether a batch is pushable
+	# Check whether a batch is pushable (only makes sense if batch.remote is None)
 	def batch_is_pushable(self, batch: BatchState) -> bool:
 		# batch = The batch in question
 		# Return whether the batch is pushable (True = Batch API) or unpushable (False = Direct API)
@@ -2042,7 +2042,8 @@ class GPTRequester:
 	def process_batches(self) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
 		# This method is implemented as a generator that returns the results for one batch at a time in combination with a RevertStack, which should be used to reversibly update and save the task state and output file(s)
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
-		# Error handling comments guide:
+		# Note: Calling close() prior to complete iteration or executing break or return statements while iterating in a for-loop causes a GeneratorExit exception to internally be raised, which makes the currently active RevertStack unwind with an exception and thereby revert all currently performed work!
+		# Error handling comments guide for the implementation below:
 		#   [NO ERROR] = The given situation is not innately an error
 		#   [COVERED] = The given situation does not require explicit error consequences as other errors are guaranteed to trigger later anyway that cover this situation (if there is truly a problem)
 		#   [DELAYED RAISE] = The fact that this situation occurred is noted, a corresponding exception will be raised later on, and the batch state will be kept as finished/unprocessed
