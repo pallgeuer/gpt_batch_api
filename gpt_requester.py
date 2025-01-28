@@ -764,8 +764,8 @@ class GPTRequester:
 		if self.max_direct_cost < 0.01:
 			raise ValueError(f"Maximum direct virtual batch cost must be at least 0.01: {self.max_direct_cost}")
 		self.min_batch_requests = min_batch_requests
-		if self.min_batch_requests < 0:
-			raise ValueError(f"Minimum number of requests in a remote batch must be at least 0: {self.min_batch_requests}")
+		if self.min_batch_requests < 1:
+			raise ValueError(f"Minimum number of requests in a remote batch must be at least 1: {self.min_batch_requests}")
 		self.max_batch_requests = max_batch_requests
 		if self.max_batch_requests < 1:
 			raise ValueError(f"Maximum number of requests in a batch must be at least 1: {self.max_batch_requests}")
@@ -810,8 +810,8 @@ class GPTRequester:
 		log.info(f"Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} assumed cost")
 		if self.force_direct:
 			log.info("Using direct API for all batches (FORCED)")
-		elif self.min_batch_requests > 0:
-			log.info(f"Using direct API for all batches strictly under {self.min_batch_requests} requests in size")
+		else:
+			log.info(f"Using direct API for all batches with at most {self.min_batch_requests - 1} requests")
 		log.info(f"Allowing at most {self.max_unpushed_batches} unpushed and {self.max_remote_batches} remote batches at once")
 		log.info(f"Allowing at most {self.max_session_requests} requests, {self.max_session_tokens} tokens, {self.max_session_cost:.3f} assumed cost per session")
 		log.info(f"Allowing at most {self.max_task_requests} requests, {self.max_task_tokens} tokens, {self.max_task_cost:.3f} assumed cost per task")
