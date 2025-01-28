@@ -152,7 +152,7 @@ class DelayedRaise:
 	def raise_on_error(self, base_msg: str = 'Encountered errors'):
 		# base_msg = Base message of the raised exception
 		if self.have_errors():
-			raise RuntimeError(f"{base_msg}:{''.join(f'\n  {count} \xd7 {msg}' for msg, count in sorted(self.msgs.items()) if count > 0)}")
+			raise RuntimeError(f"{base_msg}:{''.join(f'\n  {count} \xD7 {msg}' for msg, count in sorted(self.msgs.items()) if count > 0)}")
 
 # Log summarizer that only logs the first N messages and then provides a summary message at the end with how many further messages were omitted and/or how many there were in total
 class LogSummarizer:
