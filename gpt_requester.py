@@ -150,7 +150,6 @@ class TokensCost:
 # Queue state class
 @dataclasses.dataclass
 class QueueState:
-	max_request_id: int = 0                                                                         # Maximum request ID used thus far (0 = No request ID used so far)
 	request_id_meta: dict[int, Optional[dict[str, Any]]] = dataclasses.field(default_factory=dict)  # A map of request ID to custom metadata for all requests in the request queue (NOT including the request pool, ordered by ascending request ID)
 
 # Request information class
@@ -278,9 +277,10 @@ class PushStats:
 class State:
 	version: int = 1                                                            # Data format version number
 	endpoint: str = ''                                                          # API endpoint to use (empty string is invalid)
-	queue: QueueState = dataclasses.field(default_factory=QueueState)           # State of the request queue
+	max_request_id: int = 0                                                     # Maximum request ID used thus far (0 = No request ID used so far)
 	max_batch_id: int = 0                                                       # Maximum batch ID used thus far (0 = No batch ID used so far)
 	max_direct_batch_id: int = 0                                                # Maximum direct batch ID used thus far (0 = No direct batch ID used so far)
+	queue: QueueState = dataclasses.field(default_factory=QueueState)           # State of the request queue
 	batches: list[BatchState] = dataclasses.field(default_factory=list)         # States of all batches that are currently pending or in progress (in ascending batch ID order)
 	batch_history: list[BatchState] = dataclasses.field(default_factory=list)   # History of the final states of the completed batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
 	direct_history: list[BatchState] = dataclasses.field(default_factory=list)  # History of the final states of the completed direct batches (in ascending batch ID order, with some overdetailed per-request information removed for space reasons)
@@ -970,7 +970,7 @@ class GPTRequester:
 			self.type_cache = utils.SerialTypeCache()
 			enter_stack.enter_context(self.state)
 			self.S = self.state.state
-			self.max_request_id = self.S.queue.max_request_id
+			self.max_request_id = self.S.max_request_id
 			self.max_direct_batch_id = self.S.max_direct_batch_id
 			enter_stack.enter_context(self.queue)
 			self.PQ = self.queue.pool_queue
@@ -1019,7 +1019,7 @@ class GPTRequester:
 
 				self.P.clear()
 				self.Q.clear()
-				self.S.queue.max_request_id = self.max_request_id
+				self.S.max_request_id = self.max_request_id
 				self.S.queue.request_id_meta = self.PQ.queue_request_id_meta()
 				self.S.batches.clear()
 				self.S.num_pass_failures = 0
@@ -1048,7 +1048,7 @@ class GPTRequester:
 					with utils.RevertStack() as rstack:
 						self.state.create(rstack=rstack)
 						self.S = self.state.state
-						self.max_request_id = self.S.queue.max_request_id
+						self.max_request_id = self.S.max_request_id
 						self.max_direct_batch_id = self.S.max_direct_batch_id
 						self.queue.create(rstack=rstack)
 						self.PQ = self.queue.pool_queue
@@ -1069,8 +1069,10 @@ class GPTRequester:
 				raise ValueError("Request pool state is unexpectedly not clean")
 			if any(cached_req is None for cached_req in self.Q):
 				raise ValueError("Request queue state is unexpectedly not clean")
-			if self.S.queue.max_request_id != self.max_request_id:
-				raise ValueError(f"Maximum request ID is inconsistent between GPT requester and queue state: {self.max_request_id} vs {self.S.queue.max_request_id}")
+			if self.S.max_request_id != self.max_request_id:
+				raise ValueError(f"Maximum request ID is inconsistent between GPT requester class and state: {self.max_request_id} vs {self.S.max_request_id}")
+		if self.max_request_id < self.S.max_request_id:
+			raise ValueError(f"Maximum request ID of GPT requester class is less than its state: {self.max_request_id} < {self.S.max_request_id}")
 
 		if self.S.max_direct_batch_id > self.max_direct_batch_id:
 			raise ValueError(f"Maximum direct batch ID state is inconsistent: {self.S.max_direct_batch_id} > {self.max_direct_batch_id}")
@@ -1124,8 +1126,8 @@ class GPTRequester:
 			raise ValueError(f"There are reused request ID(s): {', '.join(f'{count} \xD7 {req_id}' for req_id, count in sorted(all_req_ids.items()) if count > 1)}")
 		req_id_intervals = [(min(req_ids, default=None), max(req_ids, default=None)) for req_ids in req_id_blocks]
 		flat_req_id_bounds = [req_id for req_id_interval in req_id_intervals for req_id in req_id_interval if req_id is not None]
-		if any(req_id > self.S.queue.max_request_id for req_id in flat_req_id_bounds):
-			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.S.queue.max_request_id}: {req_id_intervals}")
+		if any(req_id > self.max_request_id for req_id in flat_req_id_bounds):
+			raise ValueError(f"There are request ID(s) greater than the supposed maximum assigned request ID {self.max_request_id}: {req_id_intervals}")
 
 		if self.S.task_push_stats.total_requests < self.session_push_stats.total_requests:
 			raise ValueError(f"Unexpected push stats of task vs session in terms of requests: {self.S.task_push_stats.total_requests} < {self.session_push_stats.total_requests}")
@@ -1214,7 +1216,6 @@ class GPTRequester:
 		# Note: Calling close() prior to complete iteration or executing break or return statements while iterating in a for-loop causes a GeneratorExit exception to internally be raised, which makes the currently active RevertStack unwind with an exception and thereby revert all currently performed work!
 		# TODO: Ensure the DOC above is the ACTUAL behaviour
 
-		# TODO: MOVE max_request_id OUT of QueueState
 		# TODO: If EMPTY reqs then MUST output a single dud BatchResult yield (plus associated retry_reqs) (limited=False as NOT at least one request that couldn't be finished) --> Try to NOT make this a special case, for rstack, guarantees of state SAVE preserved, retry_reqs, etc...
 		# TODO: Limited is true ONLY if only_process mode OR it was NOT possible to execute at least ONE request (or retry)
 		# TODO: yield_retry_reqs => Yield a fourth tuple element Optional[list[CachedGPTRequest]] -> retry_reqs must be GUARANTEED if activated (to make sure SAVEs occur)
@@ -1495,7 +1496,7 @@ class GPTRequester:
 					self.S.direct_history.append(batch)
 					self.S.direct_history.sort()
 
-					# TODO: ISSUE: Is the state-saved max_request_id appropriately updated?! REQUIRE: self.S.queue.max_request_id = self.max_request_id (normally happens during commit)
+					# TODO: ISSUE: Is the state-saved max_request_id appropriately updated?! REQUIRE: self.S.max_request_id = self.max_request_id (normally happens during commit)
 					# TODO: Need to already assign new IDs here right! (create item + cached_req) So that can yield it (yield is list[CachedGPTRequest])
 					retry_reqs = [GPTRequest(
 						payload=info.req_payload,
@@ -1575,9 +1576,9 @@ class GPTRequester:
 			self.P[:] = P
 			self.Q[:] = Q
 
-		def revert_queue_state(queue_state_dict: dict[str, Any]):
-			for field, value in queue_state_dict.items():
-				setattr(self.S.queue, field, value)
+		def revert_queue_state(max_request_id: int, request_id_meta: dict[int, Optional[dict[str, Any]]]):
+			self.S.max_request_id = max_request_id
+			self.S.queue.request_id_meta = request_id_meta
 
 		cm_rstack = utils.RevertStack() if rstack is None else contextlib.nullcontext(enter_result=rstack)
 		with utils.DelayKeyboardInterrupt(), cm_rstack as rstack:
@@ -1587,8 +1588,8 @@ class GPTRequester:
 				self.Q[:] = [cached_req for cached_req in self.Q if cached_req is not None]
 				self.Q.extend(self.P)
 				self.P.clear()
-				rstack.callback(revert_queue_state, queue_state_dict=dataclasses.asdict(self.S.queue))  # noqa
-				self.S.queue.max_request_id = self.max_request_id
+				rstack.callback(revert_queue_state, max_request_id=self.S.max_request_id, request_id_meta=self.S.queue.request_id_meta)
+				self.S.max_request_id = self.max_request_id
 				self.S.queue.request_id_meta = self.PQ.queue_request_id_meta()
 				self.validate_state_queue(clean=True)
 				self.queue.save(rstack=rstack)
