@@ -692,7 +692,7 @@ class TaskManager:
 		# Condition Q = The request queue is empty (nullified if requests from the pool are committed to the queue)
 		# Condition B = The request queue does not have enough requests to automatically trigger a full local batch (nullified if requests from the pool are committed to the queue)
 		# Condition L = There are no unpushed local batches, whether pushable or unpushable (nullified whenever a local batch is created)
-		# Condition V = Either there are no unpushable batches, or no single direct request is possible anymore for the remainder of the run/session due to session/task limits (nullified whenever a local batch is created)
+		# Condition V = Either there are no unpushable batches, or no single direct request should be made anymore for the remainder of the run/session due to session/task limits (nullified whenever a local batch is created)
 		# Condition M = No pushable local batch can currently be pushed, either because there are no pushable local batches or because push limits have been reached (nullified whenever a local batch is created, or a finished remote batch is processed)
 		# Condition R = There are no pushed remote batches that are unfinished (nullified whenever a local batch is pushed)
 		# Condition F = There are no pushed remote batches that are finished yet unprocessed, or it is a dry run (nullified if self.GR.update_remote_batch_state() is internally called)
@@ -721,7 +721,7 @@ class TaskManager:
 			self.push_batches()
 
 			# Process all unpushable local batches up to the extent possible with the direct limits (ensures condition V, potentially sets condition L, nullifies condition C), and update the task state (nullifies condition G)
-			num_unpushable_batches, direct_limits_reached = self.process_unpushable_batches()  # Returns how many unpushable batches are still left after processing (will only ever be non-zero if direct_limits_reached, note that condition V = num_unpushable_batches <= 0 or direct_limits_reached), and whether direct limits were reached
+			num_unpushable_batches, direct_limits_reached = self.process_unpushable_batches()  # Returns how many unpushable batches are still left after processing (will only ever be non-zero if direct_limits_reached, note that condition V = num_unpushable_batches <= 0 or direct_limits_reached), and whether some direct limits were reached
 
 			# Determine whether the batch pipeline is congested
 			batch_congestion = (self.GR.num_unpushed_batches() >= self.GR.max_unpushed_batches)  # Condition C = Whether the batch pipeline is congested (condition M is already guaranteed from pushing batches above, so only need to check the second half of condition C)
@@ -747,11 +747,19 @@ class TaskManager:
 		return not all_done
 
 	# Make and process a series of direct requests
-	def direct_requests(self, reqs: Union[Iterable[Union[gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]], gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]):
+	def direct_requests(self, reqs: Union[Iterable[Union[gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]], gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]) -> bool:
 		# reqs = The requests to make and process using the direct API (raw, itemized and/or cached requests can be provided)
-		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history.
-		for rstack, result in self.GR.direct_requests(reqs=reqs):
-			self.call_process_batch_result(result=result, rstack=rstack)
+		# Returns a boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode or dry run is active)
+		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history
+
+		direct_limits_reached = self.GR.only_process or self.GR.dryrun
+		for rstack, result, limited, _ in self.GR.direct_requests(reqs=reqs, yield_retry_reqs=False):
+			if rstack is not None and result is not None:
+				self.call_process_batch_result(result=result, rstack=rstack)
+			if limited:
+				direct_limits_reached = True
+
+		return direct_limits_reached
 
 	# Call the generate requests implementation
 	def call_generate_requests(self) -> bool:
@@ -852,20 +860,23 @@ class TaskManager:
 		else:
 			return False  # Batch congestion is not possible if there are no unpushed local batches at all
 
-	# Execute, process and clean up after as many unpushable local batches as possible (up to direct limits)
+	# Execute, process and clean up after as many unpushable local batches as possible (up to first reaching of direct limits)
 	def process_unpushable_batches(self) -> tuple[int, bool]:
-		# Returns how many unpushable local batches are still left after processing, and whether direct limits were reached (irrevocable for the current session)
+		# Returns how many unpushable local batches are still left after processing, and whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode or dry run is active)
 		# There will only ever be unpushable local batches left over if the direct limits were reached
 
-		direct_limits_reached = False
-		for rstack, result, limited in self.GR.process_unpushable_batches():  # Note: If only-process mode or dry run, and there is at least one unpushable batch, then at least one item with limited=True is expected
-			if rstack is not None and result is not None:
-				self.call_process_batch_result(result=result, rstack=rstack)
-			if limited:
-				direct_limits_reached = True
-			assert direct_limits_reached == limited  # Once direct limits have been reached, there should be no way back (irrevocable)
-
 		num_unpushable_batches = self.GR.num_unpushable_batches()
+		direct_limits_reached = self.GR.only_process or self.GR.dryrun
+
+		if num_unpushable_batches > 0:
+			log.info(f"Attempting to process the {num_unpushable_batches} available local unpushable batches...")
+			for rstack, result, limited in self.GR.process_unpushable_batches():  # Either processes all unpushable batches one virtual (sub-)batch at a time, or eventually yields limited=True and discontinues, or raises an exception if an unresolvable issue occurs
+				if rstack is not None and result is not None:
+					self.call_process_batch_result(result=result, rstack=rstack)
+				if limited:
+					direct_limits_reached = True
+			num_unpushable_batches = self.GR.num_unpushable_batches()
+
 		assert num_unpushable_batches <= 0 or direct_limits_reached  # Condition V
 		return num_unpushable_batches, direct_limits_reached
 
