@@ -19,6 +19,7 @@ import itertools
 import contextlib
 import collections
 import dataclasses
+from enum import auto
 from typing import Optional, Union, Self, Any, ContextManager, Iterable
 import pydantic
 import httpx
@@ -571,6 +572,13 @@ class BatchResult:
 # GPT requester
 #
 
+# Direct verbose mode enumeration
+class DirectVerboseMode(utils.OrderedEnumLU):
+	NEVER = auto()
+	ERROR = auto()
+	WARN = auto()
+	ALWAYS = auto()
+
 # GPT requester class
 @utils.init_kwargs
 class GPTRequester:
@@ -578,72 +586,73 @@ class GPTRequester:
 	# Construct a GPT requester to make use of the OpenAI Batch API to process GPT requests
 	def __init__(
 		self,
-		working_dir: str,                                     # Path to the GPT working directory to use (will be used for automatically managed lock, state, requests and batch files)
-		name_prefix: str,                                     # Name prefix to use for all files created in the GPT working directory (e.g. 'my_gpt_requester')
-		*,                                                    # Keyword arguments only beyond here
+		working_dir: str,                                         # Path to the GPT working directory to use (will be used for automatically managed lock, state, requests and batch files)
+		name_prefix: str,                                         # Name prefix to use for all files created in the GPT working directory (e.g. 'my_gpt_requester')
+		*,                                                        # Keyword arguments only beyond here
 
-		dryrun: bool = False,                                 # Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)
-		only_process: bool = False,                           # Whether to solely process existing unfinished remote batches and not generate/commit/push anything new
-		process_failed_batches: int = 0,                      # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
-		retry_fatal_requests: bool = False,                   # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
-		wipe_requests: bool = False,                          # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
-		wipe_task: bool = False,                              # CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_requests first, also triggers task manager actions if requester is being managed by one)
+		dryrun: bool = False,                                     # Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished/direct batches, no writing to disk, ...)
+		only_process: bool = False,                               # Whether to solely process existing unfinished remote batches and not generate/commit/push anything new
+		process_failed_batches: int = 0,                          # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
+		retry_fatal_requests: bool = False,                       # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
+		wipe_requests: bool = False,                              # CAUTION: Wipe and forget all ongoing requests and request batches without processing them (cancels/deletes batches from remote, does not affect any already finished/processed requests, consider running the requester with only_process=True prior to wiping)
+		wipe_task: bool = False,                                  # CAUTION: Wipe and forget all progress and existing results on the task, and start completely afresh from scratch (implies wipe_requests first, also triggers task manager actions if requester is being managed by one)
 
-		openai_api_key: Optional[str] = None,                 # OpenAI API key (see openai.OpenAI, ends up in request headers)
-		openai_organization: Optional[str] = None,            # OpenAI organization (see openai.OpenAI, ends up in request headers)
-		openai_project: Optional[str] = None,                 # OpenAI project (see openai.OpenAI, ends up in request headers)
-		client_base_url: Union[str, httpx.URL, None] = None,  # Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)
-		client_kwargs: Optional[dict[str, Any]] = None,       # Additional kwargs to use for the OpenAI API client (see openai.OpenAI)
-		client: Optional[openai.OpenAI] = None,               # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
-		endpoint: Optional[str] = None,                       # Endpoint to use for all GPT requests (None => OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
+		openai_api_key: Optional[str] = None,                     # OpenAI API key (see openai.OpenAI, ends up in request headers)
+		openai_organization: Optional[str] = None,                # OpenAI organization (see openai.OpenAI, ends up in request headers)
+		openai_project: Optional[str] = None,                     # OpenAI project (see openai.OpenAI, ends up in request headers)
+		client_base_url: Union[str, httpx.URL, None] = None,      # Base URL to use for the OpenAI API client (see openai.OpenAI, servers other than OpenAI's servers can be configured to expose an OpenAI API with suitable endpoints)
+		client_kwargs: Optional[dict[str, Any]] = None,           # Additional kwargs to use for the OpenAI API client (see openai.OpenAI)
+		client: Optional[openai.OpenAI] = None,                   # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
+		endpoint: Optional[str] = None,                           # Endpoint to use for all GPT requests (None => OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
 
-		autocreate_working_dir: bool = True,                  # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
-		lock_timeout: Optional[float] = None,                 # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
-		lock_poll_interval: Optional[float] = None,           # Lock file polling interval (see utils.LockFile)
-		lock_status_interval: Optional[float] = None,         # Lock file status update interval (see utils.LockFile)
-		token_estimator_warn: str = 'once',                   # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
-		remote_update_interval: float = 10.0,                 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
+		autocreate_working_dir: bool = True,                      # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
+		lock_timeout: Optional[float] = None,                     # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
+		lock_poll_interval: Optional[float] = None,               # Lock file polling interval (see utils.LockFile)
+		lock_status_interval: Optional[float] = None,             # Lock file status update interval (see utils.LockFile)
+		token_estimator_warn: str = 'once',                       # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
+		remote_update_interval: float = 10.0,                     # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 
-		show_warnings: int = 50,                              # How many warnings to show/log per batch per warning type when processing responses
-		show_errors: int = 25,                                # How many errors to show/log per batch per error type when processing responses
-		max_retries: int = 2,                                 # Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)
-		auto_parse: bool = True,                              # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
+		direct_verbose: Union[str, DirectVerboseMode] = 'never',  # Whether to show verbose requests/responses when using the direct API (options: never, error, warn (i.e. if a warning or error occurs), always)
+		show_warnings: int = 50,                                  # How many warnings to show/log per batch per warning type when processing responses
+		show_errors: int = 25,                                    # How many errors to show/log per batch per error type when processing responses
+		max_retries: int = 2,                                     # Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)
+		auto_parse: bool = True,                                  # Whether to perform auto-parsing to help validate and Python-ify API requests and responses
 
-		cost_input_direct_mtoken: float = 2.50,               # The cost per million direct input tokens (1M tokens ~ 750K words)
-		cost_input_cached_mtoken: float = 1.25,               # The cost per million cached input tokens
-		cost_input_batch_mtoken: float = 1.25,                # The cost per million input tokens with Batch API
-		cost_output_direct_mtoken: float = 10.00,             # The cost per million direct output tokens (1M tokens ~ 750K words)
-		cost_output_batch_mtoken: float = 5.00,               # The cost per million output tokens with Batch API
-		assumed_completion_ratio: float = 0.5,                # How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)
+		cost_input_direct_mtoken: float = 2.50,                   # The cost per million direct input tokens (1M tokens ~ 750K words)
+		cost_input_cached_mtoken: float = 1.25,                   # The cost per million cached input tokens
+		cost_input_batch_mtoken: float = 1.25,                    # The cost per million input tokens with Batch API
+		cost_output_direct_mtoken: float = 10.00,                 # The cost per million direct output tokens (1M tokens ~ 750K words)
+		cost_output_batch_mtoken: float = 5.00,                   # The cost per million output tokens with Batch API
+		assumed_completion_ratio: float = 0.5,                    # How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)
 
-		max_task_requests: int = 10000000,                    # Maximum number of requests allowed for an entire task
-		max_task_ktokens: int = 2000000,                      # Maximum allowed total number of input tokens (in units of 1000) for an entire task
-		max_task_cost: float = 1000.0,                        # Maximum allowed total cost (input + assumed output tokens) of an entire task
-		max_session_requests: int = 5000000,                  # Maximum number of requests allowed in a session
-		max_session_ktokens: int = 1000000,                   # Maximum allowed total number of input tokens (in units of 1000) in a session
-		max_session_cost: float = 500.0,                      # Maximum allowed total cost (input + assumed output tokens) in a session
-		max_direct_requests: int = 50,                        # Maximum number of requests allowed in a virtual batch when using the direct API
-		max_direct_ktokens: int = 200,                        # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
-		max_direct_cost: float = 5.0,                         # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
-		min_batch_requests: int = 50,                         # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
-		max_batch_requests: int = 50000,                      # Maximum number of requests allowed in a batch
-		max_batch_mb: int = 100,                              # Maximum allowed batch size in MB (not MiB)
-		max_batch_ktokens: int = 2000,                        # Maximum number of input tokens (in units of 1000) to include in a single batch
-		max_batch_cost: float = 50.0,                         # Maximum allowed cost (input + assumed output tokens) of a batch
-		max_unpushed_batches: int = 5,                        # Maximum number of unpushed local batches at any one time
-		max_remote_batches: int = 100,                        # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
-		max_remote_requests: int = 5000000,                   # Maximum number of requests across all uploaded remote batches at any one time
-		max_remote_mb: int = 10000,                           # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
-		max_remote_ktokens: int = 5000,                       # Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time
-		max_remote_cost: float = 150.0,                       # Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time
-		max_mb_safety: float = 1.01,                          # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
-		max_token_safety: float = 1.05,                       # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
-		force_direct: bool = False,                           # Whether to force all batches to be executed using the direct API instead of the batch API
+		max_task_requests: int = 10000000,                        # Maximum number of requests allowed for an entire task
+		max_task_ktokens: int = 2000000,                          # Maximum allowed total number of input tokens (in units of 1000) for an entire task
+		max_task_cost: float = 1000.0,                            # Maximum allowed total cost (input + assumed output tokens) of an entire task
+		max_session_requests: int = 5000000,                      # Maximum number of requests allowed in a session
+		max_session_ktokens: int = 1000000,                       # Maximum allowed total number of input tokens (in units of 1000) in a session
+		max_session_cost: float = 500.0,                          # Maximum allowed total cost (input + assumed output tokens) in a session
+		max_direct_requests: int = 50,                            # Maximum number of requests allowed in a virtual batch when using the direct API
+		max_direct_ktokens: int = 200,                            # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
+		max_direct_cost: float = 5.0,                             # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
+		min_batch_requests: int = 50,                             # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
+		max_batch_requests: int = 50000,                          # Maximum number of requests allowed in a batch
+		max_batch_mb: int = 100,                                  # Maximum allowed batch size in MB (not MiB)
+		max_batch_ktokens: int = 2000,                            # Maximum number of input tokens (in units of 1000) to include in a single batch
+		max_batch_cost: float = 50.0,                             # Maximum allowed cost (input + assumed output tokens) of a batch
+		max_unpushed_batches: int = 5,                            # Maximum number of unpushed local batches at any one time
+		max_remote_batches: int = 100,                            # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
+		max_remote_requests: int = 5000000,                       # Maximum number of requests across all uploaded remote batches at any one time
+		max_remote_mb: int = 10000,                               # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
+		max_remote_ktokens: int = 5000,                           # Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time
+		max_remote_cost: float = 150.0,                           # Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time
+		max_mb_safety: float = 1.01,                              # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
+		max_token_safety: float = 1.05,                           # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)
+		force_direct: bool = False,                               # Whether to force all batches to be executed using the direct API instead of the batch API
 
-		warn_predicted_input_factor: float = 1.2,             # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
-		warn_assumed_completion_factor: float = 2.0,          # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
-		min_pass_ratio: float = 0.5,                          # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)
-		max_pass_failures: int = 2,                           # Trigger a processing error if this many consecutive batches do not pass
+		warn_predicted_input_factor: float = 1.2,                 # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
+		warn_assumed_completion_factor: float = 2.0,              # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
+		min_pass_ratio: float = 0.5,                              # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)
+		max_pass_failures: int = 2,                               # Trigger a processing error if this many consecutive batches do not pass
 	):
 
 		self.working_dir = os.path.abspath(working_dir)
@@ -695,6 +704,15 @@ class GPTRequester:
 			log.info("Manage OpenAI file storage: https://platform.openai.com/storage")
 			log.info("Manage OpenAI batches: https://platform.openai.com/batches")
 			log.info("Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
+
+		if not isinstance(direct_verbose, DirectVerboseMode):
+			self.direct_verbose = DirectVerboseMode.from_str(direct_verbose)
+		if self.direct_verbose == DirectVerboseMode.ERROR:
+			log.info("Showing verbose requests and responses for all direct requests that have an error")
+		elif self.direct_verbose == DirectVerboseMode.WARN:
+			log.info("Showing verbose requests and responses for all direct requests that have an error or warning")
+		elif self.direct_verbose == DirectVerboseMode.ALWAYS:
+			log.info("Showing verbose requests and responses for all direct requests")
 
 		self.show_warnings = show_warnings
 		if self.show_warnings < 1:
@@ -897,7 +915,7 @@ class GPTRequester:
 		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {})) if isinstance(parser, argparse.ArgumentParser) else parser
 		add_argument = functools.partial(utils.add_init_argparse, cls=GPTRequester, parser=group, defaults=defaults)
 
-		add_argument(name='dryrun', help="Perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)")
+		add_argument(name='dryrun', help="Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished/direct batches, no writing to disk, ...)")
 		add_argument(name='only_process', help="Whether to solely process existing unfinished remote batches and not generate/commit/push anything new")
 		add_argument(name='process_failed_batches', metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
 		add_argument(name='retry_fatal_requests', help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
@@ -918,6 +936,7 @@ class GPTRequester:
 		add_argument(name='token_estimator_warn', metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
 
+		add_argument(name='direct_verbose', metavar='MODE', help="Whether to show verbose requests/responses when using the direct API (options: never, error, warn (i.e. if a warning or error occurs), always)")
 		add_argument(name='show_warnings', metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
 		add_argument(name='show_errors', metavar='NUM', help="How many errors to show/log per batch per error type when processing responses")
 		add_argument(name='max_retries', metavar='NUM', help="Maximum number of retries to allow by default for a request (e.g. 2 retries => 3 attempts allowed, retries due to batch cancellation or expiration do not count towards the retry count)")

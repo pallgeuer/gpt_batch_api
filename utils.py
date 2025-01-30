@@ -3,6 +3,7 @@
 # Imports
 import os
 import copy
+import enum
 import json
 import math
 import time
@@ -669,6 +670,56 @@ class SerialTypeCache:
 			self.type_map[serial] = typ
 
 		return typ
+
+# Ordered enumeration
+class OrderedEnum(enum.Enum):
+
+	def __ge__(self, other):
+		if self.__class__ is other.__class__:
+			return self.value >= other.value
+		return NotImplemented
+
+	def __gt__(self, other):
+		if self.__class__ is other.__class__:
+			return self.value > other.value
+		return NotImplemented
+
+	def __le__(self, other):
+		if self.__class__ is other.__class__:
+			return self.value <= other.value
+		return NotImplemented
+
+	def __lt__(self, other):
+		if self.__class__ is other.__class__:
+			return self.value < other.value
+		return NotImplemented
+
+# Enumeration with support for case-insensitive string lookup (case sensitive string lookup is already available by default)
+# Note: If we have "class MyEnum(Enum): One = 1" then MyEnum(1) = MyEnum['One'] = MyEnum.One
+class EnumLU(enum.Enum):
+
+	@classmethod
+	def from_str(cls, string, default=NONE):
+		string = string.lower()
+		for name, enumval in cls.__members__.items():
+			if string == name.lower():
+				return enumval
+		if default is NONE:
+			raise LookupError(f"Failed to convert case insensitive string to enum type {cls.__name__}: '{string}'")
+		else:
+			return default
+
+	@classmethod
+	def has_str(cls, string):
+		string = string.lower()
+		for name in cls.__members__:
+			if string == name.lower():
+				return True
+		return False
+
+# Ordered EnumLU enumeration
+class OrderedEnumLU(OrderedEnum, EnumLU):
+	pass
 
 #
 # Miscellaneous

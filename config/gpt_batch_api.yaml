@@ -4,7 +4,7 @@
 ##  General  ##
 ###############
 
-# Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no writing to state files, ...)
+# Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished/direct batches, no writing to disk, ...)
 dryrun: False
 
 # OpenAI API key (see openai.OpenAI, ends up in request headers)
@@ -57,6 +57,8 @@ token_estimator_warn: once
 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 remote_update_interval: 10.0
 
+# Whether to show verbose requests/responses when using the direct API (options: never, error, warn (i.e. if a warning or error occurs), always)
+direct_verbose: never
 # How many warnings to show/log per batch per warning type when processing responses
 show_warnings: 50
 # How many errors to show/log per batch per error type when processing responses
