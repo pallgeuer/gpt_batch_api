@@ -412,47 +412,48 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 			self.data.entries[:] = data.entries
 		rstack.callback(revert_data, data=copy.deepcopy(self.data))
 
-		if self.dryrun:
-			log.warning(f"{gpt_requester.DRYRUN}Did not append {len(self.data.entries)} entries to the task output file(s)")
-		else:
+		added_entry_size = 0
+		last_lines = []
 
-			added_entry_size = 0
-			last_lines = []
-
-			def save_last_lines():
-				nonlocal added_entry_size
+		def save_last_lines():
+			nonlocal added_entry_size
+			if not self.dryrun:
 				with utils.SafeOpenForWrite(path=self.data.paths[-1], mode='ab', rstack=rstack) as file:
 					file.writelines(last_lines)
-					added_entry_size += sum(len(line) for line in last_lines)
-				last_lines.clear()
+			added_entry_size += sum(len(line) for line in last_lines)
+			last_lines.clear()
 
-			for entry in self.data.entries:
-				entry_line = (utils.json_from_dataclass(obj=entry, indent=None) + '\n').encode('utf-8')
-				entry_size = len(entry_line)
-				if self.data.last_entries + 1 > self.max_entries > 0 or self.data.last_size + entry_size > self.max_size > 0:
-					if last_lines:
-						save_last_lines()
-					new_num_paths = len(self.data.paths) + 1
-					self.data.paths.append(f'{self.path_base}_part{new_num_paths:03d}of{new_num_paths:03d}.jsonl')  # Note: If this line executes then last_lines will be non-empty further below, and thus the file will be saved later on and will exist for sure with at least one entry
-					self.data.last_entries = 0
-					self.data.last_size = 0
-					if entry_size > self.max_size > 0:
-						raise ValueError(f"Entry of size {entry_size} cannot be appended to the currently EMPTY task output file due to over-restrictive max size of {self.max_size}")
-				last_lines.append(entry_line)
-				self.data.last_entries += 1
-				self.data.last_size += entry_size
+		for entry in self.data.entries:
+			entry_line = (utils.json_from_dataclass(obj=entry, indent=None) + '\n').encode('utf-8')
+			entry_size = len(entry_line)
+			if self.data.last_entries + 1 > self.max_entries > 0 or self.data.last_size + entry_size > self.max_size > 0:
+				if last_lines:
+					save_last_lines()
+				new_num_paths = len(self.data.paths) + 1
+				self.data.paths.append(f'{self.path_base}_part{new_num_paths:03d}of{new_num_paths:03d}.jsonl')  # Note: If this line executes then last_lines will be non-empty further below, and thus the file will be saved later on and will exist for sure with at least one entry
+				self.data.last_entries = 0
+				self.data.last_size = 0
+				if entry_size > self.max_size > 0:
+					raise ValueError(f"Entry of size {entry_size} cannot be appended to the currently EMPTY task output file due to over-restrictive max size of {self.max_size}")
+			last_lines.append(entry_line)
+			self.data.last_entries += 1
+			self.data.last_size += entry_size
 
-			if last_lines:
-				save_last_lines()
+		if last_lines:
+			save_last_lines()
 
-			if len(self.data.paths) > 1:
-				for p, path in enumerate(self.data.paths):
-					correct_path = f'{self.path_base}_part{p + 1:03d}of{len(self.data.paths):03d}.jsonl'
-					if path != correct_path:
+		if len(self.data.paths) > 1:
+			for p, path in enumerate(self.data.paths):
+				correct_path = f'{self.path_base}_part{p + 1:03d}of{len(self.data.paths):03d}.jsonl'
+				if path != correct_path:
+					if not self.dryrun:
 						os.replace(src=path, dst=correct_path)
 						rstack.callback(os.replace, src=correct_path, dst=path)
-						self.data.paths[p] = correct_path
+					self.data.paths[p] = correct_path
 
+		if self.dryrun:
+			log.warning(f"{gpt_requester.DRYRUN}Did not append {len(self.data.entries)} entries to the now {len(self.data.paths)} task output file(s) (added {utils.format_size_iec(added_entry_size)})")
+		else:
 			log.info(f"Appended {len(self.data.entries)} entries to the now {len(self.data.paths)} task output file(s) (added {utils.format_size_iec(added_entry_size)})")
 
 		self.data.entries.clear()
