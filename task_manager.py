@@ -344,7 +344,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 			log.info(f"Created empty initial task output file: {os.path.basename(path)}")
 
 	def reset(self, rstack: utils.RevertStack):
-		if self.data is not None:
+		if self.data is not None and not self.dryrun:
 			for path in self.data.paths:
 				utils.safe_unlink(path=path, rstack=rstack)
 		self.create(rstack=rstack)
