@@ -9,6 +9,8 @@ import http
 import json
 import time
 import heapq
+import pprint
+import shutil
 import getpass
 import logging
 import argparse
@@ -537,8 +539,8 @@ class ResultInfo:
 	req_jsonl_size: int                # Request JSONL size (bytes)
 	req_payload: dict[str, Any]        # Request payload (JSON-loaded)
 	req_info: RequestInfo              # Request information
-	resp_info: Optional[ResponseInfo]  # Response information (if available / at least one of resp_info or err_info always exists)
-	err_info: Optional[ErrorInfo]      # Error information (if errored / at least one of resp_info or err_info always exists)
+	resp_info: Optional[ResponseInfo]  # Response information (if available / both resp_info and err_info may be None if dry run is active)
+	err_info: Optional[ErrorInfo]      # Error information (if errored / both resp_info and err_info may be None if dry run is active)
 	warn_infos: list[ErrorInfo]        # Warning information (if warnings occurred)
 	retry_counts: bool                 # Whether a retry of this request counts towards the maximum retry count (e.g. by default a retry due to batch cancellation or expiration does not count as a retry)
 	retry: bool                        # Whether the request should be retried (as something retryable went wrong)
@@ -590,7 +592,7 @@ class GPTRequester:
 		name_prefix: str,                                         # Name prefix to use for all files created in the GPT working directory (e.g. 'my_gpt_requester')
 		*,                                                        # Keyword arguments only beyond here
 
-		dryrun: bool = False,                                     # Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished/direct batches, no writing to disk, ...)
+		dryrun: bool = False,                                     # Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished batches, no writing to disk, ...)
 		only_process: bool = False,                               # Whether to solely process existing unfinished remote batches and not generate/commit/push anything new
 		process_failed_batches: int = 0,                          # Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (-1 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)
 		retry_fatal_requests: bool = False,                       # Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them
@@ -915,7 +917,7 @@ class GPTRequester:
 		group = parser.add_argument_group(title=title, description=description, **(group_kwargs if group_kwargs is not None else {})) if isinstance(parser, argparse.ArgumentParser) else parser
 		add_argument = functools.partial(utils.add_init_argparse, cls=GPTRequester, parser=group, defaults=defaults)
 
-		add_argument(name='dryrun', help="Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished/direct batches, no writing to disk, ...)")
+		add_argument(name='dryrun', help="Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished batches, no writing to disk, ...)")
 		add_argument(name='only_process', help="Whether to solely process existing unfinished remote batches and not generate/commit/push anything new")
 		add_argument(name='process_failed_batches', metavar='MAXNUM', help="Whether to force the processing of any failed batches, thereby finalizing them and clearing them from the remote and pipeline (<0 = Process all failed batches, 0 = Do not process any failed batches, >0 = Process at most N failed batches in this session)")
 		add_argument(name='retry_fatal_requests', help="Whether to retry fatal requests from failed batches that are processed, or otherwise skip and fail them")
@@ -1220,7 +1222,8 @@ class GPTRequester:
 		# reqs = The requests to make using the direct API (raw, itemized and/or cached requests can be provided)
 		# yield_retry_reqs = Whether to yield tuples (for complete transparency of operations) containing any retry requests that are generated and will be internally executed (in addition to, and generally alternating with, the tuples containing the virtual batch results for which the retry behaviour can still be modified)
 		# The provided requests are auto-split into virtual batches based on direct request number/token limits and such
-		# Either processes and returns results for all requests (plus associated retries) one virtual batch at a time, or eventually yields limited=True and discontinues (after a possible trailing retry requests yield), or dry run is active, or raises an exception if an unresolvable issue occurs
+		# Either processes and returns results for all requests (plus associated retries) one virtual batch at a time, or eventually yields limited=True and discontinues (after a possible trailing retry requests yield), or raises an exception if an unresolvable issue occurs
+		# If dry run is active, the returned results will have both resp_info=None and err_info=None
 		# This method is implemented as a generator that returns tuples of:
 		#   - A RevertStack that should be used to reversibly update and save the task state and output file(s)
 		#   - The results for one virtual batch at a time (the total number of results obtained may exceed the number of requests given due to retries)
@@ -1234,31 +1237,23 @@ class GPTRequester:
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
 		# Note: Calling close() prior to complete iteration or executing break or return statements while iterating in a for-loop causes a GeneratorExit exception to internally be raised, which makes the currently active RevertStack unwind with an exception and thereby revert all currently performed work!
 		# TODO: Ensure the DOC above is the ACTUAL behaviour
+		# TODO: Ripple caller-upwards the new DRY RUN behaviour
 
-		# TODO: Limited is true ONLY if only_process mode OR it was NOT possible to execute at least ONE request (or retry)
 		# TODO: yield_retry_reqs => Yield a fourth tuple element Optional[list[CachedGPTRequest]] -> retry_reqs must be GUARANTEED if activated (to make sure SAVEs occur)
-		# TODO: This must internally stop iterating (and LOG a warning) as SOON as it reaches direct limits (and that virtual batch has been finished up, taking it to the very limit)
-		# TODO: Dry run should have direct limits reached always False, and NO trailing limited=True or so! (unlike previously thought)
-		# TODO: LOG when direct limits are reached! (warning)
 		# TODO: Go through and clear out text file (more TODOs and checks and ideas)
 		# TODO: REQUIRE:
 		#  - direct_requests(yield_retry_reqs=True): Returns result.info for all passed reqs and emitted retry_reqs in yields with retry_reqs is not None OR limited=True yielded at some point OR dryrun (last is NOTTTT limited=True anyway) OR Raise exception
 		#  - direct_requests should respect session/task limits EVEN if dryrun
-		#  - Requests need to increment max_request_id
-		#  - Retries need to count towards session/task limits
+		#  - (Retry?) Requests need to increment max_request_id
 		#  - Every non-retry with a batch result IS followed by a retry with the same BatchResult
-		#  - dry run just yields (None, None, False, None) for every virtual batch
-		#  - All internal loops must break on first limited=True
+		#  - dry run yields results with both resp_info=None and err_info=None
 		# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
-		# TODO: Show non-tqdm 10s-like progress as direct requests are completed / 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
+		# TODO: Show non-tqdm 10s-like progress (req_id, req num #/#) as direct requests are completed / 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
 		# TODO: Verbose mode (still shows request even if dry run!!!)
-		# TODO: What guarantees do you have/need when calling this method? Maybe: Either ALL requests get yielded even if failed (updates task state) OR exception raised OR only_process/dryrun
-		# TODO: Direct -> Respect session/task push limits? would need to raise, or does the step() naturally end when returning early (BAD, irrevocably lost some requests!)
-		# TODO: If using direct mode on committed samples/requests, somehow need to guarantee that they really get done, but sometimes they don't (e.g. task limits)? How to deal with that? Don't want to FAIL them!!
 
 		if self.only_process:
 			log.warning("Only-process mode => Not making any direct requests")
-			yield None, None, True  # Direct limits have immediately been reached if only-process mode
+			yield None, None, True, None  # Direct limits have immediately been reached if only-process mode
 			return
 
 		if isinstance(reqs, (GPTRequest, GPTRequestItem, CachedGPTRequest)):
@@ -1266,20 +1261,28 @@ class GPTRequester:
 		else:
 			reqs_list = list(reqs)
 
-		num_reqs = len(reqs_list)
-		log.info(f"Executing {num_reqs} requests using direct API...")
+		num_input_reqs = len(reqs_list)
+		log.info(f"Executing {num_input_reqs} requests using the direct API...")
 
 		delayed_raise = utils.DelayedRaise()
+		direct_limits_reached = False
+		direct_limits_list = None
+		num_direct_batches = 0
 
 		index = 0
-		while index < len(reqs_list):
+		while index < len(reqs_list) and not direct_limits_reached:
 
 			delayed_raise.new_section()
 
 			batch = BatchState()
 			cached_reqs: dict[int, CachedGPTRequest] = {}
 
-			while index < len(reqs_list):
+			post_batch_task_requests = self.S.task_push_stats.total_requests
+			post_batch_session_requests = self.session_push_stats.total_requests
+			post_batch_task_tokens_cost = self.S.task_push_stats.total_tokens_cost
+			post_batch_session_tokens_cost = self.session_push_stats.total_tokens_cost
+
+			while index < len(reqs_list) and not direct_limits_reached:
 
 				cached_req = reqs_list[index]
 				if isinstance(cached_req, GPTRequest):
@@ -1288,19 +1291,57 @@ class GPTRequester:
 					cached_req = CachedGPTRequest.from_item(item=cached_req, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
 				if not isinstance(cached_req, CachedGPTRequest):
 					raise TypeError(f"Expected a CachedGPTRequest but got a {utils.get_class_str(type(cached_req))}")
+				reqs_list[index] = cached_req
+
+				next_task_requests = post_batch_task_requests + 1
+				next_session_requests = post_batch_session_requests + 1
+				next_task_tokens_cost = TokensCost(
+					input_tokens=post_batch_task_tokens_cost.input_tokens + cached_req.info.tokens_cost.input_tokens,
+					output_tokens=post_batch_task_tokens_cost.output_tokens + cached_req.info.tokens_cost.output_tokens,
+					cost_input_direct=post_batch_task_tokens_cost.cost_input_direct + cached_req.info.tokens_cost.cost_input_direct,
+					cost_input_batch=post_batch_task_tokens_cost.cost_input_batch,
+					cost_output_direct=post_batch_task_tokens_cost.cost_output_direct + cached_req.info.tokens_cost.cost_output_direct,
+					cost_output_batch=post_batch_task_tokens_cost.cost_output_batch,
+				)
+				next_session_tokens_cost = TokensCost(
+					input_tokens=post_batch_session_tokens_cost.input_tokens + cached_req.info.tokens_cost.input_tokens,
+					output_tokens=post_batch_session_tokens_cost.output_tokens + cached_req.info.tokens_cost.output_tokens,
+					cost_input_direct=post_batch_session_tokens_cost.cost_input_direct + cached_req.info.tokens_cost.cost_input_direct,
+					cost_input_batch=post_batch_session_tokens_cost.cost_input_batch,
+					cost_output_direct=post_batch_session_tokens_cost.cost_output_direct + cached_req.info.tokens_cost.cost_output_direct,
+					cost_output_batch=post_batch_session_tokens_cost.cost_output_batch,
+				)
 
 				next_num_requests = batch.num_requests + 1
 				next_tokens_cost = batch.tokens_cost + cached_req.info.tokens_cost
 
-				assert not batch.reasons
+				assert not batch.reasons and not direct_limits_reached
+
+				if next_task_requests > self.max_task_requests:
+					batch.reasons.append('Max task requests')
+				if next_task_tokens_cost.input_tokens > self.max_task_tokens:
+					batch.reasons.append('Max task tokens')
+				if next_task_tokens_cost.cost > self.max_task_cost:
+					batch.reasons.append('Max task cost')
+				if next_session_requests > self.max_session_requests:
+					batch.reasons.append('Max session requests')
+				if next_session_tokens_cost.input_tokens > self.max_session_tokens:
+					batch.reasons.append('Max session tokens')
+				if next_session_tokens_cost.cost > self.max_session_cost:
+					batch.reasons.append('Max session cost')
+				if batch.reasons:
+					direct_limits_reached = True
+					direct_limits_list = sorted(batch.reasons)
+
 				if next_num_requests > self.max_direct_requests:
 					batch.reasons.append('Max direct requests')
 				if next_tokens_cost.input_tokens > self.max_direct_tokens:
 					batch.reasons.append('Max direct tokens')
 				if next_tokens_cost.cost_direct > self.max_direct_cost:
 					batch.reasons.append('Max direct cost')
+
 				if batch.reasons:
-					if batch.num_requests <= 0:
+					if batch.num_requests <= 0 and not direct_limits_reached:
 						raise ValueError(f"The direct batch limits are too strict to allow even a single request to be added: Batch requests {next_num_requests} > {self.max_direct_requests} OR Batch tokens {next_tokens_cost.input_tokens} > {self.max_direct_tokens} OR Batch cost {next_tokens_cost.cost_direct} > {self.max_direct_cost}")
 					batch.full_batch = True
 					break
@@ -1314,12 +1355,22 @@ class GPTRequester:
 				assert req_id not in cached_reqs
 				cached_reqs[req_id] = cached_req
 
+				post_batch_task_requests = next_task_requests
+				post_batch_session_requests = next_session_requests
+				post_batch_task_tokens_cost = next_task_tokens_cost
+				post_batch_session_tokens_cost = next_session_tokens_cost
+
 				index += 1
 
-			assert batch.num_requests == len(batch.request_info) >= 1
+			if batch.num_requests <= 0 and direct_limits_reached:
+				yield None, None, direct_limits_reached, None  # Direct limits have immediately been reached on attempting to create a direct batch
+				break
+
+			assert batch.num_requests == len(batch.request_info) > 0
 			assert batch.tokens_cost.equals(TokensCost().add(req_info.tokens_cost for req_info in batch.request_info.values()))
 			assert batch.request_info.keys() == cached_reqs.keys()
 
+			num_direct_batches += 1
 			self.max_direct_batch_id += 1
 			batch.id = self.max_direct_batch_id
 			batch.local_jsonl = f'direct-{batch.id}.jsonl'  # Note: Dummy file path that of course in general does not actually exist
@@ -1327,53 +1378,57 @@ class GPTRequester:
 				batch.reasons.append('No more requests')
 			log.info(f"Created direct batch {batch.id} = {'Full' if batch.full_batch else 'Trailing'} virtual batch of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_direct:.3f} assumed cost, due to reasons: {', '.join(sorted(batch.reasons))}")
 
-			if self.dryrun:  # TODO: CHANGE this implementation so that it gets as far as PRINTING the requests that would be sent off (self.endpoint AND cached_req.item.req.payload)
-				log.warning(f"{DRYRUN}Not executing direct batch {batch.id}")
+			if self.dryrun:
+				log.warning(f"{DRYRUN}Not actually executing requests in direct batch {batch.id}")
 			else:
-
 				log.info(f"Executing direct batch {batch.id}...")
 
-				created_time = int(time.time())
-				input_file_id = f'direct-file-input-{batch.id}'
-				batch.remote = RemoteBatchState(
-					file=openai.types.FileObject(
-						id=input_file_id,
-						bytes=batch.local_jsonl_size,
-						created_at=created_time,
-						filename=batch.local_jsonl,
-						object='file',
-						purpose='batch',
-						status='processed',
-					),
-					batch=openai.types.Batch(
-						id=f'direct_batch_{batch.id}',
-						completion_window='24h',
-						created_at=created_time,
-						endpoint=self.endpoint,
-						input_file_id=input_file_id,
-						object='batch',
-						status='in_progress',
-						expires_at=created_time + 86400,
-						in_progress_at=created_time,
-						metadata=self.generate_batch_metadata(batch=batch),
-					),
-					finished=False,
-				)
+			created_time = int(time.time())
+			input_file_id = f'direct-file-input-{batch.id}'
+			batch.remote = RemoteBatchState(
+				file=openai.types.FileObject(
+					id=input_file_id,
+					bytes=batch.local_jsonl_size,
+					created_at=created_time,
+					filename=batch.local_jsonl,
+					object='file',
+					purpose='batch',
+					status='processed',
+				),
+				batch=openai.types.Batch(
+					id=f'direct_batch_{batch.id}',
+					completion_window='24h',
+					created_at=created_time,
+					endpoint=self.endpoint,
+					input_file_id=input_file_id,
+					object='batch',
+					status='in_progress',
+					expires_at=created_time + 86400,
+					in_progress_at=created_time,
+					metadata=self.generate_batch_metadata(batch=batch),
+				),
+				finished=False,
+			)
 
-				raise_if_batch_failed = self.session_processed_failed_batches >= self.process_failed_batches >= 0
-				batch_failed = False
+			raise_if_batch_failed = self.session_processed_failed_batches >= self.process_failed_batches >= 0
+			batch_failed = False
 
-				result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
-				warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
-				err_resp_retry, err_resp_fatal = [utils.LogSummarizer(log_fn=log.error, show_msgs=self.show_errors) for _ in range(2)]
+			result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
+			warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
+			err_resp_retry, err_resp_fatal = [utils.LogSummarizer(log_fn=log.error, show_msgs=self.show_errors) for _ in range(2)]
 
-				num_api_calls = 0
-				for req_id, req_info in batch.request_info.items():
+			num_api_calls = 0
+			for req_id, req_info in batch.request_info.items():
 
-					cached_req = cached_reqs[req_id]
+				cached_req = cached_reqs[req_id]
 
-					resp_info = None
-					warn_infos = []
+				resp_info = None
+				warn_infos = []
+
+				if self.dryrun:
+					err_info = None  # Note: The only instance where neither resp_info nor err_info is non-None (internal only - NOT yielded)
+
+				else:
 
 					try:
 
@@ -1409,148 +1464,165 @@ class GPTRequester:
 						assert resp_model is not None and resp_system_fingerprint is not None and resp_usage is not None
 						resp_info = ResponseInfo(payload=resp_payload, model=resp_model, system_fingerprint=resp_system_fingerprint, usage=resp_usage)
 
-					for warn_info in warn_infos:
-						warn_resp.log(f"Direct batch {batch.id} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
-
-					if err_info is not None:
-						err_msg = f"Direct batch {batch.id} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
-						if err_info.fatal:
-							err_resp_fatal.log(err_msg)
-							if raise_if_batch_failed:
-								delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")
-							batch_failed = True
-						else:
-							err_resp_retry.log(err_msg)
-
-					assert resp_info is not None or err_info is not None
-					result_info_map[req_id] = ResultInfo(
-						req_id=req_id,
-						req_jsonl_size=cached_req.info.json_size,
-						req_payload=cached_req.item.req.payload,
-						req_info=req_info,
-						resp_info=resp_info,
-						err_info=err_info,
-						warn_infos=warn_infos,
-						retry_counts=True,
-						retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests) and req_info.retry_num < self.max_retries,
+				if self.direct_verbose == DirectVerboseMode.ALWAYS or (self.direct_verbose >= DirectVerboseMode.WARN and warn_infos) or (self.direct_verbose >= DirectVerboseMode.ERROR and err_info is not None):
+					width = shutil.get_terminal_size().columns
+					verbose_msg = (
+						"\n"
+						f"{'*' * width}\n"
+						f"REQUEST ID: {req_id}\n"
+						f"REQUEST INFO:\n{pprint.pformat(req_info, indent=2, width=width, compact=True, sort_dicts=False)}\n"  # TODO: Convert top-level only to dict?
+						"METHOD: POST\n"
+						f"ENDPOINT: {self.endpoint}\n"
+						f"REQUEST JSON:\n{pprint.pformat(cached_req.item.req.payload, indent=2, width=width, compact=True, sort_dicts=False)}\n"
+						f"{'*' * width}"
 					)
+					if resp_info is not None:
+						verbose_msg += (
+							"\n"
+							f"RESPONSE INFO:\n{pprint.pformat(resp_info, indent=2, width=width, compact=True, sort_dicts=False)}\n"  # TODO: Convert top-level only to dict?
+							f"{'*' * width}"
+						)
+					log.info(verbose_msg)
 
-				warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further warnings for direct batch {batch.id} (total {num_total} warnings)")
-				err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further retryable errors for direct batch {batch.id} (total {num_total} errors)")
-				err_resp_fatal.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further fatal errors for direct batch {batch.id} (total {num_total} errors)")
+				for warn_info in warn_infos:
+					warn_resp.log(f"Direct batch {batch.id} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
 
-				assert result_info_map.keys() == batch.request_info.keys()
+				if err_info is not None:
+					err_msg = f"Direct batch {batch.id} request ID {req_id} got {'fatal' if err_info.fatal else 'retryable'} error {err_info.type}({err_info.subtype}): {err_info.msg}"
+					if err_info.fatal:
+						err_resp_fatal.log(err_msg)
+						if raise_if_batch_failed:
+							delayed_raise.add(msg=f"Request got fatal error {err_info.type}({err_info.subtype})")
+						batch_failed = True
+					else:
+						err_resp_retry.log(err_msg)
 
-				completed_time = int(time.time())
-				batch.remote.status = 'completed'
-				batch.remote.batch.completed_at = completed_time
-				result_has_err_info = tuple(result_info.err_info is not None for result_info in result_info_map.values())
-				if any(result_has_err_info):
-					batch.remote.batch.error_file_id = f'direct-file-error-{batch.id}'
-				batch.remote.batch.finalizing_at = completed_time
-				if not all(result_has_err_info):
-					batch.remote.batch.output_file_id = f'direct-file-output-{batch.id}'
-				assert len(result_info_map) == batch.num_requests
-				num_err_infos = sum(result_has_err_info)
-				batch.remote.batch.request_counts = openai.types.BatchRequestCounts(
-					completed=len(result_info_map) - num_err_infos,
-					failed=num_err_infos,
-					total=len(result_info_map),
-				)
-				batch.remote.finished = True
-
-				log.info(f"Finished executing direct batch {batch.id}")
-
-				result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed = self.process_result_info_map(
-					batch=batch,
-					batch_errors=[],
-					result_info_map=result_info_map,
-					req_payload_map={req_id: (cached_req.info.json_size, cached_req.item.req.payload) for req_id, cached_req in cached_reqs.items()},
-					direct_mode=True,
+				assert resp_info is not None or err_info is not None or self.dryrun
+				result_info_map[req_id] = ResultInfo(
+					req_id=req_id,
+					req_jsonl_size=cached_req.info.json_size,
+					req_payload=cached_req.item.req.payload,
+					req_info=req_info,
+					resp_info=resp_info,
+					err_info=err_info,
+					warn_infos=warn_infos,
+					retry_counts=True,
+					retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests) and req_info.retry_num < self.max_retries,
 				)
 
-				if delayed_raise.have_section_errors():
-					log.error(f"Aborting processing of direct batch {batch.id} results as errors were encountered (not updating saved state)")
-					continue
-				elif batch_failed:
-					log.warning(f"Processing direct batch {batch.id} results even though the direct batch at least partially failed")
+			# TODO: DRY RUN SHOULD NOT AFFECT ANY RAM STATE UNLESS UNAVOIDABLE, JUST SKIP API CALLS AND CODE DIRECTLY REQUIRING THE OUTPUT THEREOF
+			# TODO: Below here dryrun needs to be applied!
+			# TODO: Dry run needs to get as far as updating push_stats in order to respect task/session limits
+			# TODO: result_info_map is not allowed to be yielded if dry run! (resp_info is None and err_info is None)
 
-				def revert_push_stats(task_requests: int, task_tokens_cost: TokensCost, session_requests: int, session_tokens_cost: TokensCost):
-					self.S.task_push_stats.total_requests = task_requests
-					self.S.task_push_stats.total_tokens_cost = task_tokens_cost
-					self.session_push_stats.total_requests = session_requests
-					self.session_push_stats.total_tokens_cost = session_tokens_cost
+			warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further warnings for direct batch {batch.id} (total {num_total} warnings)")
+			err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further retryable errors for direct batch {batch.id} (total {num_total} errors)")
+			err_resp_fatal.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further fatal errors for direct batch {batch.id} (total {num_total} errors)")
 
-				def revert_metrics(api_metrics_direct: APIMetrics, api_metrics_all: APIMetrics):
-					self.S.metrics.all = api_metrics_all
-					self.S.metrics.direct = api_metrics_direct
+			assert result_info_map.keys() == batch.request_info.keys()
 
-				def revert_state(max_direct_batch_id: int, direct_history: list[BatchState]):
-					self.S.direct_history[:] = direct_history
-					self.S.max_direct_batch_id = max_direct_batch_id
+			completed_time = int(time.time())
+			batch.remote.status = 'completed'
+			batch.remote.batch.completed_at = completed_time
+			result_has_err_info = tuple(result_info.err_info is not None for result_info in result_info_map.values())
+			if any(result_has_err_info):
+				batch.remote.batch.error_file_id = f'direct-file-error-{batch.id}'
+			batch.remote.batch.finalizing_at = completed_time
+			if not all(result_has_err_info):
+				batch.remote.batch.output_file_id = f'direct-file-output-{batch.id}'
+			assert len(result_info_map) == batch.num_requests
+			num_err_infos = sum(result_has_err_info)
+			batch.remote.batch.request_counts = openai.types.BatchRequestCounts(
+				completed=len(result_info_map) - num_err_infos,
+				failed=num_err_infos,
+				total=len(result_info_map),
+			)
+			batch.remote.finished = True
 
-				with utils.AtomicRevertStack() as rstack:
+			log.info(f"Finished executing direct batch {batch.id}")
 
-					rstack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_requests=self.session_push_stats.total_requests, session_tokens_cost=self.session_push_stats.total_tokens_cost)
-					self.S.task_push_stats.total_requests += batch.num_requests
-					self.session_push_stats.total_requests += batch.num_requests
-					self.S.task_push_stats.total_tokens_cost = TokensCost(
-						input_tokens=self.S.task_push_stats.total_tokens_cost.input_tokens + batch.tokens_cost.input_tokens,
-						output_tokens=self.S.task_push_stats.total_tokens_cost.output_tokens + batch.tokens_cost.output_tokens,
-						cost_input_direct=self.S.task_push_stats.total_tokens_cost.cost_input_direct + batch.tokens_cost.cost_input_direct,
-						cost_input_batch=self.S.task_push_stats.total_tokens_cost.cost_input_batch,
-						cost_output_direct=self.S.task_push_stats.total_tokens_cost.cost_output_direct + batch.tokens_cost.cost_output_direct,
-						cost_output_batch=self.S.task_push_stats.total_tokens_cost.cost_output_batch,
-					)
-					self.session_push_stats.total_tokens_cost = TokensCost(
-						input_tokens=self.session_push_stats.total_tokens_cost.input_tokens + batch.tokens_cost.input_tokens,
-						output_tokens=self.session_push_stats.total_tokens_cost.output_tokens + batch.tokens_cost.output_tokens,
-						cost_input_direct=self.session_push_stats.total_tokens_cost.cost_input_direct + batch.tokens_cost.cost_input_direct,
-						cost_input_batch=self.session_push_stats.total_tokens_cost.cost_input_batch,
-						cost_output_direct=self.session_push_stats.total_tokens_cost.cost_output_direct + batch.tokens_cost.cost_output_direct,
-						cost_output_batch=self.session_push_stats.total_tokens_cost.cost_output_batch,
-					)
+			result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed = self.process_result_info_map(
+				batch=batch,
+				batch_errors=[],
+				result_info_map=result_info_map,
+				req_payload_map={req_id: (cached_req.info.json_size, cached_req.item.req.payload) for req_id, cached_req in cached_reqs.items()},
+				direct_mode=True,
+			)
 
-					rstack.callback(revert_metrics, api_metrics_direct=copy.deepcopy(self.S.metrics.direct), api_metrics_all=copy.deepcopy(self.S.metrics.all))
-					batch.true_tokens_cost = batch_true_tokens_cost
-					batch.metrics = APIMetrics()
-					for api_metrics in (batch.metrics, self.S.metrics.direct, self.S.metrics.all):
-						api_metrics.num_api_calls += num_api_calls
-						api_metrics.succeeded.add_metrics(batch_metrics_succeeded)
-						api_metrics.failed.add_metrics(batch_metrics_failed)
-						api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
+			if delayed_raise.have_section_errors():
+				log.error(f"Aborting processing of direct batch {batch.id} results as errors were encountered (not updating saved state)")
+				yield None, None, direct_limits_reached, None  # Direct limits may have been reached, so need to communicate that in the absence of passing/saving batch results
+				continue
+			elif batch_failed:
+				log.warning(f"Processing direct batch {batch.id} results even though the direct batch at least partially failed")
 
-					yield rstack, result, LIMITED, None  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
+			def revert_push_stats(task_requests: int, session_requests: int, task_tokens_cost: TokensCost, session_tokens_cost: TokensCost):
+				self.S.task_push_stats.total_requests = task_requests
+				self.session_push_stats.total_requests = session_requests
+				self.S.task_push_stats.total_tokens_cost = task_tokens_cost
+				self.session_push_stats.total_tokens_cost = session_tokens_cost
 
-					rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy())
-					self.S.max_direct_batch_id = self.max_direct_batch_id
-					batch.request_info = {}
-					self.S.direct_history.append(batch)
-					self.S.direct_history.sort()
+			def revert_metrics(api_metrics_direct: APIMetrics, api_metrics_all: APIMetrics):
+				self.S.metrics.all = api_metrics_all
+				self.S.metrics.direct = api_metrics_direct
 
-					# TODO: ISSUE: Is the state-saved max_request_id appropriately updated?! REQUIRE: self.S.max_request_id = self.max_request_id (normally happens during commit)
-					# TODO: Need to already assign new IDs here right! (create item + cached_req) So that can yield it (yield is list[CachedGPTRequest])
-					retry_reqs = [GPTRequest(
-						payload=info.req_payload,
-						meta=info.req_info.meta,
-						retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
-					) for info in result.info.values() if info.retry]
+			def revert_state(max_direct_batch_id: int, direct_history: list[BatchState]):
+				self.S.direct_history[:] = direct_history
+				self.S.max_direct_batch_id = max_direct_batch_id
 
-					if retry_reqs:
-						log.info(f"{len(retry_reqs)} requests need to be retried and will be appended to the direct request queue...")
-						reqs_list.extend(retry_reqs)
+			with utils.AtomicRevertStack() as rstack:
 
-					# TODO: Always yield if yield_retry_reqs (prior to SAVE of state)
+				# TODO: Dry run MUST actually get here and update these (otherwise it won't respect task limits)
+				rstack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, session_requests=self.session_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_tokens_cost=self.session_push_stats.total_tokens_cost)
+				self.S.task_push_stats.total_requests = post_batch_task_requests
+				self.session_push_stats.total_requests = post_batch_session_requests
+				self.S.task_push_stats.total_tokens_cost = post_batch_task_tokens_cost
+				self.session_push_stats.total_tokens_cost = post_batch_session_tokens_cost
 
-					self.validate_state_queue(clean=False)
-					self.state.save(rstack=rstack)
+				rstack.callback(revert_metrics, api_metrics_direct=copy.deepcopy(self.S.metrics.direct), api_metrics_all=copy.deepcopy(self.S.metrics.all))
+				batch.true_tokens_cost = batch_true_tokens_cost
+				batch.metrics = APIMetrics()
+				for api_metrics in (batch.metrics, self.S.metrics.direct, self.S.metrics.all):
+					api_metrics.num_api_calls += num_api_calls
+					api_metrics.succeeded.add_metrics(batch_metrics_succeeded)
+					api_metrics.failed.add_metrics(batch_metrics_failed)
+					api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
 
-					if batch_failed:
-						rstack.callback(setattr, self, 'session_processed_failed_batches', self.session_processed_failed_batches)
-						self.session_processed_failed_batches += 1
-						log.warning(f"Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
+				# TODO: If dry run then yield None, None, direct_limits_reached, Nonr
+				yield rstack, result, direct_limits_reached, None  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
-		log.info(f"Executed {num_reqs} requests ({len(reqs_list)} including retries) using direct API")
+				rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy())
+				self.S.max_direct_batch_id = self.max_direct_batch_id
+				batch.request_info = {}
+				self.S.direct_history.append(batch)
+				self.S.direct_history.sort()
+
+				# TODO: Need to update state max_request_id
+				# TODO: ISSUE: Is the state-saved max_request_id appropriately updated?! REQUIRE: self.S.max_request_id = self.max_request_id (normally happens during commit)
+				# TODO: Need to already assign new IDs here right! (create item + cached_req) So that can yield it (yield is list[CachedGPTRequest])
+				retry_reqs = [GPTRequest(
+					payload=info.req_payload,
+					meta=info.req_info.meta,
+					retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
+				) for info in result.info.values() if info.retry]
+
+				if retry_reqs:
+					log.info(f"{len(retry_reqs)} requests need to be retried and will be appended to the direct request queue...")
+					reqs_list.extend(retry_reqs)
+
+				# TODO: Always yield if yield_retry_reqs (prior to SAVE of state)
+
+				self.validate_state_queue(clean=False)
+				self.state.save(rstack=rstack)
+
+				if batch_failed:
+					rstack.callback(setattr, self, 'session_processed_failed_batches', self.session_processed_failed_batches)
+					self.session_processed_failed_batches += 1
+					log.warning(f"Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
+
+		if direct_limits_reached:
+			log.warning(f"Direct limits were reached while executing requests using the direct API: {', '.join(direct_limits_list)}")
+		log.info(f"Executed {min(index, num_input_reqs)} requests ({index} including retries) in {num_direct_batches} direct batches using the direct API")
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing direct batches")
 
 		if reqs_list:
@@ -2085,9 +2157,10 @@ class GPTRequester:
 				utils.print_in_place(print_str)
 				printed_str = print_str
 
-	# Generator: Execute, process and clean up after any unpushable batches (unless dry run)
+	# Generator: Execute, process and clean up after any unpushable batches
 	def process_unpushable_batches(self) -> Iterable[tuple[Optional[utils.RevertStack], Optional[BatchResult], bool]]:
-		# Either processes all unpushable batches one virtual (sub-)batch at a time, or eventually yields limited=True and discontinues, or dry run is active, or raises an exception if an unresolvable issue occurs
+		# Either processes all unpushable batches one virtual (sub-)batch at a time, or eventually yields limited=True and discontinues, or raises an exception if an unresolvable issue occurs
+		# If dry run is active, the returned results will have both resp_info=None and err_info=None
 		# This method is implemented as a generator that returns tuples of:
 		#   - A RevertStack that should be used to reversibly update and save the task state and output file(s)
 		#   - The results for one direct/virtual batch at a time (unpushable batches are auto-split into potentially smaller direct batch(es))
@@ -2137,7 +2210,7 @@ class GPTRequester:
 
 						else:
 
-							assert rstack is not None and result is not None and limited is None and not self.dryrun
+							assert rstack is not None and result is not None and limited is None
 
 							def revert_batch(orig_batch: BatchState):
 								for field in dataclasses.fields(BatchState):  # noqa
@@ -2165,16 +2238,22 @@ class GPTRequester:
 							assert batch.true_tokens_cost is None and batch.metrics is None
 
 							if batch.num_requests > 0:
-								with utils.SafeOpenForWrite(path=batch.local_jsonl, rstack=rstack) as file:
-									file.writelines(cached_req.info.json for cached_req in cached_req_map.values())
-									file_size = utils.get_file_size(file)
-								assert file_size == batch.local_jsonl_size
-								log.info(f"Updated batch {batch.id} = Unpushable local batch now of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}]")
+								if self.dryrun:
+									log.warning(f"{DRYRUN}Did not update batch {batch.id} = Unpushable local batch now of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}]")
+								else:
+									with utils.SafeOpenForWrite(path=batch.local_jsonl, rstack=rstack) as file:
+										file.writelines(cached_req.info.json for cached_req in cached_req_map.values())
+										file_size = utils.get_file_size(file)
+									assert file_size == batch.local_jsonl_size
+									log.info(f"Updated batch {batch.id} = Unpushable local batch now of size {utils.format_size_si(batch.local_jsonl_size)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost [{os.path.basename(batch.local_jsonl)}]")
 							else:
 								rstack.callback(self.S.batches.__setitem__, slice(None), self.S.batches.copy())  # noqa
 								self.S.batches.remove(batch)
-								utils.safe_unlink(path=batch.local_jsonl, rstack=rstack)
-								log.info(f"Removed batch {batch.id} = Unpushable local batch that became empty [{os.path.basename(batch.local_jsonl)}]")
+								if self.dryrun:
+									log.warning(f"{DRYRUN}Did not remove batch {batch.id} = Unpushable local batch that became empty [{os.path.basename(batch.local_jsonl)}]")
+								else:
+									utils.safe_unlink(path=batch.local_jsonl, rstack=rstack)
+									log.info(f"Removed batch {batch.id} = Unpushable local batch that became empty [{os.path.basename(batch.local_jsonl)}]")
 								num_batches_finished += 1
 								batch_wiped = True
 
@@ -2195,8 +2274,8 @@ class GPTRequester:
 				if batch_wiped:
 					log.info(f"Finished direct execution and processing of unpushable batch {batch.id}")
 				else:
-					assert direct_limits_reached or self.dryrun
-					log.warning(f"Stopping direct execution and processing of unfinished unpushable batch {batch.id}{' as direct limits have been reached' if direct_limits_reached else ' as dry run' if self.dryrun else ''}")
+					assert direct_limits_reached
+					log.warning(f"Stopping direct execution and processing of unfinished unpushable batch {batch.id} as direct limits have been reached")
 
 				if direct_limits_reached:
 					break

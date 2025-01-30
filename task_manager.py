@@ -750,10 +750,10 @@ class TaskManager:
 	# Make and process a series of direct requests
 	def direct_requests(self, reqs: Union[Iterable[Union[gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]], gpt_requester.GPTRequest, gpt_requester.GPTRequestItem, gpt_requester.CachedGPTRequest]) -> bool:
 		# reqs = The requests to make and process using the direct API (raw, itemized and/or cached requests can be provided)
-		# Returns a boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode or dry run is active)
+		# Returns a boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode)
 		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history
 
-		direct_limits_reached = self.GR.only_process or self.GR.dryrun
+		direct_limits_reached = False
 		for rstack, result, limited, _ in self.GR.direct_requests(reqs=reqs, yield_retry_reqs=False):
 			if rstack is not None and result is not None:
 				self.call_process_batch_result(result=result, rstack=rstack)
@@ -863,11 +863,11 @@ class TaskManager:
 
 	# Execute, process and clean up after as many unpushable local batches as possible (up to first reaching of direct limits)
 	def process_unpushable_batches(self) -> tuple[int, bool]:
-		# Returns how many unpushable local batches are still left after processing, and whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode or dry run is active)
+		# Returns how many unpushable local batches are still left after processing, and whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode)
 		# There will only ever be unpushable local batches left over if the direct limits were reached
 
 		num_unpushable_batches = self.GR.num_unpushable_batches()
-		direct_limits_reached = self.GR.only_process or self.GR.dryrun
+		direct_limits_reached = self.GR.only_process
 
 		if num_unpushable_batches > 0:
 			log.info(f"Attempting to process the {num_unpushable_batches} available local unpushable batches...")
@@ -916,7 +916,7 @@ class TaskManager:
 		# The following information is available for each ResultInfo instance 'info':
 		#   - The input request payload (info.req_payload: dict[str, Any]) and metadata (info.req_info.meta: Optional[dict[str, Any]])
 		#   - If a response was received for the request (info.resp_info is not None), the response in Python class/parsed format (info.resp_info.payload: openai.types.chat.ChatCompletion/ParsedChatCompletion or similar depending on auto-parse and endpoint)
-		#   - If an error occurred with the request and/or response (info.err_info is not None), the error (info.err_info: ErrorInfo) => At least one of info.err_info and info.resp_info will always be non-None
+		#   - If an error occurred with the request and/or response (info.err_info is not None), the error (info.err_info: ErrorInfo) => At least one of info.err_info and info.resp_info will always be non-None UNLESS dry run is active
 		#   - If warnings occurred while processing the response, the warnings (info.warn_infos: list[ErrorInfo])---warnings occur for example if multiple completion choices are requested and some choices fail somehow while others don't
 		#   - Whether the request will be retried (info.retry: bool) and whether the current result counts towards the retry number (info.retry_counts: bool / e.g. batch cancellation or expiry by default does not count)
 		#   - The default (on entering this method) value of info.retry is never True if there is no error present (info.err_info is None)

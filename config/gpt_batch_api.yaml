@@ -4,7 +4,7 @@
 ##  General  ##
 ###############
 
-# Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished/direct batches, no writing to disk, ...)
+# Whether to perform a dry run (e.g. no OpenAI API calls, no pushing batches to remote, no processing finished batches, no writing to disk, ...)
 dryrun: False
 
 # OpenAI API key (see openai.OpenAI, ends up in request headers)
