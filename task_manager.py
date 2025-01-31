@@ -674,7 +674,7 @@ class TaskManager:
 	def log_status(self):
 		num_ongoing = len(self.T.committed_samples.keys() - self.T.failed_samples.keys() - self.T.succeeded_samples.keys())
 		num_done = len(self.T.committed_samples) - num_ongoing
-		log.info(f"There are {len(self.T.committed_samples)} committed ({num_ongoing} ongoing and {num_done} done), {len(self.T.failed_samples)} failed, {len(self.T.succeeded_samples)} succeeded SAMPLES")
+		log.info(f"There are {len(self.T.committed_samples)} committed ({num_ongoing} ongoing and {num_done} done), {len(self.T.failed_samples)} failed, {len(self.T.succeeded_samples)} succeeded SAMPLES (at least partially)")
 		assert num_done == len(self.T.failed_samples) + len(self.T.succeeded_samples)
 
 	# Execute a single non-blocking step of the task manager (generates and processes as much as is currently possible without waiting)
