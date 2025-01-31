@@ -2854,11 +2854,11 @@ class GPTRequester:
 
 		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
-	# TODO: Print the actual and assumed completion ratios for the session/task (append to lines) as part of log_status()
+	# Upgrade PyCharm
+	# TODO: Print the actual and assumed completion ratios (careful .2f or so) for the session/task (append to lines) as part of log_status()
 	# TODO: If I need 3 opinions, but my first attempt fails, I immediately need 5 opinions => Does this make sense? Shouldn't I need 4, in order to reach the minimum value of 3 while just pretending the failure never happened?
 	# TODO: Change to char_codes in terms of A, B, C etc run configurations (more interesting, more volume, have failures etc)
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 	# TODO: Sync up with commands.txt
-	# TODO: Test 'safe steps' from commands.txt
-	# TODO: Inspect the entire code
+	# TODO: Inspect the entire code for problems
 # EOF
