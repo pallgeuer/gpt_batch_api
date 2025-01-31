@@ -22,7 +22,7 @@ import contextlib
 import collections
 import dataclasses
 from enum import auto
-from typing import Optional, Union, Self, Any, ContextManager, Iterable
+from typing import Optional, Union, Self, Any, ContextManager, Iterable, TextIO
 import pydantic
 import httpx
 import openai
@@ -552,6 +552,7 @@ class ResultStats:
 	duration_str: str   # Duration formatted as a 'XhYm' string (see utils.format_duration_hmin)
 	num_requests: int   # Number of requests
 	num_success: int    # Number of results with no warnings or error
+	num_empty: int      # Number of results with neither a response nor an error
 	num_warned: int     # Number of results with warnings but no error
 	num_errored: int    # Number of results with an error
 	num_retryable: int  # Number of results with a retryable error
@@ -580,6 +581,31 @@ class DirectVerboseMode(utils.OrderedEnumLU):
 	ERROR = auto()
 	WARN = auto()
 	ALWAYS = auto()
+
+# Verbose pretty printer
+class VerbosePrettyPrinter(pprint.PrettyPrinter):
+
+	def __init__(self, depth_width: int = 20, depth_extra: int = 40, depth_min: int = 3):
+		self.depth_width = max(depth_width, 3)
+		self.depth_extra = max(depth_extra, 5)
+		self.depth_min = max(depth_min, 1)
+		self.width = max(shutil.get_terminal_size().columns, 80)
+		self.depth = max((self.width - self.depth_extra) // self.depth_width, self.depth_min)
+		super().__init__(indent=2, width=self.width, depth=self.depth, compact=True, sort_dicts=False)
+
+	# noinspection PyUnresolvedReferences, PyProtectedMember, PyTypeChecker
+	def _format(self, obj: object, stream: TextIO, indent: int, allowance: int, context: dict[int, int], level: int):
+		if level == 0 and dataclasses._is_dataclass_instance(obj):
+			obj = {field.name: getattr(obj, field.name) for field in dataclasses.fields(obj)}
+		elif isinstance(obj, pydantic.BaseModel):
+			obj = {k: getattr(obj, k) for k in obj.model_fields}
+		elif isinstance(obj, str) and len(obj) > self.depth_extra - 2 and re.fullmatch(r"data:image/[a-zA-Z]{3,4};base64,[a-zA-Z0-9+/]{2,}={0,2}", obj):
+			obj = f"{obj[:(self.depth_extra - 5)]}..."
+		super()._format(object=obj, stream=stream, indent=indent, allowance=allowance, context=context, level=level)
+		if level == 0 and isinstance(obj, dict) and stream.seekable() and stream.tell() > 0:
+			stream.truncate(stream.tell() - 1)
+			stream.seek(0)
+			stream.write(' ')
 
 # GPT requester class
 @utils.init_kwargs
@@ -1236,20 +1262,11 @@ class GPTRequester:
 		# If the boolean is ever True that direct limits were reached, then no further batch results are sent
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
 		# Note: Calling close() prior to complete iteration or executing break or return statements while iterating in a for-loop causes a GeneratorExit exception to internally be raised, which makes the currently active RevertStack unwind with an exception and thereby revert all currently performed work!
-		# TODO: Ensure the DOC above is the ACTUAL behaviour
-		# TODO: Ripple caller-upwards the new DRY RUN behaviour
 
-		# TODO: yield_retry_reqs => Yield a fourth tuple element Optional[list[CachedGPTRequest]] -> retry_reqs must be GUARANTEED if activated (to make sure SAVEs occur)
-		# TODO: Go through and clear out text file (more TODOs and checks and ideas)
-		# TODO: REQUIRE:
-		#  - direct_requests(yield_retry_reqs=True): Returns result.info for all passed reqs and emitted retry_reqs in yields with retry_reqs is not None OR limited=True yielded at some point OR dryrun (last is NOTTTT limited=True anyway) OR Raise exception
-		#  - direct_requests should respect session/task limits EVEN if dryrun
-		#  - (Retry?) Requests need to increment max_request_id
-		#  - Every non-retry with a batch result IS followed by a retry with the same BatchResult
-		#  - dry run yields results with both resp_info=None and err_info=None
 		# TODO: Go through entire add/commit/push/update_remote/wait/process cycle and check everywhere that state is changed/things are logged, and make sure it's identical here! (SHOULD be fine already until end of batch_requests() / start of push_batches(), but recheck just to be sure)
+		# TODO: Ensure the DOC above is the ACTUAL behaviour
+		# TODO: Debug-step through B/C that everything makes sense
 		# TODO: Show non-tqdm 10s-like progress (req_id, req num #/#) as direct requests are completed / 10s-based status updates of how many requests have happened, how many have errored, etc (log specific errors later in reused processing code?)
-		# TODO: Verbose mode (still shows request even if dry run!!!)
 
 		if self.only_process:
 			log.warning("Only-process mode => Not making any direct requests")
@@ -1268,6 +1285,7 @@ class GPTRequester:
 		direct_limits_reached = False
 		direct_limits_list = None
 		num_direct_batches = 0
+		yielded_req_ids = []
 
 		index = 0
 		while index < len(reqs_list) and not direct_limits_reached:
@@ -1465,23 +1483,23 @@ class GPTRequester:
 						resp_info = ResponseInfo(payload=resp_payload, model=resp_model, system_fingerprint=resp_system_fingerprint, usage=resp_usage)
 
 				if self.direct_verbose == DirectVerboseMode.ALWAYS or (self.direct_verbose >= DirectVerboseMode.WARN and warn_infos) or (self.direct_verbose >= DirectVerboseMode.ERROR and err_info is not None):
-					width = shutil.get_terminal_size().columns
+					verbose_printer = VerbosePrettyPrinter()
 					verbose_msg = (
-						"\n"
-						f"{'*' * width}\n"
-						f"REQUEST ID: {req_id}\n"
-						f"REQUEST INFO:\n{pprint.pformat(req_info, indent=2, width=width, compact=True, sort_dicts=False)}\n"  # TODO: Convert top-level only to dict?
-						"METHOD: POST\n"
-						f"ENDPOINT: {self.endpoint}\n"
-						f"REQUEST JSON:\n{pprint.pformat(cached_req.item.req.payload, indent=2, width=width, compact=True, sort_dicts=False)}\n"
-						f"{'*' * width}"
+						"Below...\n"
+						f"{'*' * verbose_printer.width}\n"
+						f"\x1b[32mREQUEST ID:\x1b[0m {req_id}\n"
+						"\x1b[32mMETHOD:\x1b[0m POST\n"
+						f"\x1b[32mENDPOINT:\x1b[0m {self.endpoint}\n"
+						f"\x1b[32mREQUEST INFO:\x1b[0m\n{verbose_printer.pformat(req_info)}\n"
+						f"\x1b[32mREQUEST JSON:\x1b[0m\n{verbose_printer.pformat(cached_req.item.req.payload)}\n"
 					)
 					if resp_info is not None:
-						verbose_msg += (
-							"\n"
-							f"RESPONSE INFO:\n{pprint.pformat(resp_info, indent=2, width=width, compact=True, sort_dicts=False)}\n"  # TODO: Convert top-level only to dict?
-							f"{'*' * width}"
-						)
+						verbose_msg += f"\x1b[32mRESPONSE INFO:\x1b[0m\n{verbose_printer.pformat(resp_info)}\n"
+					if warn_infos:
+						verbose_msg += f"\x1b[38;5;226mWARNINGS:\x1b[0m\n{verbose_printer.pformat(warn_infos)}\n"
+					if err_info is not None:
+						verbose_msg += f"\x1b[38;5;196mERROR:\x1b[0m\n{verbose_printer.pformat(err_info)}\n"
+					verbose_msg += ('*' * verbose_printer.width)
 					log.info(verbose_msg)
 
 				for warn_info in warn_infos:
@@ -1509,11 +1527,6 @@ class GPTRequester:
 					retry_counts=True,
 					retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests) and req_info.retry_num < self.max_retries,
 				)
-
-			# TODO: DRY RUN SHOULD NOT AFFECT ANY RAM STATE UNLESS UNAVOIDABLE, JUST SKIP API CALLS AND CODE DIRECTLY REQUIRING THE OUTPUT THEREOF
-			# TODO: Below here dryrun needs to be applied!
-			# TODO: Dry run needs to get as far as updating push_stats in order to respect task/session limits
-			# TODO: result_info_map is not allowed to be yielded if dry run! (resp_info is None and err_info is None)
 
 			warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further warnings for direct batch {batch.id} (total {num_total} warnings)")
 			err_resp_retry.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further retryable errors for direct batch {batch.id} (total {num_total} errors)")
@@ -1566,13 +1579,13 @@ class GPTRequester:
 				self.S.metrics.all = api_metrics_all
 				self.S.metrics.direct = api_metrics_direct
 
-			def revert_state(max_direct_batch_id: int, direct_history: list[BatchState]):
+			def revert_state(max_direct_batch_id: int, direct_history: list[BatchState], max_request_id: int):
+				self.S.max_request_id = max_request_id
 				self.S.direct_history[:] = direct_history
 				self.S.max_direct_batch_id = max_direct_batch_id
 
 			with utils.AtomicRevertStack() as rstack:
 
-				# TODO: Dry run MUST actually get here and update these (otherwise it won't respect task limits)
 				rstack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, session_requests=self.session_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_tokens_cost=self.session_push_stats.total_tokens_cost)
 				self.S.task_push_stats.total_requests = post_batch_task_requests
 				self.session_push_stats.total_requests = post_batch_session_requests
@@ -1588,29 +1601,35 @@ class GPTRequester:
 					api_metrics.failed.add_metrics(batch_metrics_failed)
 					api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
 
-				# TODO: If dry run then yield None, None, direct_limits_reached, Nonr
+				yielded_req_ids.extend(info.req_id for info in result.info)
 				yield rstack, result, direct_limits_reached, None  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
-				rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy())
+				rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy(), max_request_id=self.S.max_request_id)
 				self.S.max_direct_batch_id = self.max_direct_batch_id
 				batch.request_info = {}
 				self.S.direct_history.append(batch)
 				self.S.direct_history.sort()
 
-				# TODO: Need to update state max_request_id
-				# TODO: ISSUE: Is the state-saved max_request_id appropriately updated?! REQUIRE: self.S.max_request_id = self.max_request_id (normally happens during commit)
-				# TODO: Need to already assign new IDs here right! (create item + cached_req) So that can yield it (yield is list[CachedGPTRequest])
-				retry_reqs = [GPTRequest(
-					payload=info.req_payload,
-					meta=info.req_info.meta,
-					retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
+				retry_reqs = [CachedGPTRequest.from_item(
+					item=self.create_request_item(
+						req=GPTRequest(
+							payload=info.req_payload,
+							meta=info.req_info.meta,
+							retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
+						),
+					),
+					endpoint=self.endpoint,
+					token_estimator=self.token_estimator,
+					token_coster=self.token_coster,
 				) for info in result.info.values() if info.retry]
+				self.S.max_request_id = self.max_request_id
 
 				if retry_reqs:
 					log.info(f"{len(retry_reqs)} requests need to be retried and will be appended to the direct request queue...")
 					reqs_list.extend(retry_reqs)
 
-				# TODO: Always yield if yield_retry_reqs (prior to SAVE of state)
+				if yield_retry_reqs:
+					yield rstack, result, None, retry_reqs
 
 				self.validate_state_queue(clean=False)
 				self.state.save(rstack=rstack)
@@ -1624,6 +1643,10 @@ class GPTRequester:
 			log.warning(f"Direct limits were reached while executing requests using the direct API: {', '.join(direct_limits_list)}")
 		log.info(f"Executed {min(index, num_input_reqs)} requests ({index} including retries) in {num_direct_batches} direct batches using the direct API")
 		delayed_raise.raise_on_error(base_msg="Encountered errors while processing direct batches")
+		if not direct_limits_reached:
+			assert len(yielded_req_ids) == len(set(yielded_req_ids)) == index == len(reqs_list)
+			assert all(isinstance(cached_req, CachedGPTRequest) for cached_req in reqs_list)
+			assert yielded_req_ids == [cached_req.item.id for cached_req in reqs_list]
 
 		if reqs_list:
 			self.log_push_stats()
@@ -1657,12 +1680,9 @@ class GPTRequester:
 		if reqs is not None:
 
 			if rstack is not None:
-				def revert_pool(exp_max_request_id: int, max_request_id: int, P: list[CachedGPTRequest]):
-					# Note: The only thing that isn't completely reverted is that add_request() potentially adds types to self.type_cache
+				def revert_pool(P: list[CachedGPTRequest]):
 					self.P[:] = P
-					if self.max_request_id == exp_max_request_id:
-						self.max_request_id = max_request_id
-				rstack.callback(revert_pool, exp_max_request_id=self.max_request_id + (1 if isinstance(reqs, GPTRequest) else len(reqs)), max_request_id=self.max_request_id, P=self.P.copy())  # noqa
+				rstack.callback(revert_pool, P=self.P.copy())
 
 			if isinstance(reqs, GPTRequest):
 				self.add_request(reqs)
@@ -2725,11 +2745,12 @@ class GPTRequester:
 				)
 		assert result_info_map.keys() == batch.request_info.keys()
 
-		num_results = num_success = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0
+		num_results = num_success = num_empty = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0
 		for info in result_info_map.values():
 			num_results += 1
 			if info.err_info is None:
-				assert info.resp_info is not None
+				if info.resp_info is None:
+					num_empty += 1
 				if info.warn_infos:
 					num_warned += 1
 				else:
@@ -2760,6 +2781,7 @@ class GPTRequester:
 			duration_str=utils.format_duration_hmin(duration),
 			num_requests=batch.num_requests,
 			num_success=num_success,
+			num_empty=num_empty,
 			num_warned=num_warned,
 			num_errored=num_errored,
 			num_retryable=num_retryable,
@@ -2771,7 +2793,7 @@ class GPTRequester:
 			pass_ratio=pass_ratio,
 		)
 
-		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) for {result_stats.num_requests} requests = {result_stats.num_success} success + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} took {result_stats.duration_str} (max {batch.remote.batch.completion_window}) for {result_stats.num_requests} requests = {result_stats.num_success} success ({result_stats.num_empty} empty) + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
 		assert result_stats.num_requests == len(batch.request_info) == len(result_info_map)
 		assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
 		assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
@@ -2807,17 +2829,7 @@ class GPTRequester:
 
 		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
-	# TODO: direct_request() (+comment) => Go through add_request => commit_requests => batch => push => process cycle and pretend everything is immediate, and make exactly all those changes (e.g. max_request_id incremented, save state (careful as don't actually literally want to save Nones and stuff, but wait, we have no reason to touch the queue file anyway right?), etc)
-	# TODO: --direct_verbose never|error|warn|always = In DIRECT mode, an option to make it print very verbosely what was sent/received with exact token stats and everything for the initial/trial/debugging stage
-
-	# TODO: Add FORCE DIRECT (--min_batch_requests -1 === --force_direct) mode that can be used to test how the LLM reacts to requests (e.g. approx how many tokens come out on average)
-
-	# TODO: min_batch_requests (-1 => Always use direct) => Less than this causes direct API to be used instead for the requests that would normally have ended up in the batch
-	# TODO: Have a batch size threshold below which direct requests are used instead of Batch API (minimum batch size?)
-	# TODO: Allow threshold below which a forced batch/push automatically uses single API requests instead
-
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
-
 	# TODO: Sync up with commands.txt
 	# TODO: Test 'safe steps' from commands.txt
 	# TODO: Inspect the entire code
