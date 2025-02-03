@@ -76,6 +76,9 @@ class TokensCost:
 	cost_output_direct: float = 0.0  # A very rough approximation of the cost of the expected number of output tokens for the request(s) in direct mode
 	cost_output_batch: float = 0.0   # A very rough approximation of the cost of the expected number of output tokens for the request(s) in batch mode
 
+	def __repr__(self) -> str:
+		return f"{self.__class__.__qualname__}({', '.join(f'{field.name}={getattr(self, field.name):.3f}' if field.type == 'float' or field.type is float else f'{field.name}={getattr(self, field.name)!r}' for field in dataclasses.fields(self))})"  # noqa
+
 	@property
 	def completion_ratio(self) -> float:
 		# Returns the output tokens completion ratio
