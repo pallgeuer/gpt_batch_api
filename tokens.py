@@ -513,13 +513,13 @@ class TokenEstimator:
 		return 0
 
 	# Roughly approximate the number of output tokens a request payload will have based on the maximum number of tokens allowed
-	def payload_output_tokens(self, payload: dict[str, Any], endpoint: str) -> int:
+	def payload_output_tokens(self, payload: dict[str, Any], endpoint: str) -> tuple[int, int]:
 		if endpoint == '/v1/chat/completions':  # Chat completions endpoint
-			max_tokens = payload.get('max_completion_tokens', payload.get('max_tokens', 2048))
-			output_tokens = round(max_tokens * self.assumed_completion_ratio)
+			max_output_tokens = max(payload.get('max_completion_tokens', payload.get('max_tokens', 2048)), 0)
+			output_tokens = round(max_output_tokens * self.assumed_completion_ratio)
 		else:
 			raise ValueError(f"Cannot estimate output tokens for unrecognised endpoint: {endpoint}")
-		return max(output_tokens, 0)
+		return output_tokens, max_output_tokens
 
 # Token coster class
 class TokenCoster:
