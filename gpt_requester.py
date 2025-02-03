@@ -690,7 +690,7 @@ class GPTRequester:
 		max_direct_requests: int = 50,                            # Maximum number of requests allowed in a virtual batch when using the direct API
 		max_direct_ktokens: int = 200,                            # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
 		max_direct_cost: float = 5.0,                             # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
-		min_batch_requests: int = 50,                             # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
+		min_batch_requests: int = 101,                            # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
 		max_batch_requests: int = 50000,                          # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                                  # Maximum allowed batch size in MB (not MiB)
 		max_batch_ktokens: int = 2000,                            # Maximum number of input tokens (in units of 1000) to include in a single batch
@@ -2900,7 +2900,7 @@ class GPTRequester:
 		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
 	# TODO: If I need 3 opinions, but my first attempt fails, I immediately need 5 opinions => Does this make sense? Shouldn't I need 4, in order to reach the minimum value of 3 while just pretending the failure never happened?
-	# TODO: Change to char_codes in terms of A, B, C etc run configurations (more interesting, more volume, have failures etc)
+	# TODO: Run through all safe steps with char codes
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 	# TODO: Sync up with commands.txt
 	# TODO: Inspect the entire code for problems

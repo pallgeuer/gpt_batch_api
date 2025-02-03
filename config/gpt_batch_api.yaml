@@ -100,7 +100,7 @@ max_direct_ktokens: 200
 # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
 max_direct_cost: 5.0
 # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
-min_batch_requests: 50
+min_batch_requests: 101
 # Maximum number of requests allowed in a batch
 max_batch_requests: 50000
 # Maximum allowed batch size in MB (not MiB)

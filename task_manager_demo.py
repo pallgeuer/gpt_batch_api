@@ -69,8 +69,8 @@ class CharCodesTask(task_manager.TaskManager):
 			output_factory=CharCodesFile.output_factory(),
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
-				max_completion_tokens=resolve(cfg.max_completion_tokens, default=384),
-				completion_ratio=resolve(cfg.completion_ratio, default=0.25),
+				max_completion_tokens=resolve(cfg.max_completion_tokens, default=200),
+				completion_ratio=resolve(cfg.completion_ratio, default=0.32),
 				temperature=resolve(cfg.temperature, default=0.2),
 				top_p=resolve(cfg.top_p, default=0.6),
 			),
@@ -80,6 +80,9 @@ class CharCodesTask(task_manager.TaskManager):
 
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.char_ranges = char_ranges
+
+	def on_task_enter(self):
+		self.GR.set_assumed_completion_ratio(self.T.meta['completion_ratio'])
 
 	def wipe_unfinished(self, wipe_failed: bool):
 		if wipe_failed:
@@ -92,8 +95,6 @@ class CharCodesTask(task_manager.TaskManager):
 				del self.T.committed_samples[sample_key]
 
 	def validate_state(self, *, clean: bool):
-		if self.GR.assumed_completion_ratio is None:
-			self.GR.set_assumed_completion_ratio(self.T.meta['completion_ratio'])
 		super().validate_state(clean=clean)
 		if clean:
 			if unclean_sample_keys := {sample_key for sample_key in self.T.committed_samples.keys() if (sample_key in self.T.succeeded_samples) == (sample_key in self.T.failed_samples)}:
@@ -280,6 +281,9 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.utterances = utterances
 
+	def on_task_enter(self):
+		self.GR.set_assumed_completion_ratio(self.T.meta['completion_ratio'])
+
 	def wipe_unfinished(self, wipe_failed: bool):
 		self.T.committed_samples.clear()
 		for sample_key, opinions in self.T.succeeded_samples.items():
@@ -291,8 +295,6 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 				self.T.committed_samples[sample_key] = self.T.committed_samples.get(sample_key, 0) + num_failed
 
 	def validate_state(self, *, clean: bool):
-		if self.GR.assumed_completion_ratio is None:
-			self.GR.set_assumed_completion_ratio(self.T.meta['completion_ratio'])
 		super().validate_state(clean=clean)
 		if clean:
 			if unclean_sample_keys := {sample_key for sample_key, num_committed in self.T.committed_samples.items() if (len(self.T.succeeded_samples[sample_key]) if sample_key in self.T.succeeded_samples else 0) + self.T.failed_samples.get(sample_key, 0) != num_committed}:

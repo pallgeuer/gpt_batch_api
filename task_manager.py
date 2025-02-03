@@ -480,6 +480,7 @@ class TaskManager:
 	#
 	# In order to use this class, subclass it for a particular task and implement/override:
 	#   - __init__(cfg: utils.Config) => Customize a call to super().__init__(..., **gpt_requester_kwargs) based on an attribute-based cfg (coming from either Python argparse or Hydra, see below) where gpt_requester_kwargs comes from gpt_requester.GPTRequester.get_kwargs(cfg)
+	#   - on_task_enter()             => [Optional] Perform any required custom actions during entering of the task manager (called once task is entered and self.T is available, but before GPT requester is entered)
 	#   - wipe_unfinished()           => Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state
 	#   - validate_state()            => Validate that there are no obvious issues with the current state (remember to call super())
 	#   - generate_requests()         => Implement request generation based on current task state
@@ -583,17 +584,22 @@ class TaskManager:
 
 		log.info("Finished running task manager")
 
+	# Callback that can be used to perform custom actions during entering (called once task is entered and self.T is available, but before GPT requester is entered)
+	def on_task_enter(self):
+		pass
+
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
 			wipe_requests = self.GR.wipe_requests
 			wipe_task = self.GR.wipe_task
-			enter_stack.enter_context(self.GR)
 			enter_stack.callback(self.on_exit)
-			self.step_num = 0
-			self.generating = False
 			enter_stack.enter_context(self.task)
 			self.T = self.task.state
+			self.on_task_enter()
+			enter_stack.enter_context(self.GR)
+			self.step_num = 0
+			self.generating = False
 			self.validate_state(clean=False)
 			enter_stack.enter_context(self.output)
 			self.D = self.output.data

@@ -61,19 +61,19 @@ Run Commands
 	B) Generate a batch of 100 requests without actually executing the batch:
 		python ... "${MODELARGS[@]}" --max_session_requests 0 --max_batch_requests 100 --max_unpushed_batches 1
 	C) Show 10 verbose examples of generated requests without actually executing them (requires that some batches have already been generated and saved to disk):
-		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --dryrun
+		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --max_batch_requests 100 --max_unpushed_batches 1 --dryrun
 	D) Show 10 verbose examples of generated requests and responses using the direct API:
-		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10
+		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --max_batch_requests 100 --max_unpushed_batches 1
 	E) Execute 100 requests using the direct API, and show those examples verbosely that had a warning or error:
-		python ... "${MODELARGS[@]}" --force_direct --direct_verbose warn --max_session_requests 100
+		python ... "${MODELARGS[@]}" --force_direct --direct_verbose warn --max_session_requests 100 --max_batch_requests 100 --max_unpushed_batches 1
 	F) Execute 250 requests using the batch API:
-		python ... "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 250
+		python ... "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 350 --max_unpushed_batches 1
 		# <-- Search the command outputs for 'max # completion tokens' (overall metrics) and 'max # tokens' (per batch), and decide on suitable values for request max_completion_tokens
-		# <-- Search the command outputs for 'completion ratio' (overall metrics and per batch), and decide on a suitable value for assumed_completion_ratio (keeping in mind/factoring in whatever change you just made to max_completion_tokens of course!)
+		# <-- Search the command outputs for 'completion ratio' (overall metrics and per batch), and decide on a suitable value for completion_ratio (keeping in mind/factoring in whatever change you just made to max_completion_tokens of course!)
 		python ... "${MODELARGS[@]}" --no_run --reinit_meta --max_completion_tokens NUM --completion_ratio RATIO [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...  # <-- Other than updating max_completion_tokens and completion_ratio, make sure to be consistent with A)
 	G) Execute 1 USD worth of fresh (thus wipe ongoing) requests using the batch API (or 1 of whatever currency/unit MODELARGS uses):
 		python ... "${MODELARGS[@]}" --only_process  # <-- If there are any unfinished batches busy on the remote (we don't want to unnecessarily wipe them)
-		python ... --wipe_requests "${MODELARGS[@]}" --max_batch_cost 1.00 --max_session_cost 1.00
+		python ... --wipe_requests "${MODELARGS[@]}" --max_batch_cost 1.00 --max_session_cost 1.00 --max_unpushed_batches 1
 		# <-- Refine completion ratio value if required (search the command outputs for the 'completion ratio' of any newly executed batches, and reinit meta as in F)
 	H) Reset the entire task to scratch and throw away any results obtained so far:
 		python ... --wipe_task "${MODELARGS[@]}" --no_run
