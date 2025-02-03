@@ -76,7 +76,7 @@ Run Commands
 		python ... --wipe_requests "${MODELARGS[@]}" --max_batch_cost 1.00 --max_session_cost 1.00
 		# <-- Refine completion ratio value if required (search the command outputs for the 'completion ratio' of any newly executed batches, and reinit meta as in F)
 	H) Reset the entire task to scratch and throw away any results obtained so far:
-		python ... --wipe_task --no_run "${MODELARGS[@]}"
+		python ... --wipe_task "${MODELARGS[@]}" --no_run
 	I) Run the task normally to completion, respecting a batch queue limit of 5,000,000 tokens (= 5000 ktokens) at a time (refer to the OpenAI tier rate limits):
 		python ... "${MODELARGS[@]}" --max_remote_ktokens 5000  # <-- This command can be interrupted with Ctrl+C and restarted at any time, and it will safely and robustly just pick up where it left off without losing anything (assuming the custom task has been correctly and revertibly implemented like described in the documentation, and demonstrated in task_manager_demo.py)
 	Get the current status of a task without actually executing task steps:
