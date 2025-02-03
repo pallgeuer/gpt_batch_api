@@ -703,7 +703,7 @@ class GPTRequester:
 		force_direct: bool = False,                               # Whether to force all batches to be executed using the direct API instead of the batch API
 
 		warn_predicted_input_factor: float = 1.2,                 # Warn if the predicted number of input tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
-		warn_assumed_completion_factor: float = 2.0,              # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
+		warn_assumed_completion_factor: float = 1.6,              # Warn if the assumed number of completion tokens deviates from the true number in excess of this multiplicative factor across a batch (>=1.0)
 		min_pass_ratio: float = 0.5,                              # If the pass ratio of a batch (number of successful or expired responses as a ratio of the number of requests) is strictly less than this or zero, then the batch is considered as not passed (pass failure)
 		max_pass_failures: int = 2,                               # Trigger a processing error if this many consecutive batches do not pass
 	):
