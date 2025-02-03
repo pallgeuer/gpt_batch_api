@@ -193,6 +193,7 @@ class RequestMetrics:
 	system_fingerprints: collections.Counter[str] = dataclasses.field(default_factory=collections.Counter)       # System fingerprints seen for completed requests
 	usage: dict[str, Union[int, float, dict[str, Union[int, float]]]] = dataclasses.field(default_factory=dict)  # Total true usage associated with completed requests (i.e. token usage)
 	max_output_tokens: int = 0                                                                                   # Maximum allowed number of generated output tokens associated with completed requests (each request specifies in its request payload the maximum number of completion tokens)
+	max_seen_output_tokens: int = 0                                                                              # Maximum seen true number of output tokens for a request
 	true_cost: float = 0.0                                                                                       # Total true cost associated with completed requests
 
 	@property
@@ -212,6 +213,7 @@ class RequestMetrics:
 			system_fingerprints=self.system_fingerprints + other.system_fingerprints,
 			usage=RequestMetrics.usage_iadd(self_usage=copy.deepcopy(self.usage), other_usage=other.usage),
 			max_output_tokens=self.max_output_tokens + other.max_output_tokens,
+			max_seen_output_tokens=max(self.max_seen_output_tokens, other.max_seen_output_tokens),
 			true_cost=self.true_cost + other.true_cost,
 		)
 
@@ -226,6 +228,7 @@ class RequestMetrics:
 		self.system_fingerprints.update(other.system_fingerprints)
 		RequestMetrics.usage_iadd(self_usage=self.usage, other_usage=other.usage)
 		self.max_output_tokens += other.max_output_tokens
+		self.max_seen_output_tokens = max(self.max_seen_output_tokens, other.max_seen_output_tokens)
 		self.true_cost += other.true_cost
 		return self
 
@@ -1220,9 +1223,9 @@ class GPTRequester:
 		log.info(f"SESSION push statistics are {self.session_push_stats.total_requests} requests, {self.session_push_stats.total_tokens_cost.input_tokens} input tokens, {self.session_push_stats.total_tokens_cost.cost:.3f} assumed cost")
 		log.info(f"TASK push statistics are {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} input tokens, {self.S.task_push_stats.total_tokens_cost.cost:.3f} assumed cost")
 		batch_metrics, direct_metrics, all_metrics = self.S.metrics.batch.total, self.S.metrics.direct.total, self.S.metrics.all.total
-		log.info(f"{batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {batch_metrics.usage.get('total_tokens', 0)} total tokens, {self.S.metrics.batch.succeeded.completion_ratio:.3g} success completion ratio ({batch_metrics.completion_ratio:.3g} total), {batch_metrics.true_cost:.3f} true cost")
-		log.info(f"{direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {direct_metrics.usage.get('total_tokens', 0)} total tokens, {self.S.metrics.direct.succeeded.completion_ratio:.3g} success completion ratio ({direct_metrics.completion_ratio:.3g} total), {direct_metrics.true_cost:.3f} true cost")
-		log.info(f"A total of {all_metrics.num_requests} requests have been COMPLETED, entailing {len(all_metrics.models)} models, {len(all_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(all_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := all_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {all_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := all_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {all_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {all_metrics.usage.get('total_tokens', 0)} total tokens, {self.S.metrics.all.succeeded.completion_ratio:.3g} success completion ratio ({all_metrics.completion_ratio:.3g} total), {all_metrics.true_cost:.3f} true cost")
+		log.info(f"{batch_metrics.num_requests} requests have been completed in BATCH mode, entailing {len(batch_metrics.models)} models, {len(batch_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(batch_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := batch_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {batch_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := batch_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {batch_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {batch_metrics.usage.get('total_tokens', 0)} total tokens, max {batch_metrics.max_seen_output_tokens} completion tokens, {self.S.metrics.batch.succeeded.completion_ratio:.3g} success completion ratio ({batch_metrics.completion_ratio:.3g} total), {batch_metrics.true_cost:.3f} true cost")
+		log.info(f"{direct_metrics.num_requests} requests have been completed in DIRECT mode, entailing {len(direct_metrics.models)} models, {len(direct_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(direct_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := direct_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {direct_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := direct_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {direct_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {direct_metrics.usage.get('total_tokens', 0)} total tokens, max {direct_metrics.max_seen_output_tokens} completion tokens, {self.S.metrics.direct.succeeded.completion_ratio:.3g} success completion ratio ({direct_metrics.completion_ratio:.3g} total), {direct_metrics.true_cost:.3f} true cost")
+		log.info(f"A total of {all_metrics.num_requests} requests have been COMPLETED, entailing {len(all_metrics.models)} models, {len(all_metrics.system_fingerprints)} fingerprints, {utils.format_size_si(all_metrics.local_jsonl_size)} JSONL data, {(cached_tokens := all_metrics.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0))} cached input + {all_metrics.usage.get('prompt_tokens', 0) - cached_tokens} uncached input + {(reasoning_tokens := all_metrics.usage.get('completion_tokens_details', {}).get('reasoning_tokens', 0))} reasoning + {all_metrics.usage.get('completion_tokens', 0) - reasoning_tokens} response = {all_metrics.usage.get('total_tokens', 0)} total tokens, max {all_metrics.max_seen_output_tokens} completion tokens, {self.S.metrics.all.succeeded.completion_ratio:.3g} success completion ratio ({all_metrics.completion_ratio:.3g} total), {all_metrics.true_cost:.3f} true cost")
 
 	# Log the push statistics after an update has occurred
 	def log_push_stats(self):
@@ -2749,11 +2752,13 @@ class GPTRequester:
 		batch_max_output_tokens = 0
 		batch_predicted_cost = 0.0
 		batch_usage = {}
+		batch_max_completion_tokens = 0
 		for info in result_info_map.values():
 			if info.resp_info is not None:
 				batch_models[info.resp_info.model] += 1
 				batch_system_fingerprints[info.resp_info.system_fingerprint] += 1
 				RequestMetrics.usage_iadd(self_usage=batch_usage, other_usage=info.resp_info.usage)
+				batch_max_completion_tokens = max(info.resp_info.usage.get('completion_tokens', 0), batch_max_completion_tokens)
 				batch_predicted_input_tokens += info.req_info.tokens_cost.input_tokens
 				batch_predicted_output_tokens += info.req_info.tokens_cost.output_tokens
 				batch_max_output_tokens += info.req_info.tokens_cost.max_output_tokens
@@ -2776,7 +2781,7 @@ class GPTRequester:
 			cost_output_batch=self.token_coster.output_cost(batch=batch_completion_tokens),
 		)
 
-		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens ({batch_cached_tokens} cached and {batch_uncached_tokens} uncached, predicted {batch_predicted_input_tokens} input) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, completion ratio {batch_true_tokens_cost.completion_ratio:.3g}, assumed {batch_predicted_output_tokens} completion tokens) = {batch_total_tokens} total tokens, {batch_true_tokens_cost.cost_direct if direct_mode else batch_true_tokens_cost.cost_batch:.3f} true cost (predicted {batch_predicted_cost:.3f})")
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} received {len(result_info_map)}/{batch.num_requests} responses, entailing {len(batch_models)} models, {len(batch_system_fingerprints)} fingerprints, {batch_input_tokens} input tokens ({batch_cached_tokens} cached and {batch_uncached_tokens} uncached, predicted {batch_predicted_input_tokens} input) + {batch_completion_tokens} completion tokens ({batch_reasoning_tokens} reasoning and {batch_response_tokens} response, max {batch_max_completion_tokens} tokens, completion ratio {batch_true_tokens_cost.completion_ratio:.3g}, assumed {batch_predicted_output_tokens} completion tokens) = {batch_total_tokens} total tokens, {batch_true_tokens_cost.cost_direct if direct_mode else batch_true_tokens_cost.cost_batch:.3f} true cost (predicted {batch_predicted_cost:.3f})")
 		if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
 			log.warning(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
 		if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
@@ -2869,6 +2874,7 @@ class GPTRequester:
 				num_cached_tokens = info.resp_info.usage.get('prompt_tokens_details', {}).get('cached_tokens', 0)
 				num_uncached_tokens = num_prompt_tokens - batch_cached_tokens
 				num_completion_tokens = info.resp_info.usage.get('completion_tokens', 0)
+				batch_metrics.max_seen_output_tokens = max(num_completion_tokens, batch_metrics.max_seen_output_tokens)
 				if direct_mode:
 					batch_metrics.true_cost += self.token_coster.cost(input_direct=num_uncached_tokens, input_cached=num_cached_tokens, output_direct=num_completion_tokens)
 				else:

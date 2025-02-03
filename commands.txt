@@ -66,18 +66,19 @@ Run Commands
 		python ... "${MODELARGS[@]}" --force_direct --direct_verbose warn --max_session_requests 100
 	E) Execute 250 requests using the batch API:
 		python ... "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 250
-		# <-- Based on the results, estimate suitable values for the request max_completion_tokens, and based on that a suitable value for assumed_completion_ratio, e.g. 0.3
-	F) Execute 1 USD worth of requests using the batch API (or 1 of whatever currency/unit MODELARGS uses):
-		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --only_process  # <-- If there are any unfinished batches busy on the remote (we don't want to unnecessarily wipe them)
-		python ... --wipe_requests "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --max_batch_cost 1.00 --max_session_cost 1.00
-		# <-- Calculate finetuned assumed_completion_ratio value if required, e.g. 0.32
+		# <-- Search the command outputs for 'max # completion tokens' (overall metrics) and 'max # tokens' (per batch), and decide on suitable values for request max_completion_tokens
+		# <-- Search the command outputs for 'completion ratio' (overall metrics and per batch), and decide on a suitable value for assumed_completion_ratio (keeping in mind/factoring in whatever change you just made to max_completion_tokens of course!)
+	F) Execute 1 USD worth of fresh (thus wipe ongoing) requests using the batch API and an assumed completion ratio of 0.35 (or 1 of whatever currency/unit MODELARGS uses):
+		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.35 --only_process  # <-- If there are any unfinished batches busy on the remote (we don't want to unnecessarily wipe them)
+		python ... --wipe_requests "${MODELARGS[@]}" --assumed_completion_ratio 0.35 --max_batch_cost 1.00 --max_session_cost 1.00
+		# <-- Refine a more finetuned assumed_completion_ratio value if required (search the command outputs for the 'completion ratio' of any newly executed batches)
 	G) Reset the entire task to scratch and throw away any results obtained so far:
-		python ... --wipe_task --no_run "${MODELARGS[@]}" --assumed_completion_ratio 0.3
+		python ... --wipe_task --no_run "${MODELARGS[@]}" --assumed_completion_ratio 0.35
 	H) Run the task normally to completion, respecting a batch queue limit of 5,000,000 tokens (= 5000 ktokens) at a time (refer to the OpenAI tier rate limits):
-		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --max_remote_ktokens 5000
+		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.35 --max_remote_ktokens 5000
 		# The above command can be interrupted with Ctrl+C and restarted at any time, and it will safely and robustly just pick up where it left off without losing anything (assuming the custom task has been correctly and revertibly implemented like described in the documentation, and demonstrated in task_manager_demo.py)
 	Get the current status of a task without actually executing task steps:
-		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.3 --max_remote_ktokens 5000 --no_run
+		python ... "${MODELARGS[@]}" --assumed_completion_ratio 0.35 --max_remote_ktokens 5000 --no_run
 
 - Commonly useful arguments for debugging, applying code changes, recovering from errors/batch failures, and such:
 	--dryrun
