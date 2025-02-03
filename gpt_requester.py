@@ -26,6 +26,7 @@ from enum import auto
 from typing import Optional, Union, Self, Any, ContextManager, Iterable, TextIO
 import pydantic
 import httpx
+import httpcore  # noqa / PyCharm: Magic fix for strange if-debugging-only exception thrown when creating OpenAI client in GPTRequester __init__ (empirically, httpcore needs to be imported before breaking in debug mode at a breakpoint for the first time)
 import openai
 import openai._models as openai_models  # noqa
 import openai.types.chat as openai_chat
