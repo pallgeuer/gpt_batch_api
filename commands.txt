@@ -83,6 +83,8 @@ Run Commands
 - Commonly useful arguments for debugging, applying code changes, recovering from errors/batch failures, and such:
 	--dryrun
 		Prevent any API calls or changes to saved disk state, and just show what would be done based on the current task state
+	--force_direct --direct_verbose always --max_session_requests 20
+		Force only the direct API to be used for 20 requests, and print the requests and responses verbosely for debugging purposes (when combined with --dryrun only prints the requests that would have been made)
 	--max_remote_ktokens 90 --max_batch_ktokens 90
 		Configure how many kilo-tokens can be pending in the batch queue at any one time in order to respect the OpenAI usage tier limitations (Note: max_batch_ktokens must always be less than or equal to max_remote_ktokens, otherwise no batch would fit on the remote)
 	--max_batch_requests 50
@@ -106,5 +108,4 @@ Run Commands
 	--wipe_task
 		Wipe entire task and start completely from scratch (can be combined with --no_run in order to not actually run the task after wiping)
 
-TODO: UPDATE everything based on direct mode
 TODO: UPDATE everything based on wandb feature
