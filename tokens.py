@@ -76,14 +76,19 @@ class CCFuncTokensConfig:
 # Token estimator class
 class TokenEstimator:
 
-	def __init__(self, assumed_completion_ratio: float, warn: str = 'once'):
-		self.assumed_completion_ratio = assumed_completion_ratio
-		if not 0 <= self.assumed_completion_ratio <= 1:
-			raise ValueError(f"Invalid assumed completion ratio: {self.assumed_completion_ratio}")
+	assumed_completion_ratio: Optional[float]
+
+	def __init__(self, assumed_completion_ratio: Optional[float], warn: str = 'once'):
+		self.set_assumed_completion_ratio(assumed_completion_ratio)
 		self.warn = warn
 		if self.warn not in ('never', 'once', 'always'):
 			raise ValueError(f"Invalid warn mode: {self.warn}")
 		self.seen_warnings = set()
+
+	def set_assumed_completion_ratio(self, assumed_completion_ratio: Optional[float]):
+		self.assumed_completion_ratio = assumed_completion_ratio
+		if self.assumed_completion_ratio is not None and not 0 <= self.assumed_completion_ratio <= 1:
+			raise ValueError(f"Invalid assumed completion ratio: {self.assumed_completion_ratio}")
 
 	def reset(self):
 		self.seen_warnings.clear()

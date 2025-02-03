@@ -636,6 +636,8 @@ class VerbosePrettyPrinter(pprint.PrettyPrinter):
 @utils.init_kwargs
 class GPTRequester:
 
+	assumed_completion_ratio: Optional[float]
+
 	# Construct a GPT requester to make use of the OpenAI Batch API to process GPT requests
 	def __init__(
 		self,
@@ -676,7 +678,7 @@ class GPTRequester:
 		cost_input_batch_mtoken: float = 1.25,                    # The cost per million input tokens with Batch API
 		cost_output_direct_mtoken: float = 10.00,                 # The cost per million direct output tokens (1M tokens ~ 750K words)
 		cost_output_batch_mtoken: float = 5.00,                   # The cost per million output tokens with Batch API
-		assumed_completion_ratio: float = 0.5,                    # How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)
+		assumed_completion_ratio: Optional[float] = 0.5,          # How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)
 
 		max_task_requests: int = 10000000,                        # Maximum number of requests allowed for an entire task
 		max_task_ktokens: int = 2000000,                          # Maximum allowed total number of input tokens (in units of 1000) for an entire task
@@ -796,12 +798,8 @@ class GPTRequester:
 		log.info(f"Costs per input mtoken: Direct {self.cost_input_direct_mtoken:.3f}, Cached {self.cost_input_cached_mtoken:.3f}, Batch {self.cost_input_batch_mtoken:.3f}")
 		log.info(f"Costs per output mtoken: Direct {self.cost_output_direct_mtoken:.3f}, Batch {self.cost_output_batch_mtoken:.3f}")
 
-		self.assumed_completion_ratio = assumed_completion_ratio
-		if not 0.0 <= self.assumed_completion_ratio <= 1.0:
-			raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
-		log.info(f"Assuming an output token completion ratio of {self.assumed_completion_ratio:.3g}")
-
-		self.token_estimator = tokens.TokenEstimator(warn=token_estimator_warn, assumed_completion_ratio=self.assumed_completion_ratio)
+		self.token_estimator = tokens.TokenEstimator(assumed_completion_ratio=assumed_completion_ratio, warn=token_estimator_warn)
+		self.set_assumed_completion_ratio(assumed_completion_ratio)
 		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
 		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
 		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"), endpoint=self.endpoint, dryrun=self.dryrun)
@@ -917,6 +915,14 @@ class GPTRequester:
 		self.session_push_stats: Optional[PushStats] = None
 		self.session_processed_failed_batches: Optional[int] = None
 
+	def set_assumed_completion_ratio(self, assumed_completion_ratio: Optional[float]):
+		self.assumed_completion_ratio = assumed_completion_ratio
+		self.token_estimator.set_assumed_completion_ratio(assumed_completion_ratio)
+		if self.assumed_completion_ratio is not None:
+			if not 0.0 <= self.assumed_completion_ratio <= 1.0:
+				raise ValueError(f"Assumed output completion ratio must be in the interval [0,1]: {self.assumed_completion_ratio:.3g}")
+			log.info(f"Assuming an output token completion ratio of {self.assumed_completion_ratio:.3g}")
+
 	@property
 	def max_task_tokens(self) -> int:
 		# Returns the maximum number of tokens allowed in a task (including possible reduction due to the token safety factor)
@@ -962,6 +968,7 @@ class GPTRequester:
 		group_kwargs: Optional[dict[str, Any]] = None,                    # If parser is not already an argument group, the extra keyword arguments to use for the created argument group
 		include_endpoint: bool = False,                                   # Whether to include an argument for the API endpoint to use (often this should be task-specific and more specific arguments like chat_endpoint should be defined and used by the task itself)
 		include_auto_parse: bool = False,                                 # Whether to include an argument for auto-parsing (often this is task-specific)
+		include_completion_ratio: bool = False,                           # Whether to include an argument for the assumed completion ratio (often this is task-specific)
 		**defaults,                                                       # noqa / Keyword arguments that can be used to override individual default argument values
 	) -> argparse._ArgumentGroup:                                         # noqa / Returns the passed or newly created argument group
 
@@ -1001,7 +1008,8 @@ class GPTRequester:
 		add_argument(name='cost_input_batch_mtoken', metavar='COST', help="The cost per million input tokens with Batch API")
 		add_argument(name='cost_output_direct_mtoken', metavar='COST', help="The cost per million direct output tokens (1M tokens ~ 750K words)")
 		add_argument(name='cost_output_batch_mtoken', metavar='COST', help="The cost per million output tokens with Batch API")
-		add_argument(name='assumed_completion_ratio', metavar='RATIO', help="How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)")
+		if include_completion_ratio:
+			add_argument(name='assumed_completion_ratio', metavar='RATIO', help="How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)")
 
 		add_argument(name='max_task_requests', metavar='NUM', help="Maximum number of requests allowed for an entire task")
 		add_argument(name='max_task_ktokens', metavar='KTOK', unit=' ktokens', help="Maximum allowed total number of input tokens (in units of 1000) for an entire task")
