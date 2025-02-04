@@ -245,6 +245,7 @@ class UtteranceInfo(pydantic.BaseModel):
 # Utterance data class (data class used for the output file)
 @dataclasses.dataclass
 class UtteranceData:
+	sample_key: str                          # Sample key corresponding to utterance
 	utterance: str                           # The utterance in question
 	is_clear: bool                           # Whether the emotion classification opinions reached a clear majority conclusion
 	emotion: Optional[UtteranceEmotion]      # Utterance emotion (None = No single opinion was successful)
@@ -288,15 +289,21 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 	def on_task_exit(self):
 		self.opinion_adviser = None
 
-	def wipe_unfinished(self, wipe_failed: bool):
+	def wipe_unfinished(self, wipe_failed: bool, rstack: utils.RevertStack) -> bool:
 		self.T.committed_samples.clear()
 		for sample_key, opinions in self.T.succeeded_samples.items():
 			self.T.committed_samples[sample_key] = len(opinions)
 		if wipe_failed:
 			self.T.failed_samples.clear()
+			for entry in self.output.rewrite(rstack=rstack):
+				opinions: list[dict[str, Any]] = self.T.succeeded_samples.get(entry.sample_key, [])
+				if self.opinion_adviser.get_conclusion(num_failed=0, opinions=(opinion['emotion'] for opinion in opinions))[0]:
+					self.output.data.entries.append(entry)
+			self.D = self.output.data
 		else:
 			for sample_key, num_failed in self.T.failed_samples.items():
 				self.T.committed_samples[sample_key] = self.T.committed_samples.get(sample_key, 0) + num_failed
+		return False
 
 	def validate_state(self, *, clean: bool):
 		super().validate_state(clean=clean)
@@ -398,6 +405,7 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 					total_clarity = sum(1.0 if opinion['is_clear'] else 0.5 for opinion in opinions)
 					emotions = {UtteranceEmotion(emotion): sum(1.0 if opinion['is_clear'] else 0.5 for opinion in opinions if opinion['emotion'] == emotion) / total_clarity for emotion in opinions_counter.keys()}
 					self.D.entries.append(UtteranceData(
+						sample_key=sample_key,
 						utterance=utterance,
 						is_clear=is_confident,
 						emotion=UtteranceEmotion(most_common_opinion) if most_common_opinion is not None else None,

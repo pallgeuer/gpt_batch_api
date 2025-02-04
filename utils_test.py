@@ -230,7 +230,7 @@ def test_unlink_existing_file(tmp_path: pathlib.Path):
 	assert file_path.read_text(encoding='utf-8') == file_content
 	with utils.RevertStack() as rstack:
 		result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=False)
-		assert result is True
+		assert isinstance(result, str)
 		assert not file_path.exists()
 	assert not file_path.exists()
 	assert list(tmp_path.iterdir()) == []
@@ -241,7 +241,7 @@ def test_unlink_missing_file_missing_ok_true(tmp_path: pathlib.Path):
 	assert not file_path.exists()
 	with utils.RevertStack() as rstack:
 		result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=True)
-		assert result is False
+		assert result is None
 		assert not file_path.exists()
 	assert not file_path.exists()
 	assert list(tmp_path.iterdir()) == []
@@ -252,7 +252,7 @@ def test_unlink_missing_file_missing_ok_false(tmp_path: pathlib.Path):
 	assert not file_path.exists()
 	with utils.RevertStack() as rstack:
 		with pytest.raises(FileNotFoundError):
-			_ = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=False)
+			utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=False)
 		assert not file_path.exists()
 	assert not file_path.exists()
 	assert list(tmp_path.iterdir()) == []
@@ -267,7 +267,7 @@ def test_unlink_with_revert(tmp_path: pathlib.Path):
 	try:
 		with utils.RevertStack() as rstack:
 			result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=False)
-			assert result is True
+			assert isinstance(result, str)
 			assert not file_path.exists()
 			raise RuntimeError("Triggered revert")
 	except RuntimeError as e:
@@ -284,7 +284,7 @@ def test_unlink_with_revert_missing_file(tmp_path: pathlib.Path):
 	try:
 		with utils.RevertStack() as rstack:
 			result = utils.safe_unlink(path=file_path, rstack=rstack, missing_ok=True)
-			assert result is False
+			assert result is None
 			assert not file_path.exists()
 			raise RuntimeError("Triggered revert")
 	except RuntimeError as e:

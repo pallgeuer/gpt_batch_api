@@ -345,11 +345,16 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 			assert file_size == self.data.last_size == 0
 			log.info(f"Created empty initial task output file: {os.path.basename(path)}")
 
-	def reset(self, rstack: utils.RevertStack):
+	def reset(self, rstack: utils.RevertStack) -> list[str]:
+		# Extends the base class signature with a return value => Returns a list of the temporary unlink backup paths
+		backup_paths = []
 		if self.data is not None and not self.dryrun:
 			for path in self.data.paths:
-				utils.safe_unlink(path=path, rstack=rstack)
+				backup_path = utils.safe_unlink(path=path, rstack=rstack)
+				if backup_path is not None:
+					backup_paths.append(backup_path)
 		self.create(rstack=rstack)
+		return backup_paths
 
 	def load(self, rstack: utils.RevertStack):
 
@@ -468,6 +473,20 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 
 	def all_entries(self) -> list[DataclassT]:
 		return list(self.entries())
+
+	def rewrite(self, rstack: utils.RevertStack) -> Iterable[DataclassT]:
+		# While iterating through this generator with a for-loop, add any desired new contents to self.data.entries (for example, in order to simply filter the output file data, append the yielded entry to self.data.entries only if a particular conditional expression is true)
+		# Note that internally a reset occurs, so afterwards self.data points to a new instance
+		if self.read_only:
+			raise RuntimeError("Cannot rewrite dataclass list output file in read-only mode")
+		data_paths = self.data.paths
+		backup_paths = self.reset(rstack=rstack)
+		for path in (data_paths if self.dryrun else backup_paths):
+			with open(path, 'r', encoding='utf-8') as file:
+				for line in file:
+					yield utils.dataclass_from_json(cls=self.data_cls, json_data=line)
+			self.validate()
+			self.save(rstack=rstack)
 
 #
 # Task manager class

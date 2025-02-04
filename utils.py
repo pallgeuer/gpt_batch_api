@@ -7,6 +7,7 @@ import enum
 import json
 import math
 import time
+import types
 import signal
 import shutil
 import inspect
@@ -261,6 +262,7 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 			else:
 				ret = _dataclass_from_dict_inner(typ=uniontyps[0], data=data, json_mode=json_mode)  # This is expected to usually internally raise an error as the types don't directly match...
 	else:
+		assert isinstance(generic_typ, type)
 		if isinstance(data, int) and generic_typ is float:
 			data = float(data)
 		if json_mode:
@@ -284,6 +286,8 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 						data = newdata
 					else:
 						data = generic_typ(data.items())
+			elif isinstance(data, (int, float, complex, str, bytes, bool, types.NoneType)) and issubclass(generic_typ, enum.Enum):
+				data = generic_typ(data)
 		if dataclasses.is_dataclass(typ):
 			if not (isinstance(data, dict) and all(isinstance(key, str) for key in data.keys())):
 				raise TypeError(f"Invalid dict data for conversion to dataclass {get_class_str(typ)}: {data}")
@@ -300,7 +304,7 @@ def _dataclass_from_dict_inner(typ: Any, data: Any, json_mode: bool) -> Any:
 			ret = generic_typ.model_validate(data, strict=None if json_mode else True)
 		elif not isinstance(data, generic_typ):
 			raise TypeError(f"Expected type {get_type_str(typ)} with generic type {get_class_str(generic_typ)} but got class {get_class_str(data)}: {data}")
-		elif typ in dataclasses._ATOMIC_TYPES:  # noqa
+		elif typ in dataclasses._ATOMIC_TYPES or (isinstance(typ, type) and issubclass(typ, enum.Enum)):  # noqa
 			ret = data
 		elif (is_tuple := issubclass(generic_typ, tuple)) and hasattr(generic_typ, '_fields'):
 			if generic_typ.__annotations__:  # If defined using typing.NamedTuple...
@@ -528,7 +532,7 @@ def safe_unlink(
 	rstack: RevertStack,             # rstack = RevertStack to use to ensure the unlinking is revertible
 	affix: Optional[Affix] = None,   # affix = Affix to use for the backup file path used to ensure revertibility (defaults to a suffix of '.del', will also always have a random suffix added by the tempfile module to ensure a unique new file)
 	missing_ok: bool = True,         # Whether an exception should be raised if the file to unlink does not exist (False) or whether such a case should be silently ignored (True)
-) -> bool:                           # Returns whether a file existed and was revertibly unlinked
+) -> Optional[str]:                  # Returns the backup file path if a file existed and was revertibly unlinked, otherwise returns None
 
 	if isinstance(path, pathlib.Path):
 		path = str(path)
@@ -550,11 +554,11 @@ def safe_unlink(
 		@rstack.callback  # noqa
 		def revert_backup():
 			os.replace(src=backup_file.name, dst=path)  # Internally atomic operation
-		return True
+		return backup_file.name
 	except FileNotFoundError:
 		if not missing_ok:
 			raise
-		return False
+		return None
 
 # Lock file class that uses verbose prints to inform about the lock acquisition process in case it isn't quick
 class LockFile:
