@@ -6,17 +6,19 @@ import os
 import re
 import copy
 import json
+import math
 import argparse
 import functools
 import contextlib
 import collections
 import dataclasses
 import typing
-from typing import Any, Optional, Self, Type, Callable, Generic, Iterable, Union
+from typing import Any, Optional, Self, Type, Callable, Generic, Iterable, Union, Counter
 from .logger import log
 from . import gpt_requester, utils
 
 # Type variables
+T = typing.TypeVar('T')
 DataclassT = typing.TypeVar('DataclassT')
 
 #
@@ -27,7 +29,7 @@ DataclassT = typing.TypeVar('DataclassT')
 @dataclasses.dataclass
 class TaskState:
 	version: int = 1                                                             # Data format version number
-	meta: dict[str, Any] = dataclasses.field(default_factory=dict)               # Task-level metadata (arbitrary JSON-compatible key-value store, e.g. can be used to store parameters that should/must not change throughout an entire task, even if the task is resumed with different configuration arguments)
+	meta: dict[str, Any] = dataclasses.field(default_factory=dict)               # Task-level metadata (arbitrary JSON-compatible key-value store, e.g. can be used to store parameters that should/must not change throughout an entire task, even if the task is resumed with different configuration arguments, TaskManager never modifies the meta for as long as the task manager is entered)
 	committed_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples committed so far (arbitrary JSON-compatible key-value store)
 	committed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the samples committed so far (maps sample keys to corresponding JSON-compatible data)
 	responded_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples that have received a response so far (arbitrary JSON-compatible key-value store)
@@ -481,6 +483,7 @@ class TaskManager:
 	# In order to use this class, subclass it for a particular task and implement/override:
 	#   - __init__(cfg: utils.Config) => Customize a call to super().__init__(..., **gpt_requester_kwargs) based on an attribute-based cfg (coming from either Python argparse or Hydra, see below) where gpt_requester_kwargs comes from gpt_requester.GPTRequester.get_kwargs(cfg)
 	#   - on_task_enter()             => [Optional] Perform any required custom actions during entering of the task manager (called once task is entered and self.T is available, but before GPT requester is entered)
+	#   - on_task_exit()              => [Optional] Perform any required custom actions during exiting the task manager (called if on_task_enter() was executed to completion during entering)
 	#   - wipe_unfinished()           => Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state
 	#   - validate_state()            => Validate that there are no obvious issues with the current state (remember to call super())
 	#   - generate_requests()         => Implement request generation based on current task state
@@ -498,8 +501,7 @@ class TaskManager:
 	#  - OPTIONAL: Given only a list of generated requests and no further context, it should be possible to establish a set of sample keys containing all keys of committed_samples that could possibly be added/modified by committing the requests (generally implies that each request metadata needs to include the corresponding sample key the request originates from, see cached_request_keys())
 	#  - Given a gpt_requester.BatchResult (contains request and response) and no further context other than committed_meta/committed_samples, it must be possible to update responded_meta/failed_samples/succeeded_samples in a way compatible with how generate_requests() works (see process_batch_result())
 	#  - Given just the task state, it should be possible to reduce the record of committed samples to just those for which a response was received so far
-	#  - Given just the task state, it should be possible to reduce the record of committed/responded samples to just those for which a succeeded response was received so far (failed samples are wiped)
-	#  - Samples/requests that end up as failed should not make any contribution to the output file (e.g. can be wiped or skipped without affecting the task output)
+	#  - Given just the task state, it should be possible to reduce the record of committed/responded samples to just those for which a succeeded response was received so far (failed samples are wiped, the task output needs to be able to be adjusted accordingly if it is potentially affected even though no succeeded samples are touched)
 	#
 	# The init_meta argument to __init__ specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta).
 
@@ -513,7 +515,7 @@ class TaskManager:
 		*,                                                      # Keyword arguments only beyond here
 
 		run: bool = True,                                       # Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)
-		wipe_failed: bool = False,                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with only_process=True prior to wiping)
+		wipe_failed: bool = False,                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with only_process=True prior to wiping)
 		reinit_meta: bool = False,                              # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
 
 		**gpt_requester_kwargs,                                 # Keyword arguments to be passed on to the internal GPTRequester instance
@@ -549,7 +551,7 @@ class TaskManager:
 		add_argument = functools.partial(utils.add_init_argparse, cls=TaskManager, parser=group, defaults=defaults)
 
 		add_argument(name='run', help="Whether to execute steps when the task manager is run, or just show the status and return (e.g. --no_run is useful in combination with --wipe_*)")
-		add_argument(name='wipe_failed', help="CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, does not wipe task output, consider running the task with --only_process prior to wiping)")
+		add_argument(name='wipe_failed', help="CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with --only_process prior to wiping)")
 		add_argument(name='reinit_meta', help="CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)")
 
 		return group
@@ -588,6 +590,10 @@ class TaskManager:
 	def on_task_enter(self):
 		pass
 
+	# Callback that is called on exit if on_task_enter() executed to completion on enter
+	def on_task_exit(self):
+		pass
+
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
@@ -597,6 +603,7 @@ class TaskManager:
 			enter_stack.enter_context(self.task)
 			self.T = self.task.state
 			self.on_task_enter()
+			enter_stack.callback(self.on_task_exit)
 			enter_stack.enter_context(self.GR)
 			self.step_num = 0
 			self.generating = False
@@ -648,16 +655,22 @@ class TaskManager:
 			with utils.DelayKeyboardInterrupt():
 				log.warning(f"Wiping unfinished{' and failed' if wipe_failed else ''} requests/samples...")
 				with utils.RevertStack() as rstack:
-					self.wipe_unfinished(wipe_failed=wipe_failed)
+					save_output = self.wipe_unfinished(wipe_failed=wipe_failed, rstack=rstack)
 					self.validate_state(clean=True)
+					if save_output:
+						self.output.validate()
 					self.task.save(rstack=rstack)
+					if save_output:
+						self.output.save(rstack=rstack)
 				log.warning(f"Wiped unfinished{' and failed' if wipe_failed else ''} requests/samples")
 
-	# Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state (self.T)
-	def wipe_unfinished(self, wipe_failed: bool):
+	# Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state (self.T) and possibly the task output (self.D)
+	def wipe_unfinished(self, wipe_failed: bool, rstack: utils.RevertStack) -> bool:
 		# wipe_failed = Whether in addition to the committed-yet-unfinished samples to also wipe the failed samples (i.e. give them another chance)
+		# rstack = RevertStack to use in case one is needed (the entire wipe operation does not need to be completely revertible, but some parts of it might be in order to ensure no unintentional data loss)
+		# Returns whether the task output should be validated and saved because it was modified
 		# The implementation should update the task state (self.T), specifically the committed_samples/committed_meta fields, as well as the failed_samples/responded_meta fields if wipe_failed
-		# The task output should not need to be updated at all as unfinished and failed requests/samples should never affect the task output at all (requirement of the task design)
+		# The task output should only potentially need to be adjusted if wipe_failed=True and the presence of failed samples implicitly affects the task output (e.g. due to a maximum number of total succeeded or failed opinions being allowed per sample before writing to the task output, or something like that)
 		# If not wipe_failed, this method should reduce the record of committed samples in self.T to just those committed samples that are responsible for the responses received so far (succeeded or failed)
 		# If wipe_failed, this method should reduce the record of committed/responded samples in self.T to just those committed samples that are responsible for the succeeded samples (failed samples are also cleared)
 		# The task state after this method finishes must pass self.validate_state(clean=True)
@@ -674,14 +687,14 @@ class TaskManager:
 		if clean:
 			responded_sample_keys = self.T.succeeded_samples.keys() | self.T.failed_samples.keys()
 			if self.T.committed_samples.keys() != responded_sample_keys:
-				raise ValueError(f"Unexpected committed relative to responded samples, with disagreement in the keys: {sorted(self.T.committed_samples.keys() ^ responded_sample_keys)}")
+				raise ValueError(f"Unexpected committed relative to responded samples in clean case, with disagreement in the keys: {sorted(self.T.committed_samples.keys() ^ responded_sample_keys)}")
 
 	# Log the current task manager status
 	def log_status(self):
-		num_ongoing = len(self.T.committed_samples.keys() - self.T.failed_samples.keys() - self.T.succeeded_samples.keys())
-		num_done = len(self.T.committed_samples) - num_ongoing
-		log.info(f"There are {len(self.T.committed_samples)} committed ({num_ongoing} ongoing and {num_done} done), {len(self.T.failed_samples)} failed, {len(self.T.succeeded_samples)} succeeded SAMPLES (at least partially)")
-		assert num_done == len(self.T.failed_samples) + len(self.T.succeeded_samples)
+		num_committed = len(self.T.committed_samples)
+		num_pending = len(self.T.committed_samples.keys() - self.T.failed_samples.keys() - self.T.succeeded_samples.keys())
+		both_keys = self.T.failed_samples.keys() & self.T.succeeded_samples.keys()
+		log.info(f"There are {num_committed} committed SAMPLES ({num_pending} pending + {num_committed - num_pending} responded at least once), and {len(self.T.succeeded_samples.keys() - both_keys)} succeeded + {len(self.T.failed_samples.keys() - both_keys)} failed + {len(both_keys)} both SAMPLES")
 
 	# Execute a single non-blocking step of the task manager (generates and processes as much as is currently possible without waiting)
 	def step(self) -> bool:
@@ -822,9 +835,9 @@ class TaskManager:
 
 					DELETE = object()
 					if (sample_keys := self.cached_request_keys(cached_reqs)) is None:
-						rstack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=True, samples=copy.deepcopy(self.T.committed_samples))
+						rstack.callback(revert_committed_state, meta=copy.deepcopy(self.T.committed_meta), samples_all=True, samples=copy.deepcopy(self.T.committed_samples))
 					else:
-						rstack.callback(revert_committed_state, meta_=copy.deepcopy(self.T.committed_meta), samples_all=False, samples={sample_key: (copy.deepcopy(self.T.committed_samples[sample_key]) if sample_key in self.T.committed_samples else DELETE) for sample_key in sample_keys})
+						rstack.callback(revert_committed_state, meta=copy.deepcopy(self.T.committed_meta), samples_all=False, samples={sample_key: (copy.deepcopy(self.T.committed_samples[sample_key]) if sample_key in self.T.committed_samples else DELETE) for sample_key in sample_keys})
 
 					for cached_req in cached_reqs:
 						self.commit_cached_request(cached_req)
@@ -914,7 +927,7 @@ class TaskManager:
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 		# result => The result of a batch, to be processed and used to update the task output file and task state
 		# rstack => A RevertStack so that the actions of this method are perfectly reversible in the case of an exception
-		# Returns whether either the task state (self.T) or output (self.D) was modified, and thus that both need to be saved (failed requests should NOT affect the task output file at all)
+		# Returns whether either the task state (self.T) or output (self.D) was modified, and thus that both need to be saved
 		#
 		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState).
 		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts.
@@ -930,4 +943,63 @@ class TaskManager:
 		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general
 		# Statistics like the remote batch completion duration, request pass ratio, and number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats).
 		raise NotImplementedError
+
+#
+# Task manager helpers
+#
+
+# Opinion adviser class
+class OpinionAdviser:
+
+	def __init__(self, opinions_min: int, opinions_max: int, confidence: float):
+		# opinions_min = Minimum number of successful opinions required
+		# opinions_max = Maximum number of opinions allowed
+		# confidence = Opinion-based classification confidence required, in the interval (0, 1)
+		self.opinions_min = opinions_min
+		self.opinions_max = opinions_max
+		self.confidence = confidence
+		self.validate()
+
+	def validate(self):
+		if not isinstance(self.opinions_min, int) or not isinstance(self.opinions_max, int) or self.opinions_min < 1 or self.opinions_max < 1 or self.opinions_max < self.opinions_min:
+			raise ValueError(f"Invalid opinions specification: Min {self.opinions_min}, Max {self.opinions_max}")
+		if not (isinstance(self.confidence, float) and 0.0 < self.confidence < 1.0):
+			raise ValueError(f"Invalid confidence specification: {self.confidence}")
+
+	def min_responses_reqd(self, num_failed: int, opinions: Iterable[Any]) -> int:
+		# num_failed = Number of failed responses (responses that did not lead to an opinion)
+		# opinions = The opinions resulting from all succeeded responses (responses that led to an opinion), where each individual opinion is non-None and compatible with collections.Counter (i.e. hashable type with appropriate equality check)
+		# Returns the minimum number of total responses that could result in the done condition being satisfied (i.e. that there is a conclusion, e.g. due to confidence or opinions_max)
+		# Aims to achieve num_succeeded >= opinions_min and most_common_count / num_succeeded >= confidence, without allowing opinions_max to be exceeded however (unless we already have more responses than that of course)
+		# Failed requests are effectively ignored, aside from counting towards opinions_max and thereby implicitly taking away space for succeeded requests (of which we aim to have at least opinions_min)
+		if not isinstance(opinions, collections.abc.Sequence):
+			opinions = tuple(opinions)
+		num_succeeded = len(opinions)
+		_, _, most_common_count = self.resolve_opinions(opinions=opinions)
+		min_responses = num_failed + max(self.opinions_min, math.ceil((num_succeeded - most_common_count) / (1 - self.confidence)))
+		return max(num_failed + num_succeeded, min(self.opinions_max, min_responses))
+
+	def get_conclusion(self, num_failed: int, opinions: Iterable[T]) -> tuple[bool, bool, Counter[T], Optional[T], int]:
+		# num_failed = Number of failed responses (responses that did not lead to an opinion)
+		# opinions = The opinions resulting from all succeeded responses (responses that led to an opinion), where each individual opinion is non-None and compatible with collections.Counter (i.e. hashable type with appropriate equality check)
+		# Returns whether there is a conclusion, whether that conclusion is due to confidence (e.g. as opposed to due to opinions_max), a counter of the opinions, the most common opinion (None if there are no succeeded opinions), and the corresponding count
+		if not isinstance(opinions, collections.abc.Sequence):
+			opinions = tuple(opinions)
+		num_succeeded = len(opinions)
+		opinions_counter, most_common_opinion, most_common_count = self.resolve_opinions(opinions=opinions)
+		assert opinions_counter.total() == num_succeeded
+		is_confident = (num_succeeded >= self.opinions_min and most_common_count / num_succeeded >= self.confidence)
+		have_conclusion = (is_confident or num_failed + num_succeeded >= self.opinions_max)
+		return have_conclusion, is_confident, opinions_counter, most_common_opinion, most_common_count
+
+	@classmethod
+	def resolve_opinions(cls, opinions: Iterable[T]) -> tuple[Counter[T], Optional[T], int]:
+		# opinions = The opinions to resolve, where each individual opinion is non-None and compatible with collections.Counter (i.e. hashable type with appropriate equality check)
+		# Returns a counter of the opinions, the most common opinion (None if there are no succeeded opinions), and the corresponding count
+		opinions_counter: Counter[T] = collections.Counter(opinions)
+		most_common_list: list[tuple[T, int]] = opinions_counter.most_common(n=1)
+		if most_common_list:
+			return opinions_counter, *most_common_list[0]  # noqa / Returns: opinions_counter, most_common_opinion, most_common_count
+		else:
+			return opinions_counter, None, 0
 # EOF

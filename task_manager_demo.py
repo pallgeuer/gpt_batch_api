@@ -5,13 +5,11 @@ from __future__ import annotations
 import os
 import sys
 import enum
-import math
 import logging
 import argparse
 import functools
-import collections
 import dataclasses
-from typing import Sequence, Optional, Any, Counter
+from typing import Sequence, Optional, Any
 import pydantic
 import openai.types.chat as openai_chat
 from . import gpt_requester, task_manager, utils
@@ -84,7 +82,7 @@ class CharCodesTask(task_manager.TaskManager):
 	def on_task_enter(self):
 		self.GR.set_assumed_completion_ratio(self.T.meta['completion_ratio'])
 
-	def wipe_unfinished(self, wipe_failed: bool):
+	def wipe_unfinished(self, wipe_failed: bool, rstack: utils.RevertStack) -> bool:
 		if wipe_failed:
 			sample_keys_keep = self.T.succeeded_samples.keys()
 			self.T.failed_samples.clear()
@@ -93,6 +91,7 @@ class CharCodesTask(task_manager.TaskManager):
 		for sample_key in tuple(self.T.committed_samples):
 			if sample_key not in sample_keys_keep:
 				del self.T.committed_samples[sample_key]
+		return False
 
 	def validate_state(self, *, clean: bool):
 		super().validate_state(clean=clean)
@@ -280,9 +279,14 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 
 		self.cfg = cfg  # Note: self.cfg is the source for parameter values that should always be taken from the current run (amongst other parameters)
 		self.utterances = utterances
+		self.opinion_adviser: Optional[task_manager.OpinionAdviser] = None
 
 	def on_task_enter(self):
 		self.GR.set_assumed_completion_ratio(self.T.meta['completion_ratio'])
+		self.opinion_adviser = task_manager.OpinionAdviser(opinions_min=self.T.meta['opinions_min'], opinions_max=self.T.meta['opinions_max'], confidence=self.T.meta['confidence'])  # Note: TaskManager does not edit self.T.meta for as long as the task manager is entered, so if this class does not ever modify self.T.meta (which it does not) then it is safe to store the meta values inside self.opinion_adviser without risking becoming out-of-date
+
+	def on_task_exit(self):
+		self.opinion_adviser = None
 
 	def wipe_unfinished(self, wipe_failed: bool):
 		self.T.committed_samples.clear()
@@ -299,42 +303,20 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 		if clean:
 			if unclean_sample_keys := {sample_key for sample_key, num_committed in self.T.committed_samples.items() if (len(self.T.succeeded_samples[sample_key]) if sample_key in self.T.succeeded_samples else 0) + self.T.failed_samples.get(sample_key, 0) != num_committed}:
 				raise ValueError(f"Unexpected unclean sample keys: {sorted(unclean_sample_keys)}")
-		opinions_min = self.T.meta['opinions_min']
-		opinions_max = self.T.meta['opinions_max']
-		confidence = self.T.meta['confidence']
-		if not isinstance(opinions_min, int) or not isinstance(opinions_max, int) or opinions_min < 1 or opinions_max < 1 or opinions_max < opinions_min:
-			raise ValueError(f"Invalid opinions specification: Min {opinions_min}, Max {opinions_max}")
-		if not (isinstance(confidence, float) and 0.0 < confidence < 1.0):
-			raise ValueError(f"Invalid confidence specification: {confidence}")
+		self.opinion_adviser.validate()
 
 	def generate_requests(self) -> bool:
 
-		opinions_min = self.T.meta['opinions_min']
-		opinions_max = self.T.meta['opinions_max']
-		confidence = self.T.meta['confidence']
-
 		for i, utterance in enumerate(self.utterances, 1):
 
-			sample_key = f'{i}:{utterance[:30]}'
+			sample_key = f'{i}:{utterance[:30]}'  # Note: If it is possible that the source utterance list changes (add/remove entries) between runs of the same instance of a task, then {i} is not necessarily consistent for a sample, and should be replaced with a checksum or such instead (or the whole utterance could be the sample key if they are known to never be too long)
 
 			num_committed = self.T.committed_samples.get(sample_key, 0)
-			if num_committed >= opinions_max:
-				continue
-			num_failed = self.T.failed_samples.get(sample_key, 0)  # Note: Failed requests effectively count as an 'unknown other opinion' (which cannot be chosen as the most common emotion classification however)
-			opinions: Optional[list[dict[str, Any]]] = self.T.succeeded_samples.get(sample_key, None)
+			num_failed = self.T.failed_samples.get(sample_key, 0)
+			opinions: list[dict[str, Any]] = self.T.succeeded_samples.get(sample_key, [])
+			assert num_committed >= num_failed + len(opinions) >= 0 and num_failed >= 0
 
-			if opinions is None:
-				most_common_count = 0
-				num_responded = num_failed
-			else:
-				opinions_counter, most_common_emotion, most_common_count = self.resolve_opinions(opinions=opinions)
-				num_responded = opinions_counter.total() + num_failed
-			assert num_responded <= num_committed
-
-			num_committed_reqd = max(num_committed, opinions_min, min(opinions_max, math.ceil((num_responded - most_common_count) / (1 - confidence))))
-			num_required = num_committed_reqd - num_committed
-			assert num_required == 0 or opinions_min <= num_committed_reqd <= opinions_max
-
+			num_required = max(0, self.opinion_adviser.min_responses_reqd(num_failed=num_failed, opinions=(opinion['emotion'] for opinion in opinions)) - num_committed)
 			if num_required > 0:
 				request = gpt_requester.GPTRequest(
 					payload=dict(
@@ -366,10 +348,6 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 
-		opinions_min = self.T.meta['opinions_min']
-		opinions_max = self.T.meta['opinions_max']
-		confidence = self.T.meta['confidence']
-
 		succeeded_samples = {}
 		failed_samples = {}
 		num_entries = len(self.D.entries)
@@ -394,57 +372,39 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 			utterance = info.req_info.meta['utterance']
 
 			num_committed = self.T.committed_samples.get(sample_key, 0)
-			num_succeeded = len(self.T.succeeded_samples[sample_key]) if sample_key in self.T.succeeded_samples else 0
 			num_failed = self.T.failed_samples.get(sample_key, 0)
-			num_responded = num_succeeded + num_failed + 1  # Number of responded opinions for the sample key (assuming not a retry, which just postpones the response anyway)
-			if num_committed < 0 or num_succeeded < 0 or num_failed < 0:
-				raise ValueError(f"Invalid counts for sample key '{sample_key}': {num_committed} committed, {num_succeeded} succeeded, {num_failed} failed")
-			elif num_committed < num_responded:
-				raise ValueError(f"Unexpectedly too many opinions for sample key '{sample_key}': {num_committed} committed < {num_succeeded} succeeded + {num_failed} failed + 1 new opinion = {num_responded} responded")
+			opinions: list[dict[str, Any]] = self.T.succeeded_samples.get(sample_key, [])
+			assert num_committed > num_failed + len(opinions) >= 0 and num_failed >= 0  # Whether the current result is a success, failure or retry, it will always (eventually) count +1 towards the number of responses, hence why num_committed needs to be STRICTLY greater than the current number of responses (prior to the current result being added)
 
 			if info.err_info is None and info.resp_info is not None and isinstance(info.resp_info.payload, openai_chat.ParsedChatCompletion) and info.resp_info.payload.choices and isinstance((utterance_info := info.resp_info.payload.choices[0].message.parsed), UtteranceInfo):
-
 				assert not info.retry
-
-				opinion = utterance_info.model_dump(mode='json')
 				if sample_key in self.T.succeeded_samples:
-					opinions = self.T.succeeded_samples[sample_key]
 					if sample_key not in succeeded_samples:
-						succeeded_samples[sample_key] = len(opinions)
-					opinions.append(opinion)
+						succeeded_samples[sample_key] = len(opinions)  # For revert_sample_state(): Make a note to truncate self.T.succeeded_samples[sample_key] back down to the original number of opinions if reverting state updates in future
 				else:
 					if sample_key not in succeeded_samples:
-						succeeded_samples[sample_key] = None
-					self.T.succeeded_samples[sample_key] = opinions = [opinion]
+						succeeded_samples[sample_key] = None  # For revert_sample_state(): Make a note to delete sample_key from self.T.succeeded_samples if reverting state updates in future
+					self.T.succeeded_samples[sample_key] = opinions
+				opinions.append(utterance_info.model_dump(mode='json'))
+			elif not info.retry:
+				if sample_key not in failed_samples:
+					failed_samples[sample_key] = self.T.failed_samples.get(sample_key, None)  # For revert_sample_state(): Store the original number of failed requests, or None if sample_key originally did not exist in self.T.failed_samples
+				num_failed += 1
+				self.T.failed_samples[sample_key] = num_failed
 
-				opinions_counter, most_common_emotion, most_common_count = self.resolve_opinions(opinions=opinions)
-				if num_committed == num_responded >= opinions_min and (num_responded >= opinions_max or most_common_count / num_responded >= confidence):
+			if num_committed == num_failed + len(opinions):
+				have_conclusion, is_confident, opinions_counter, most_common_opinion, _ = self.opinion_adviser.get_conclusion(num_failed=num_failed, opinions=(opinion['emotion'] for opinion in opinions))
+				if have_conclusion:
 					total_clarity = sum(1.0 if opinion['is_clear'] else 0.5 for opinion in opinions)
-					emotions = {UtteranceEmotion(emotion): sum(1.0 if opinion['is_clear'] else 0.5 for opinion in opinions if opinion['emotion'] == emotion) / total_clarity for emotion in opinions_counter}
+					emotions = {UtteranceEmotion(emotion): sum(1.0 if opinion['is_clear'] else 0.5 for opinion in opinions if opinion['emotion'] == emotion) / total_clarity for emotion in opinions_counter.keys()}
 					self.D.entries.append(UtteranceData(
 						utterance=utterance,
-						is_clear=most_common_count / num_responded >= confidence,
-						emotion=UtteranceEmotion(most_common_emotion) if most_common_emotion is not None else None,
+						is_clear=is_confident,
+						emotion=UtteranceEmotion(most_common_opinion) if most_common_opinion is not None else None,
 						emotions=dict(sorted(emotions.items(), key=lambda item: (-item[1], item[0]))),
 					))
 
-			elif not info.retry:
-				if sample_key not in failed_samples:
-					failed_samples[sample_key] = self.T.failed_samples.get(sample_key, None)
-				self.T.failed_samples[sample_key] = self.T.failed_samples.get(sample_key, 0) + 1
-
 		return bool(succeeded_samples) or bool(failed_samples)
-
-	@classmethod
-	def resolve_opinions(cls, opinions: list[dict[str, Any]]) -> tuple[Counter[str], Optional[str], int]:
-		# opinions = List of opinions received so far for a sample
-		# Returns a counter of the emotion opinions, the most common emotion as a string (None if there are no opinions yet), and the corresponding count
-		opinions_counter: Counter[str] = collections.Counter(opinion['emotion'] for opinion in opinions)
-		most_common_list: list[tuple[str, int]] = opinions_counter.most_common(n=1)
-		if most_common_list:
-			return opinions_counter, *most_common_list[0]  # noqa
-		else:
-			return opinions_counter, None, 0
 
 # Demonstrate the task manager class on the task of classifying the emotion of utterances
 def demo_utterance_emotion(cfg: utils.Config, task_dir: str):
@@ -554,8 +514,8 @@ def main():
 	parser_meta.add_argument('--completion_ratio', type=float, metavar='RATIO', help="How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average, as a ratio of max_completion_tokens")
 	parser_meta.add_argument('--temperature', type=float, metavar='TEMP', help="What sampling temperature to use")
 	parser_meta.add_argument('--top_p', type=float, metavar='MASS', help="Nucleus sampling probability mass")
-	parser_meta.add_argument('--opinions_min', type=int, metavar='NUM', help="Minimum number of opinions required")
-	parser_meta.add_argument('--opinions_max', type=int, metavar='NUM', help="Maximum number of opinions required")
+	parser_meta.add_argument('--opinions_min', type=int, metavar='NUM', help="Minimum number of successful opinions required")
+	parser_meta.add_argument('--opinions_max', type=int, metavar='NUM', help="Maximum number of opinions allowed")
 	parser_meta.add_argument('--confidence', type=float, metavar='RATIO', help="Opinion-based classification confidence required")
 
 	task_manager.TaskManager.configure_argparse(parser=parser)

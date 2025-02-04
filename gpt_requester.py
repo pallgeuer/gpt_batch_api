@@ -2899,7 +2899,6 @@ class GPTRequester:
 
 		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
-	# TODO: If I need 3 opinions, but my first attempt fails, I immediately need 5 opinions => Does this make sense? Shouldn't I need 4, in order to reach the minimum value of 3 while just pretending the failure never happened?
 	# TODO: Run through all safe steps with char codes
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 	# TODO: Sync up with commands.txt
