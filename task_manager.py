@@ -776,6 +776,9 @@ class TaskManager:
 			# Push any pushable local batches to the server up to the extent of the push limits (ensures condition M, potentially sets condition L, nullifies condition R)
 			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # Condition C = Returns whether the batch pipeline is congested
 
+			# Log small divider
+			log.info('\xB7' * 50)
+
 			# Check whether the step and/or entire task is completed (nothing more to do)
 			assert self.GR.PQ.pool_len <= 0 and (self.GR.num_finished_batches() <= 0 or self.GR.dryrun)  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
 			if (self.GR.num_unpushable_batches() <= 0 or direct_limits_reached) and ((generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion):  # Condition E = PBVMF(GQ + C) = V(GQ + C) as conditions P, B, M and F are all guaranteed due to the commands above, by just reaching this line
@@ -792,6 +795,7 @@ class TaskManager:
 		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history
 
 		direct_limits_reached = False
+		log.info('\xB7' * 50)
 		for rstack, result, limited, _ in self.GR.direct_requests(reqs=reqs, yield_retry_reqs=False):
 			if rstack is not None and result is not None:
 				self.call_process_batch_result(result=result, rstack=rstack)
@@ -908,6 +912,7 @@ class TaskManager:
 		direct_limits_reached = self.GR.only_process
 
 		if num_unpushable_batches > 0:
+			log.info('\xB7' * 50)
 			log.info(f"Attempting to process the {num_unpushable_batches} available local unpushable batches...")
 			for rstack, result, limited in self.GR.process_unpushable_batches():  # Either processes all unpushable batches one virtual (sub-)batch at a time, or eventually yields limited=True and discontinues, or raises an exception if an unresolvable issue occurs
 				if rstack is not None and result is not None:
@@ -938,8 +943,10 @@ class TaskManager:
 			self.output.validate()
 			self.task.save(rstack=rstack)
 			self.output.save(rstack=rstack)
+			log.info('\xB7' * 50)
 			return True
 		else:
+			log.info('\xB7' * 50)
 			return False
 
 	# Process a batch result and accordingly update the task state and output files (must be a perfectly reversible operation managed by the RevertStack rstack)
