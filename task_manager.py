@@ -964,9 +964,9 @@ class TaskManager:
 		#   - If an error occurred with the request and/or response (info.err_info is not None), the error (info.err_info: ErrorInfo) => At least one of info.err_info and info.resp_info will always be non-None UNLESS dry run is active
 		#   - If warnings occurred while processing the response, the warnings (info.warn_infos: list[ErrorInfo])---warnings occur for example if multiple completion choices are requested and some choices fail somehow while others don't
 		#   - Whether the request will be retried (info.retry: bool) and whether the current result counts towards the retry number (info.retry_counts: bool / e.g. batch cancellation or expiry by default does not count)
-		#   - The default (on entering this method) value of info.retry is never True if there is no error present (info.err_info is None)
-		#   - The field info.retry can be MODIFIED in this method to set whether the request will get retried (e.g. because of a task-specific parsing or value failure)
-		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general
+		#   - The default (on entering this method) value of info.retry is never True (and info.retry_counts is always True) IF there is no error present (info.err_info is None)
+		#   - The field info.retry can be MODIFIED in this method (calling self.GR.update_result_retry() after modifying info.err_info is suggested) to set whether the request will get retried (e.g. because of a task-specific parsing or value failure)
+		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general (e.g. care needs to be taken not to change anything in the payload that breaks auto-parsing)
 		# Statistics like the remote batch completion duration, request pass ratio, and number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats).
 		raise NotImplementedError
 
