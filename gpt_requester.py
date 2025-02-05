@@ -1579,7 +1579,7 @@ class GPTRequester:
 					num_total_errors += 1
 
 				assert resp_info is not None or err_info is not None or self.dryrun
-				result_info_map[req_id] = ResultInfo(
+				result_info_map[req_id] = self.update_result_retry(info=ResultInfo(
 					req_id=req_id,
 					req_jsonl_size=cached_req.info.json_size,
 					req_payload=cached_req.item.req.payload,
@@ -1588,8 +1588,8 @@ class GPTRequester:
 					err_info=err_info,
 					warn_infos=warn_infos,
 					retry_counts=True,
-					retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests) and req_info.retry_num < self.max_retries,
-				)
+					retry=False,
+				))
 
 			now = time.perf_counter()
 			utils.print_in_place(f"Direct batch {batch.id}: Executed {batch.num_requests} batch requests with {num_batch_errors} errors in {utils.format_duration(now - batch_start_time)} [Total: {index}/{len(reqs_list)} req, {num_total_errors} err, {utils.format_duration(now - total_start_time)}]\n")
@@ -2524,8 +2524,7 @@ class GPTRequester:
 									err_resp_retry.log(err_msg)  # [RETRYABLE]
 
 							assert resp_info is not None or err_info is not None
-							retry_counts = not (err_info is not None and err_info.type == 'RequestError' and err_info.subtype in ('batch_cancelled', 'batch_expired'))
-							result_info_map[req_id] = ResultInfo(
+							result_info_map[req_id] = self.update_result_retry(info=ResultInfo(
 								req_id=req_id,
 								req_jsonl_size=req_jsonl_size,
 								req_payload=req_payload,
@@ -2533,9 +2532,9 @@ class GPTRequester:
 								resp_info=resp_info,
 								err_info=err_info,
 								warn_infos=warn_infos,
-								retry_counts=retry_counts,
-								retry=err_info is not None and (not err_info.fatal or self.retry_fatal_requests) and (req_info.retry_num < self.max_retries or not retry_counts),
-							)
+								retry_counts=not (err_info is not None and err_info.type == 'RequestError' and err_info.subtype in ('batch_cancelled', 'batch_expired')),
+								retry=False,
+							))
 
 					warn_resp.finalize(msg_fn=lambda num_omitted, num_total: f"Got {num_omitted} further warnings for batch {batch.id} (total {num_total} warnings)")
 					err_line_json.finalize(msg_fn=lambda num_omitted, num_total: f"Failed to parse a further {num_omitted} lines to JSON for batch {batch.id} (total {num_total} errors)")
@@ -2756,6 +2755,16 @@ class GPTRequester:
 
 		return resp_payload, err_info, resp_model, resp_system_fingerprint, resp_usage
 
+	# Update a ResultInfo to reflect default error-dependent retry behaviour (e.g. useful if info.err_info was modified)
+	def update_result_retry(self, info: ResultInfo, retry_counts: Optional[bool] = None) -> ResultInfo:
+		# info = The ResultInfo to update
+		# retry_counts = Optionally override/set whether a possible retry would count towards the maximum number of allowed retries (None = Leave info.retry_counts untouched)
+		# Returns the input ResultInfo (same instance, but modified)
+		if retry_counts is not None:
+			info.retry_counts = retry_counts
+		info.retry = info.err_info is not None and (not info.err_info.fatal or self.retry_fatal_requests) and (info.req_info.retry_num < self.max_retries or not info.retry_counts)
+		return info
+
 	# Process a ResultInfo map corresponding to the results of a batch into a BatchResult and associated information required for a state update
 	def process_result_info_map(
 		self,
@@ -2812,7 +2821,7 @@ class GPTRequester:
 		for req_id, req_info in batch.request_info.items():
 			if req_id not in result_info_map:
 				req_jsonl_size, req_payload = req_payload_map[req_id]
-				result_info_map[req_id] = ResultInfo(
+				result_info_map[req_id] = self.update_result_retry(info=ResultInfo(
 					req_id=req_id,
 					req_jsonl_size=req_jsonl_size,
 					req_payload=req_payload,
@@ -2821,8 +2830,8 @@ class GPTRequester:
 					err_info=ErrorInfo(fatal=True, type='ResponseError', subtype='Missing', msg='Response is missing'),
 					warn_infos=[],
 					retry_counts=True,
-					retry=self.retry_fatal_requests and req_info.retry_num < self.max_retries,
-				)
+					retry=False,
+				))
 		assert result_info_map.keys() == batch.request_info.keys()
 
 		num_results = num_success = num_empty = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0

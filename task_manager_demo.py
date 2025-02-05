@@ -195,7 +195,7 @@ class CharCodesTask(task_manager.TaskManager):
 					self.D.chars[sample_char] = char_info
 					succeeded = True
 				if not succeeded:
-					info.retry = info.err_info is not None and (not info.err_info.fatal or self.GR.retry_fatal_requests) and (info.req_info.retry_num < self.GR.max_retries or not info.retry_counts)  # TODO: REFACTOR
+					self.GR.update_result_retry(info=info)
 
 			if not succeeded and not info.retry:
 				if info.err_info is None and not self.GR.dryrun:
