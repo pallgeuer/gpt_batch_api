@@ -67,7 +67,7 @@ Run Commands
 	E) Execute 100 requests using the direct API, and show those examples verbosely that had a warning or error:
 		python ... "${MODELARGS[@]}" --force_direct --direct_verbose warn --max_session_requests 100 --max_batch_requests 100 --max_unpushed_batches 1
 	F) Execute 250 requests using the batch API:
-		python ... "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 350 --max_unpushed_batches 1
+		python ... "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 400 --max_unpushed_batches 1
 		# <-- Search the command outputs for 'max # completion tokens' (overall metrics) and 'max # tokens' (per batch), and decide on suitable values for request max_completion_tokens
 		# <-- Search the command outputs for 'completion ratio' (overall metrics and per batch), and decide on a suitable value for completion_ratio (keeping in mind/factoring in whatever change you just made to max_completion_tokens of course!)
 		python ... "${MODELARGS[@]}" --no_run --reinit_meta --max_completion_tokens NUM --completion_ratio RATIO [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...  # <-- Other than updating max_completion_tokens and completion_ratio, make sure to be consistent with A)

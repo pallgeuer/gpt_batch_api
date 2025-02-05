@@ -68,7 +68,7 @@ class CharCodesTask(task_manager.TaskManager):
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
 				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
 				max_completion_tokens=resolve(cfg.max_completion_tokens, default=200),
-				completion_ratio=resolve(cfg.completion_ratio, default=0.32),
+				completion_ratio=resolve(cfg.completion_ratio, default=0.35),
 				temperature=resolve(cfg.temperature, default=0.2),
 				top_p=resolve(cfg.top_p, default=0.6),
 			),

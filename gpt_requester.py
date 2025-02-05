@@ -1499,9 +1499,9 @@ class GPTRequester:
 					if resp_info_ is not None:
 						verbose_msg += f"\x1b[32mRESPONSE INFO:\x1b[0m\n{verbose_printer.pformat(resp_info_)}\n"
 					if warn_infos_:
-						verbose_msg += f"\x1b[38;5;226mWARNINGS:\x1b[0m\n{verbose_printer.pformat(warn_infos_)}\n"
+						verbose_msg += f"\x1b[38;5;226mWARNING INFOS:\x1b[0m\n{verbose_printer.pformat(warn_infos_)}\n"
 					if err_info_ is not None:
-						verbose_msg += f"\x1b[38;5;196mERROR:\x1b[0m\n{verbose_printer.pformat(err_info_)}\n"
+						verbose_msg += f"\x1b[38;5;196mERROR INFO:\x1b[0m\n{verbose_printer.pformat(err_info_)}\n"
 					verbose_msg += ('*' * verbose_printer.width)
 					allow_other_print()
 					log.info(verbose_msg)
