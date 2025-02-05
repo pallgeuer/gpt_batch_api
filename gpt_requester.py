@@ -1672,6 +1672,7 @@ class GPTRequester:
 					api_metrics.failed.add_metrics(batch_metrics_failed)
 					api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
 
+				log.info(f"Performing task-specific processing of the direct batch {batch.id} results...")
 				yielded_req_ids.extend(result.info.keys())
 				yield rstack, result, direct_limits_reached, None  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
@@ -2614,6 +2615,7 @@ class GPTRequester:
 								api_metrics.failed.add_metrics(batch_metrics_failed)
 								api_metrics.total.add_metrics(batch_metrics_succeeded, batch_metrics_failed)
 
+							log.info(f"Performing task-specific processing of the batch {batch.id} results...")
 							yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
 							rstack.callback(revert_state, request_info=batch.request_info, batches=self.S.batches.copy(), batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
@@ -2890,7 +2892,7 @@ class GPTRequester:
 			pass_ratio=pass_ratio,
 		)
 
-		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} took {result_stats.duration_str}{f' (max {batch.remote.batch.completion_window})' if batch.remote.batch.completion_window else ''} for {result_stats.num_requests} requests = {result_stats.num_success} success ({result_stats.num_empty} empty) + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio")
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} took {result_stats.duration_str}{f' (max {batch.remote.batch.completion_window})' if batch.remote.batch.completion_window else ''} for {result_stats.num_requests} requests = {result_stats.num_success} success ({result_stats.num_empty} empty) + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio (PRIOR to task-specific processing)")
 		assert result_stats.num_requests == len(batch.request_info) == len(result_info_map)
 		assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
 		assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
