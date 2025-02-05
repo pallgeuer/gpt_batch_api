@@ -560,7 +560,7 @@ def safe_unlink(
 			raise
 		return None
 
-# Lock file class that uses verbose prints to inform about the lock acquisition process in case it isn't quick
+# Reentrant lock file class that uses verbose prints to inform about the lock acquisition process in case it isn't quick
 class LockFile:
 
 	def __init__(
@@ -595,8 +595,10 @@ class LockFile:
 		now = start_time
 		while True:
 			try:
+				already_locked = self.lock.is_locked
 				self.lock.acquire(timeout=max(min(timeout_time, print_time) - now, 0), poll_interval=self.poll_interval)
-				print_in_place(f"Successfully acquired lock in {format_duration(time.perf_counter() - start_time)}: {self.lock.lock_file}\n")
+				if not already_locked:
+					print_in_place(f"Successfully acquired lock in {format_duration(time.perf_counter() - start_time)}: {self.lock.lock_file}\n")
 				return self
 			except filelock.Timeout:
 				now = time.perf_counter()

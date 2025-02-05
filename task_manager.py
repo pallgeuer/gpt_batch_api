@@ -616,6 +616,7 @@ class TaskManager:
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
+			enter_stack.enter_context(self.GR.lock)
 			wipe_requests = self.GR.wipe_requests
 			wipe_task = self.GR.wipe_task
 			enter_stack.callback(self.on_exit)
