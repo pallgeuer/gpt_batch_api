@@ -34,6 +34,7 @@ import openai.lib._parsing as openai_parsing  # noqa
 import openai._utils as openai_utils  # noqa
 from .logger import log
 from . import tokens, utils
+from .utils import NONE
 
 # Constants
 DRYRUN = '\x1b[38;5;226m[DRYRUN]\x1b[0m '
@@ -1242,37 +1243,40 @@ class GPTRequester:
 		log.info(f"Task push statistics are now {self.S.task_push_stats.total_requests} requests, {self.S.task_push_stats.total_tokens_cost.input_tokens} input tokens, {self.S.task_push_stats.total_tokens_cost.cost:.3f} assumed cost")
 
 	# Create a GPT request item
-	def create_request_item(self, req: GPTRequest) -> GPTRequestItem:
+	def create_request_item(self, req: GPTRequest, parse_info: Optional[dict[str, Any]] = NONE) -> GPTRequestItem:
 		# req = The request to wrap as a request item (req is copied if it needs to be modified)
+		# parse_info = Custom explicit value for the parse information, regardless of whether auto-parse is enabled (useful when constructing a new GPTRequestItem based on a previously auto-parsed payload, as auto-parsing potentially edits a payload in such a way that it does not auto-parse as intended a second time)
 
-		if self.auto_parse:
+		if parse_info is NONE:
 
-			parse_info = {}
-			if self.endpoint == '/v1/chat/completions':  # Chat completions endpoint
+			if self.auto_parse:
 
-				if req.payload.get('stream', False):
-					raise ValueError("Streaming GPT requests are not supported")
+				parse_info = {}
+				if self.endpoint == '/v1/chat/completions':  # Chat completions endpoint
 
-				tools = req.payload.get('tools', openai.NOT_GIVEN)
-				openai_parsing.validate_input_tools(tools=tools)
+					if req.payload.get('stream', False):
+						raise ValueError("Streaming GPT requests are not supported")
 
-				response_format = req.payload.get('response_format', openai.NOT_GIVEN)
-				resolved_response_format = openai_parsing.type_to_response_format_param(response_format=response_format)
+					tools = req.payload.get('tools', openai.NOT_GIVEN)
+					openai_parsing.validate_input_tools(tools=tools)
 
-				payload = req.payload.copy()
-				if openai_utils.is_given(resolved_response_format):
-					payload['response_format'] = resolved_response_format
-				else:
-					del payload['response_format']
-				req = dataclasses.replace(req, payload=payload)
+					response_format = req.payload.get('response_format', openai.NOT_GIVEN)
+					resolved_response_format = openai_parsing.type_to_response_format_param(response_format=response_format)
 
-				if isinstance(response_format, type):
-					parse_info['response_format_type'] = self.type_cache.cache_type(typ=response_format, verify=True)
-				elif response_format is not resolved_response_format and (openai_utils.is_given(response_format) or openai_utils.is_given(resolved_response_format)):
-					raise ValueError(f"Auto-parse unexpectedly changed the value of response_format: {response_format} vs {resolved_response_format}")
+					payload = req.payload.copy()
+					if openai_utils.is_given(resolved_response_format):
+						payload['response_format'] = resolved_response_format
+					else:
+						del payload['response_format']
+					req = dataclasses.replace(req, payload=payload)
 
-		else:
-			parse_info = None
+					if isinstance(response_format, type):
+						parse_info['response_format_type'] = self.type_cache.cache_type(typ=response_format, verify=True)
+					elif response_format is not resolved_response_format and (openai_utils.is_given(response_format) or openai_utils.is_given(resolved_response_format)):
+						raise ValueError(f"Auto-parse unexpectedly changed the value of response_format: {response_format} vs {resolved_response_format}")
+
+			else:
+				parse_info = None
 
 		self.max_request_id += 1
 		return GPTRequestItem(id=self.max_request_id, req=req, parse_info=parse_info)
@@ -1281,6 +1285,7 @@ class GPTRequester:
 	def direct_requests(self, reqs: Union[Iterable[Union[GPTRequest, GPTRequestItem, CachedGPTRequest]], GPTRequest, GPTRequestItem, CachedGPTRequest], yield_retry_reqs: bool) -> Iterable[tuple[Optional[utils.RevertStack], Optional[BatchResult], Optional[bool], Optional[list[CachedGPTRequest]]]]:
 		# reqs = The requests to make using the direct API (raw, itemized and/or cached requests can be provided)
 		# yield_retry_reqs = Whether to yield tuples (for complete transparency of operations) containing any retry requests that are generated and will be internally executed (in addition to, and generally alternating with, the tuples containing the virtual batch results for which the retry behaviour can still be modified)
+		# CAUTION: No raw GPTRequest instances should be provided that have already been edited by the auto-parse functionality at some point, and need to be paired with their existing parse_info (e.g. a GPTRequest extracted or derived from a GPTRequestItem or CachedGPTRequest) => In that case, use self.create_request_item(req=..., parse_info=...) instead and pass the resulting GPTRequestItem
 		# The provided requests are auto-split into virtual batches based on direct request number/token limits and such
 		# Either processes and returns results for all requests (plus associated retries) one virtual batch at a time, or eventually yields limited=True and discontinues (after a possible trailing retry requests yield), or raises an exception if an unresolvable issue occurs
 		# If dry run is active, the returned results will have both resp_info=None and err_info=None
@@ -1678,6 +1683,7 @@ class GPTRequester:
 							meta=info.req_info.meta,
 							retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
 						),
+						parse_info=info.req_info.parse_info,
 					),
 					endpoint=self.endpoint,
 					token_estimator=self.token_estimator,
@@ -1713,11 +1719,12 @@ class GPTRequester:
 			self.log_push_stats()
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
-	def add_request(self, req: GPTRequest) -> int:
+	def add_request(self, req: GPTRequest, parse_info: Optional[dict[str, Any]] = NONE) -> int:
 		# req = The request to add to the request pool
+		# parse_info = Optional custom explicit value for the parse information (refer to self.create_request_item())
 		# Returns the associated unique request ID
 		# Be careful not to inadvertently modify any part of req after adding the request (e.g. the meta/payload or any deeper part of it)
-		item = self.create_request_item(req=req)
+		item = self.create_request_item(req=req, parse_info=parse_info)
 		cached_req = CachedGPTRequest.from_item(item=item, endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster)
 		self.P.append(cached_req)
 		return cached_req.item.id
@@ -1727,6 +1734,7 @@ class GPTRequester:
 	def add_requests(self, reqs: Iterable[GPTRequest]) -> list[int]:
 		# reqs = The requests to add to the request pool
 		# Returns a list of the associated unique request IDs
+		# Note: If custom explicit values for the parse information are required then use add_request() manually in a loop instead
 		return [self.add_request(req) for req in reqs]
 
 	# Context manager: Optionally add some request(s) to the request pool, then in any case commit all requests now in the pool to the request queue
@@ -2612,20 +2620,24 @@ class GPTRequester:
 								else:
 									self.S.num_pass_failures = 0
 
-							retry_reqs = [GPTRequest(
-								payload=info.req_payload,
-								meta=info.req_info.meta,
-								retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
-							) for info in result.info.values() if info.retry]
-
-							if retry_reqs:
-								log.info(f"{len(retry_reqs)} requests need to be retried and will be re-committed to the request queue...")
-								with self.commit_requests(reqs=retry_reqs, rstack=rstack) as (_, cached_reqs):
-									assert len(cached_reqs) >= len(retry_reqs) > 0  # Note: There will always be something to commit and thus state validation and saving of the queue and state files will have happened internally
-								if len(cached_reqs) == len(retry_reqs):
-									log.info(f"Committed {len(retry_reqs)} retried requests to the request queue")
+							retry_infos = [info for info in result.info.values() if info.retry]
+							if retry_infos:
+								log.info(f"{len(retry_infos)} requests need to be retried and will be re-committed to the request queue...")
+								for info in retry_infos:
+									self.add_request(
+										req=GPTRequest(
+											payload=info.req_payload,
+											meta=info.req_info.meta,
+											retry_num=info.req_info.retry_num + 1 if info.retry_counts else info.req_info.retry_num,
+										),
+										parse_info=info.req_info.parse_info,
+									)
+								with self.commit_requests(rstack=rstack) as (_, cached_reqs):
+									assert len(cached_reqs) >= len(retry_infos) > 0  # Note: There will always be something to commit and thus state validation and saving of the queue and state files will have happened internally
+								if len(cached_reqs) == len(retry_infos):
+									log.info(f"Committed {len(retry_infos)} retried requests to the request queue")
 								else:
-									log.info(f"Committed {len(cached_reqs) - len(retry_reqs)} existing pooled requests and {len(retry_reqs)} retried requests to the request queue")
+									log.info(f"Committed {len(cached_reqs) - len(retry_infos)} existing pooled requests and {len(retry_infos)} retried requests to the request queue")
 							else:
 								self.validate_state_queue(clean=False)
 								self.state.save(rstack=rstack)
