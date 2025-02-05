@@ -2930,7 +2930,6 @@ class GPTRequester:
 
 		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
-	# TODO: Run through all safe steps with char codes and pay particular attention to whether the RETRY mechanism is working exactly correctly, and whether --direct_verbose warn works => Try to see a verbose ERROR!
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 	# TODO: Sync up with commands.txt
 	# TODO: Inspect the entire code for problems

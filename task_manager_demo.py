@@ -380,6 +380,7 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 					self.T.failed_samples[skey] = value
 			del self.D.entries[num_entries:]
 
+		err_misc_failed = utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors)
 		for info in result.info.values():
 
 			sample_key = info.req_info.meta['sample_key']
@@ -391,7 +392,7 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 			assert num_committed > num_failed + len(opinions) >= 0 and num_failed >= 0  # Whether the current result is a success, failure or retry, it will always (eventually) count +1 towards the number of responses, hence why num_committed needs to be STRICTLY greater than the current number of responses (prior to the current result being added)
 
 			if info.err_info is None and info.resp_info is not None and isinstance(info.resp_info.payload, openai_chat.ParsedChatCompletion) and info.resp_info.payload.choices and isinstance((utterance_info := info.resp_info.payload.choices[0].message.parsed), UtteranceInfo):
-				assert not info.retry
+				assert not info.retry and info.retry_counts
 				if sample_key in self.T.succeeded_samples:
 					if sample_key not in succeeded_samples:
 						succeeded_samples[sample_key] = len(opinions)  # For revert_sample_state(): Make a note to truncate self.T.succeeded_samples[sample_key] back down to the original number of opinions if reverting state updates in future
@@ -401,6 +402,8 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 					self.T.succeeded_samples[sample_key] = opinions
 				opinions.append(utterance_info.model_dump(mode='json'))
 			elif not info.retry:
+				if info.err_info is None and not self.GR.dryrun:
+					err_misc_failed.log(f"Batch {result.batch.id} request ID {info.req_id} retry {info.req_info.retry_num} got no error yet FAILED")
 				if sample_key not in failed_samples:
 					failed_samples[sample_key] = self.T.failed_samples.get(sample_key, None)  # For revert_sample_state(): Store the original number of failed requests, or None if sample_key originally did not exist in self.T.failed_samples
 				num_failed += 1
@@ -418,6 +421,8 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 						emotion=UtteranceEmotion(most_common_opinion) if most_common_opinion is not None else None,
 						emotions=dict(sorted(emotions.items(), key=lambda item: (-item[1], item[0]))),
 					))
+
+		err_misc_failed.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further requests that got no error yet FAILED (total {num_total} occurrences)")
 
 		return bool(succeeded_samples) or bool(failed_samples)
 
