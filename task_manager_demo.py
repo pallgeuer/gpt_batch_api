@@ -141,9 +141,7 @@ class CharCodesTask(task_manager.TaskManager):
 
 	def process_batch_result(self, result: gpt_requester.BatchResult, rstack: utils.RevertStack) -> bool:
 
-		CHOICE = 0
-		err_char_mismatch = utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors)
-		err_char_count = utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors)
+		CHOICE = 0  # Note: Coded in this parametric way to show how multi-choice situations could be handled, even though here we always only have a single choice and choose the first one
 		sample_keys_succeeded = set()
 		sample_keys_failed = set()
 		sample_chars = set()
@@ -157,6 +155,7 @@ class CharCodesTask(task_manager.TaskManager):
 			for schar in sample_chars:
 				self.D.chars.pop(schar, None)
 
+		err_char_mismatch, err_char_count, err_misc_failed = [utils.LogSummarizer(log_fn=log.error, show_msgs=self.GR.show_errors) for _ in range(3)]
 		for info in result.info.values():
 
 			sample_key = info.req_info.meta['sample_key']
@@ -179,26 +178,34 @@ class CharCodesTask(task_manager.TaskManager):
 						if isinstance(parsed, UnicodeCharacterInfo):
 							char_info = parsed
 
-			warn_infos_choice = [warn_info for warn_info in info.warn_infos if not (warn_info.type == 'MessageChoice' and warn_info.data != CHOICE)]
+			succeeded = False
+			warn_infos_choice = [warn_info for warn_info in info.warn_infos if warn_info.type != 'MessageChoice' or warn_info.data == CHOICE]
 			if char_info is not None and info.err_info is None and not warn_infos_choice:
-				assert not info.retry
+				assert not info.retry and info.retry_counts
 				if char_info.character != sample_char:
-					err_char_mismatch.log(f"Batch {result.batch.id} request ID {info.req_id} had a character mismatch: Got '{char_info.character}' instead of '{sample_char}'")
-					info.retry = True
+					info.err_info = gpt_requester.ErrorInfo(fatal=False, type='TaskSpecific', subtype='CharMismatch', data=char_info.character, msg=f"Got character '{char_info.character}' instead of '{sample_char}'")
+					err_char_mismatch.log(f"Batch {result.batch.id} request ID {info.req_id} retry {info.req_info.retry_num} had a character mismatch: {info.err_info.msg}")
 				elif char_info.sample_sentence.count(sample_char) < 2:
-					err_char_count.log(f"Batch {result.batch.id} request ID {info.req_id} sample sentence has less than 2 occurrences of the sample char '{sample_char}': \"{char_info.sample_sentence}\"")
-					info.retry = True
+					info.err_info = gpt_requester.ErrorInfo(fatal=False, type='TaskSpecific', subtype='TooFewChar', msg=f"Sample sentence has less than 2 occurrences of the sample char '{sample_char}' => \"{char_info.sample_sentence}\"")
+					err_char_count.log(f"Batch {result.batch.id} request ID {info.req_id} retry {info.req_info.retry_num}: {info.err_info.msg}")
 				else:
 					sample_keys_succeeded.add(sample_key)
 					self.T.succeeded_samples[sample_key] = None
 					sample_chars.add(sample_char)
 					self.D.chars[sample_char] = char_info
-			elif not info.retry:
+					succeeded = True
+				if not succeeded:
+					info.retry = info.err_info is not None and (not info.err_info.fatal or self.GR.retry_fatal_requests) and (info.req_info.retry_num < self.GR.max_retries or not info.retry_counts)  # TODO: REFACTOR
+
+			if not succeeded and not info.retry:
+				if info.err_info is None and not self.GR.dryrun:
+					err_misc_failed.log(f"Batch {result.batch.id} request ID {info.req_id} retry {info.req_info.retry_num} got no error yet FAILED")
 				sample_keys_failed.add(sample_key)
 				self.T.failed_samples[sample_key] = None
 
 		err_char_mismatch.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further character mismatches (total {num_total} occurrences)")
 		err_char_count.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further sample sentences with less than 2 occurrences of the sample char (total {num_total} samples)")
+		err_misc_failed.finalize(msg_fn=lambda num_omitted, num_total: f"Encountered {num_omitted} further requests that got no error yet FAILED (total {num_total} occurrences)")
 
 		return bool(sample_keys_succeeded) or bool(sample_keys_failed)
 
