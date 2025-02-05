@@ -1472,6 +1472,7 @@ class GPTRequester:
 			batch_start_time = time.perf_counter()
 			printed_str = None
 			printed_time = None
+			verbosed_req_ids = set()
 
 			def allow_other_print():
 				nonlocal printed_str, printed_time
@@ -1482,6 +1483,29 @@ class GPTRequester:
 			def safe_log_fn(msg: str):
 				allow_other_print()
 				log.error(msg)
+
+			def print_verbose(req_id_: int, req_info_: RequestInfo, payload_: dict[str, Any], resp_info_: Optional[ResponseInfo], warn_infos_: list[ErrorInfo], err_info_: Optional[ErrorInfo]):
+				if req_id_ not in verbosed_req_ids and (self.direct_verbose == DirectVerboseMode.ALWAYS or (self.direct_verbose >= DirectVerboseMode.WARN and warn_infos_) or (self.direct_verbose >= DirectVerboseMode.ERROR and err_info_ is not None)):
+					verbose_printer = VerbosePrettyPrinter()
+					verbose_msg = (
+						"\u2193\u2193\u2193\n"
+						f"{'*' * verbose_printer.width}\n"
+						f"\x1b[32mREQUEST ID:\x1b[0m {req_id_}\n"
+						"\x1b[32mMETHOD:\x1b[0m POST\n"
+						f"\x1b[32mENDPOINT:\x1b[0m {self.endpoint}\n"
+						f"\x1b[32mREQUEST INFO:\x1b[0m\n{verbose_printer.pformat(req_info_)}\n"
+						f"\x1b[32mREQUEST JSON:\x1b[0m\n{verbose_printer.pformat(payload_)}\n"
+					)
+					if resp_info_ is not None:
+						verbose_msg += f"\x1b[32mRESPONSE INFO:\x1b[0m\n{verbose_printer.pformat(resp_info_)}\n"
+					if warn_infos_:
+						verbose_msg += f"\x1b[38;5;226mWARNINGS:\x1b[0m\n{verbose_printer.pformat(warn_infos_)}\n"
+					if err_info_ is not None:
+						verbose_msg += f"\x1b[38;5;196mERROR:\x1b[0m\n{verbose_printer.pformat(err_info_)}\n"
+					verbose_msg += ('*' * verbose_printer.width)
+					allow_other_print()
+					log.info(verbose_msg)
+					verbosed_req_ids.add(req_id_)
 
 			result_info_map: dict[int, ResultInfo] = {}  # Maps: Request ID --> Result information
 			warn_resp = utils.LogSummarizer(log_fn=log.warning, show_msgs=self.show_warnings)
@@ -1542,26 +1566,7 @@ class GPTRequester:
 						assert resp_model is not None and resp_system_fingerprint is not None and resp_usage is not None
 						resp_info = ResponseInfo(payload=resp_payload, model=resp_model, system_fingerprint=resp_system_fingerprint, usage=resp_usage)
 
-				if self.direct_verbose == DirectVerboseMode.ALWAYS or (self.direct_verbose >= DirectVerboseMode.WARN and warn_infos) or (self.direct_verbose >= DirectVerboseMode.ERROR and err_info is not None):
-					verbose_printer = VerbosePrettyPrinter()
-					verbose_msg = (
-						"\u2193\u2193\u2193\n"
-						f"{'*' * verbose_printer.width}\n"
-						f"\x1b[32mREQUEST ID:\x1b[0m {req_id}\n"
-						"\x1b[32mMETHOD:\x1b[0m POST\n"
-						f"\x1b[32mENDPOINT:\x1b[0m {self.endpoint}\n"
-						f"\x1b[32mREQUEST INFO:\x1b[0m\n{verbose_printer.pformat(req_info)}\n"
-						f"\x1b[32mREQUEST JSON:\x1b[0m\n{verbose_printer.pformat(cached_req.item.req.payload)}\n"
-					)
-					if resp_info is not None:
-						verbose_msg += f"\x1b[32mRESPONSE INFO:\x1b[0m\n{verbose_printer.pformat(resp_info)}\n"
-					if warn_infos:
-						verbose_msg += f"\x1b[38;5;226mWARNINGS:\x1b[0m\n{verbose_printer.pformat(warn_infos)}\n"
-					if err_info is not None:
-						verbose_msg += f"\x1b[38;5;196mERROR:\x1b[0m\n{verbose_printer.pformat(err_info)}\n"
-					verbose_msg += ('*' * verbose_printer.width)
-					allow_other_print()
-					log.info(verbose_msg)
+				print_verbose(req_id_=req_id, req_info_=req_info, payload_=cached_req.item.req.payload, resp_info_=resp_info, warn_infos_=warn_infos, err_info_=err_info)
 
 				for warn_info in warn_infos:
 					warn_resp.log(f"Direct batch {batch.id} request ID {req_id} got warning {warn_info.type}({warn_info.subtype}): {warn_info.msg}")
@@ -1670,6 +1675,9 @@ class GPTRequester:
 				yielded_req_ids.extend(result.info.keys())
 				yield rstack, result, direct_limits_reached, None  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
+				for info in result.info.values():
+					print_verbose(req_id_=info.req_id, req_info_=info.req_info, payload_=info.req_payload, resp_info_=info.resp_info, warn_infos_=info.warn_infos, err_info_=info.err_info)
+
 				rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy(), max_request_id=self.S.max_request_id)
 				self.S.max_direct_batch_id = self.max_direct_batch_id
 				batch.request_info = {}
@@ -1696,7 +1704,7 @@ class GPTRequester:
 					reqs_list.extend(retry_reqs)
 
 				if yield_retry_reqs:
-					yield rstack, result, None, retry_reqs
+					yield rstack, result, None, retry_reqs  # Note: No updates to result or retry_reqs are permitted!
 
 				self.validate_state_queue(clean=False)
 				self.state.save(rstack=rstack)
