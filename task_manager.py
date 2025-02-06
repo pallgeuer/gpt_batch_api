@@ -583,6 +583,7 @@ class TaskManager:
 
 		with self:
 
+			log.info('\xB7' * 60)
 			self.log_status()
 			self.GR.log_status()
 
@@ -603,6 +604,7 @@ class TaskManager:
 			self.log_status()
 			self.GR.log_status()
 
+		log.info('\xB7' * 60)
 		log.info("Finished running task manager")
 
 	# Callback that can be used to perform custom actions during entering (called once task is entered and self.T is available, but before GPT requester is entered)
@@ -628,6 +630,7 @@ class TaskManager:
 			self.step_num = 0
 			self.generating = False
 			self.validate_state(clean=False)
+			log.info('\xB7' * 60)
 			enter_stack.enter_context(self.output)
 			self.D = self.output.data
 			self.output.validate()
@@ -655,6 +658,7 @@ class TaskManager:
 		if wipe_task:
 			self.log_status()
 			with utils.DelayKeyboardInterrupt():
+				log.info('\xB7' * 60)
 				log.warning("Wiping complete task output and state...")
 				with utils.RevertStack() as rstack:
 					self.step_num = 0
@@ -673,6 +677,7 @@ class TaskManager:
 				raise ValueError("Wipe failed samples requires all ongoing requests also be wiped")  # As not wipe_requests, it is assumed that the GPTRequester has NOT wiped requests, and thus it is okay to raise an exception (does not result in indeterminate state on disk)
 			self.log_status()
 			with utils.DelayKeyboardInterrupt():
+				log.info('\xB7' * 60)
 				log.warning(f"Wiping unfinished{' and failed' if wipe_failed else ''} requests/samples...")
 				with utils.RevertStack() as rstack:
 					save_output = self.wipe_unfinished(wipe_failed=wipe_failed, rstack=rstack)
@@ -700,6 +705,7 @@ class TaskManager:
 	def validate_state(self, *, clean: bool):
 		# clean = Whether the current state should be without any unfinished requests/samples (all committed samples should have a response already)
 		# Note: This method can be overridden to sanity check task-specific task state conditions (remember to call this implementation via super() though)
+		# Note: The task output may not be loaded at this point
 		if not self.T.committed_samples.keys() >= self.T.failed_samples.keys():
 			raise ValueError(f"Unexpected failed yet not committed samples: {sorted(self.T.failed_samples.keys() - self.T.committed_samples.keys())}")
 		if not self.T.committed_samples.keys() >= self.T.succeeded_samples.keys():
@@ -783,7 +789,7 @@ class TaskManager:
 				all_done = (self.GR.num_unpushed_batches() <= 0 and self.GR.num_unfinished_batches() <= 0)  # Condition D = ELR = There are no unpushed local batches and no unfinished remote batches (condition E must be met simply by reaching this line)
 				break
 
-		log.info('\u2500' * 90)
+		log.info('\u2500' * 120)
 		log.info(f"Finished step {self.step_num}")
 		return not all_done
 
@@ -793,7 +799,7 @@ class TaskManager:
 		# Returns a boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode)
 		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history
 
-		log.info('\u2500' * 90)
+		log.info('\u2500' * 120)
 		direct_limits_reached = False
 		for rstack, result, limited, _ in self.GR.direct_requests(reqs=reqs, yield_retry_reqs=False):
 			if rstack is not None and result is not None:
@@ -806,7 +812,7 @@ class TaskManager:
 	# Call the generate requests implementation
 	def call_generate_requests(self) -> bool:
 		# Passes on the return value of generate_requests()
-		log.info('\u2500' * 90)
+		log.info('\u2500' * 120)
 		log.info("Generating requests...")
 		assert not self.generating
 		self.generating = True
@@ -898,7 +904,7 @@ class TaskManager:
 	def push_batches(self) -> bool:
 		# Returns whether the batch pipeline is (now) congested
 		if self.GR.num_pushable_batches() > 0:
-			log.info('\u2500' * 90)
+			log.info('\u2500' * 120)
 			log.info("Checking whether any local batches can be pushed to the remote server...")
 			return self.GR.push_batches()  # Returns whether the batch pipeline is congested
 		else:  # No pushable local batches => Condition M satisfied
@@ -913,7 +919,7 @@ class TaskManager:
 		direct_limits_reached = self.GR.only_process
 
 		if num_unpushable_batches > 0:
-			log.info('\u2500' * 90)
+			log.info('\u2500' * 120)
 			log.info(f"Attempting to process the {num_unpushable_batches} available local unpushable batches...")
 			for rstack, result, limited in self.GR.process_unpushable_batches():  # Either processes all unpushable batches one virtual (sub-)batch at a time, or eventually yields limited=True and discontinues, or raises an exception if an unresolvable issue occurs
 				if rstack is not None and result is not None:
@@ -929,7 +935,7 @@ class TaskManager:
 	def process_batches(self) -> int:
 		# Returns the current number of unfinished remote batches (after the remote batch status updates)
 		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history
-		log.info('\u2500' * 90)
+		log.info('\u2500' * 120)
 		for rstack, result in self.GR.process_batches():
 			self.call_process_batch_result(result=result, rstack=rstack)
 		assert self.GR.num_finished_batches() <= 0 or self.GR.dryrun  # Condition F

@@ -1097,9 +1097,11 @@ class GPTRequester:
 		# Wiping is NOT a revertible operation, and an indeterminate/inconsistent state in memory/on disk/on remote may result if an exception occurs during wiping
 
 		if wipe_requests or wipe_task:
+			log.info('\xB7' * 60)
 			self.log_status()
 			with utils.DelayKeyboardInterrupt():
 
+				log.info('\xB7' * 60)
 				log.warning("Wiping all ongoing requests and batches...")
 
 				self.prepare_process_batches()
@@ -1727,6 +1729,8 @@ class GPTRequester:
 					self.session_processed_failed_batches += 1
 					log.warning(f"Have processed a total of {self.session_processed_failed_batches} failed batches in this session")
 
+		if index > 0:
+			log.info('\xB7' * 60)
 		if direct_limits_reached:
 			log.warning(f"Direct limits were reached while executing requests using the direct API: {', '.join(direct_limits_list)}")
 		log.info(f"Executed {min(index, num_input_reqs)} requests ({index} including retries) in {num_direct_batches} direct batches using the direct API")
@@ -1735,8 +1739,7 @@ class GPTRequester:
 			assert len(yielded_req_ids) == len(set(yielded_req_ids)) == index == len(reqs_list)
 			assert all(isinstance(cached_req, CachedGPTRequest) for cached_req in reqs_list)
 			assert yielded_req_ids == [cached_req.item.id for cached_req in reqs_list]
-
-		if reqs_list:
+		if index > 0:
 			self.log_push_stats()
 
 	# Add a single request to the request pool without committing it to the request queue just yet (the request will be committed in the next call to commit_requests())
@@ -2414,11 +2417,10 @@ class GPTRequester:
 
 		delayed_raise = utils.DelayedRaise()
 		for batch in self.S.batches.copy():
-
-			log.info('\xB7' * 60)
-			delayed_raise.new_section()
-
 			if batch.remote is not None and batch.remote.finished:
+
+				log.info('\xB7' * 60)
+				delayed_raise.new_section()
 
 				if self.dryrun:
 					log.warning(f"{DRYRUN}Not processing finished batch {batch.id} ({batch.remote.file.id}) containing {batch.num_requests} requests")
@@ -2797,7 +2799,7 @@ class GPTRequester:
 		# direct_mode = Whether the batch was executed using the direct API (True) or batch API (False)
 		# Returns the input BatchResult (same instance, but modified)
 		result.stats = self.calc_result_stats(result_infos=result.info.values())
-		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch_id} after task-specific processing has {result.stats.num_requests} requests = {result.stats.num_success} success ({result.stats.num_empty} empty) + {result.stats.num_warned} warned + {result.stats.num_errored} errored ({result.stats.num_fatal} fatal, {result.stats.num_retryable} retryable, {result.stats.num_missing} missing, {result.stats.num_cancelled} cancelled, {result.stats.num_expired} expired) => {result.stats.num_pass} pass = {result.stats.pass_ratio:.1%} ratio")
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch_id} AFTER task-specific processing has {result.stats.num_requests} requests = {result.stats.num_success} success ({result.stats.num_empty} empty) + {result.stats.num_warned} warned + {result.stats.num_errored} errored ({result.stats.num_fatal} fatal, {result.stats.num_retryable} retryable, {result.stats.num_missing} missing, {result.stats.num_cancelled} cancelled, {result.stats.num_expired} expired) => {result.stats.num_pass} pass = {result.stats.pass_ratio:.1%} ratio")
 		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch_id} has {result.stats.num_final} final results ({result.stats.num_final_none} without issues + {result.stats.num_final_warn} with warnings + {result.stats.num_final_err} with errors), and needs {result.stats.num_retry} retries ({result.stats.num_retry_err} with errors + {result.stats.num_retry_warn} with warnings + {result.stats.num_retry_none} without issues, {result.stats.num_retry_counts} retries count)")
 		return result
 
