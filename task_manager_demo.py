@@ -182,7 +182,7 @@ class CharCodesTask(task_manager.TaskManager):
 			warn_infos_choice = [warn_info for warn_info in info.warn_infos if warn_info.type != 'MessageChoice' or warn_info.data == CHOICE]
 			if char_info is not None and info.err_info is None and not warn_infos_choice:
 				assert not info.retry and info.retry_counts
-				if char_info.character != sample_char:
+				if char_info.character != sample_char and char_info.character.strip() != sample_char:
 					info.err_info = gpt_requester.ErrorInfo(fatal=False, type='TaskSpecific', subtype='CharMismatch', data=char_info.character, msg=f"Got character '{char_info.character}' instead of '{sample_char}'")
 					err_char_mismatch.log(f"Batch {result.batch.id} request ID {info.req_id} retry {info.req_info.retry_num} had a character mismatch: {info.err_info.msg}")
 				elif char_info.sample_sentence.count(sample_char) < 2:
