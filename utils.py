@@ -627,9 +627,12 @@ def get_file_size(file: Union[TextIO, BinaryIO]) -> int:
 
 # Protocol-based type annotation for configuration parameters represented as an object of attributes (e.g. argparse.Namespace, flat omegaconf.DictConfig)
 class Config(Protocol):
+	def __getattribute__(self, name: str) -> Any: ...
 
-	def __getattribute__(self, name: str) -> Any:
-		...
+# Protocol-base type annotation for a typed sized iterable
+class SizedIterable(Protocol[T]):
+	def __iter__(self) -> Iterable[T]: ...
+	def __len__(self) -> int: ...
 
 # Serialized type cache
 class SerialTypeCache:
