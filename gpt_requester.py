@@ -575,25 +575,34 @@ class ResultInfo:
 # Result statistics class
 @dataclasses.dataclass(frozen=True)
 class ResultStats:
-	duration: int       # Duration in seconds it took for the batch to finalize on the remote (complete, cancel, ...)
-	duration_str: str   # Duration formatted as a 'XhYm' string (see utils.format_duration_hmin)
-	num_requests: int   # Number of requests
-	num_success: int    # Number of results with no warnings or error
-	num_empty: int      # Number of results with neither a response nor an error
-	num_warned: int     # Number of results with warnings but no error
-	num_errored: int    # Number of results with an error
-	num_retryable: int  # Number of results with a retryable error
-	num_cancelled: int  # Number of results with a retryable error due to the batch being cancelled
-	num_expired: int    # Number of results with a retryable error due to the batch being expired
-	num_fatal: int      # Number of results with a fatal error
-	num_missing: int    # Number of requests for which no response/result was received
-	num_pass: int       # Number of results considered as 'passed' (i.e. not indicative of problems = successful or expired)
-	pass_ratio: float   # Ratio of passed results to the number of requests
+	num_requests: int      # Number of requests
+	num_success: int       # Number of results with no warnings or error
+	num_empty: int         # Number of results with neither a response nor an error
+	num_warned: int        # Number of results with warnings but no error
+	num_errored: int       # Number of results with an error
+	num_retryable: int     # Number of results with a retryable error
+	num_cancelled: int     # Number of results with a retryable error due to the batch being cancelled
+	num_expired: int       # Number of results with a retryable error due to the batch being expired
+	num_fatal: int         # Number of results with a fatal error
+	num_missing: int       # Number of requests for which no response/result was received
+	num_pass: int          # Number of results considered as 'passed' (i.e. not indicative of problems = successful or expired)
+	pass_ratio: float      # Ratio of passed results to the number of requests
+	num_final: int         # Number of final results (results that are NOT flagged as needing to be retried)
+	num_final_err: int     # Number of final results with an error
+	num_final_warn: int    # Number of final results with warnings but no error
+	num_final_none: int    # Number of final results with no warnings or error
+	num_retry: int         # Number of retry results (results that are flagged as needing to be retried)
+	num_retry_err: int     # Number of retry results with an error
+	num_retry_warn: int    # Number of retry results with warnings but no error
+	num_retry_none: int    # Number of retry results with no warnings or error
+	num_retry_counts: int  # Number of retry results for which the retry counts towards the retry number
 
 # Batch result class
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class BatchResult:
 	batch: BatchState                      # Final batch state including final remote state (prior to any removal of overdetailed per-request information for the purpose of saving the batch to the history)
+	duration: int                          # Duration in seconds it took for the batch to finalize on the remote (complete, cancel, ...)
+	duration_hmin: str                     # Duration formatted as a 'XhYm' string (see utils.format_duration_hmin)
 	errors: list[openai.types.BatchError]  # List of any encountered batch errors
 	info: dict[int, ResultInfo]            # Result information for each request ID in the batch (in ascending request ID order, guaranteed to be for exactly all requests in the batch)
 	stats: ResultStats                     # Result statistics
@@ -1326,6 +1335,7 @@ class GPTRequester:
 		total_start_time = time.perf_counter()
 		while index < len(reqs_list) and not direct_limits_reached:
 
+			log.info('\xB7' * 60)
 			delayed_raise.new_section()
 
 			batch = BatchState()
@@ -1489,7 +1499,7 @@ class GPTRequester:
 					verbose_printer = VerbosePrettyPrinter()
 					verbose_msg = (
 						"\u2193\u2193\u2193\n"
-						f"{'*' * verbose_printer.width}\n"
+						f"{'\u2501' * verbose_printer.width}\n"
 						f"\x1b[32mREQUEST ID:\x1b[0m {req_id_}\n"
 						"\x1b[32mMETHOD:\x1b[0m POST\n"
 						f"\x1b[32mENDPOINT:\x1b[0m {self.endpoint}\n"
@@ -1502,7 +1512,7 @@ class GPTRequester:
 						verbose_msg += f"\x1b[38;5;226mWARNING INFOS:\x1b[0m\n{verbose_printer.pformat(warn_infos_)}\n"
 					if err_info_ is not None:
 						verbose_msg += f"\x1b[38;5;196mERROR INFO:\x1b[0m\n{verbose_printer.pformat(err_info_)}\n"
-					verbose_msg += ('*' * verbose_printer.width)
+					verbose_msg += ('\u2501' * verbose_printer.width)
 					allow_other_print()
 					log.info(verbose_msg)
 					verbosed_req_ids.add(req_id_)
@@ -1678,6 +1688,8 @@ class GPTRequester:
 
 				for info in result.info.values():
 					print_verbose(req_id_=info.req_id, req_info_=info.req_info, payload_=info.req_payload, resp_info_=info.resp_info, warn_infos_=info.warn_infos, err_info_=info.err_info)
+
+				self.update_result_stats(result=result, batch_id=batch.id, direct_mode=True)
 
 				rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy(), max_request_id=self.S.max_request_id)
 				self.S.max_direct_batch_id = self.max_direct_batch_id
@@ -2385,8 +2397,7 @@ class GPTRequester:
 	# Update and prepare for the processing of remote batches
 	def prepare_process_batches(self):
 		self.update_remote_batch_state(only_check_finished=False, log_save=True)  # Does not do much in case of dry run
-		if (num_finished_batches := self.num_finished_batches()) > 0:
-			log.info(f"There are {self.num_unfinished_batches()} unfinished and {num_finished_batches} finished REMOTE batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)} and {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and batch.remote.finished)} requests respectively")
+		log.info(f"There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)} and {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and batch.remote.finished)} requests respectively")
 
 	# Generator: Process and clean up after any finished remote batches (unless dry run)
 	def process_batches(self) -> Iterable[tuple[utils.RevertStack, BatchResult]]:
@@ -2404,7 +2415,9 @@ class GPTRequester:
 		delayed_raise = utils.DelayedRaise()
 		for batch in self.S.batches.copy():
 
+			log.info('\xB7' * 60)
 			delayed_raise.new_section()
+
 			if batch.remote is not None and batch.remote.finished:
 
 				if self.dryrun:
@@ -2618,6 +2631,8 @@ class GPTRequester:
 							log.info(f"Performing task-specific processing of the batch {batch.id} results...")
 							yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
+							self.update_result_stats(result=result, batch_id=batch.id, direct_mode=False)
+
 							rstack.callback(revert_state, request_info=batch.request_info, batches=self.S.batches.copy(), batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
 							batch.request_info = {}
 							self.S.batches.remove(batch)
@@ -2775,6 +2790,109 @@ class GPTRequester:
 		info.retry = info.err_info is not None and (not info.err_info.fatal or self.retry_fatal_requests) and (info.req_info.retry_num < self.max_retries or not info.retry_counts)
 		return info
 
+	# Recalculate and update the result statistics of a BatchResult (intended to be used after task-specific processing)
+	def update_result_stats(self, result: BatchResult, batch_id: int, direct_mode: bool) -> BatchResult:
+		# result = The BatchResult to update
+		# batch_id = The batch ID associated with the results
+		# direct_mode = Whether the batch was executed using the direct API (True) or batch API (False)
+		# Returns the input BatchResult (same instance, but modified)
+		result.stats = self.calc_result_stats(result_infos=result.info.values())
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch_id} after task-specific processing has {result.stats.num_requests} requests = {result.stats.num_success} success ({result.stats.num_empty} empty) + {result.stats.num_warned} warned + {result.stats.num_errored} errored ({result.stats.num_fatal} fatal, {result.stats.num_retryable} retryable, {result.stats.num_missing} missing, {result.stats.num_cancelled} cancelled, {result.stats.num_expired} expired) => {result.stats.num_pass} pass = {result.stats.pass_ratio:.1%} ratio")
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch_id} has {result.stats.num_final} final results ({result.stats.num_final_none} without issues + {result.stats.num_final_warn} with warnings + {result.stats.num_final_err} with errors), and needs {result.stats.num_retry} retries ({result.stats.num_retry_err} with errors + {result.stats.num_retry_warn} with warnings + {result.stats.num_retry_none} without issues, {result.stats.num_retry_counts} retries count)")
+		return result
+
+	# Calculate result statistics based on an iterable of ResultInfo's
+	@classmethod
+	def calc_result_stats(cls, result_infos: Iterable[ResultInfo]) -> ResultStats:
+		# result_infos = Iterable of ResultInfo's
+		# Returns the calculated result statistics
+
+		num_requests = num_success = num_empty = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0
+		num_final = num_final_err = num_final_warn = num_final_none = num_retry = num_retry_err = num_retry_warn = num_retry_none = num_retry_counts = 0
+
+		for info in result_infos:
+
+			num_requests += 1
+
+			if info.err_info is None:
+				if info.resp_info is None:
+					num_empty += 1
+				if info.warn_infos:
+					num_warned += 1
+				else:
+					num_success += 1
+			else:
+				num_errored += 1
+				if info.err_info.fatal:
+					num_fatal += 1
+				else:
+					num_retryable += 1
+				if info.err_info.type == 'RequestError':
+					assert not info.err_info.fatal
+					if info.err_info.subtype == 'batch_cancelled':
+						num_cancelled += 1
+					elif info.err_info.subtype == 'batch_expired':
+						num_expired += 1
+				elif info.err_info.type == 'ResponseError':
+					assert info.err_info.fatal
+					if info.err_info.subtype == 'Missing':
+						num_missing += 1
+
+			if info.retry:
+				num_retry += 1
+				if info.err_info is not None:
+					num_retry_err += 1
+				elif info.warn_infos:
+					num_retry_warn += 1
+				else:
+					num_retry_none += 1
+				if info.retry_counts:
+					num_retry_counts += 1
+			else:
+				num_final += 1
+				if info.err_info is not None:
+					num_final_err += 1
+				elif info.warn_infos:
+					num_final_warn += 1
+				else:
+					num_final_none += 1
+
+		num_pass = num_success + num_expired
+		result_stats = ResultStats(
+			num_requests=num_requests,
+			num_success=num_success,
+			num_empty=num_empty,
+			num_warned=num_warned,
+			num_errored=num_errored,
+			num_retryable=num_retryable,
+			num_cancelled=num_cancelled,
+			num_expired=num_expired,
+			num_fatal=num_fatal,
+			num_missing=num_missing,
+			num_pass=num_pass,
+			pass_ratio=num_pass / num_requests,
+			num_final=num_final,
+			num_final_err=num_final_err,
+			num_final_warn=num_final_warn,
+			num_final_none=num_final_none,
+			num_retry=num_retry,
+			num_retry_err=num_retry_err,
+			num_retry_warn=num_retry_warn,
+			num_retry_none=num_retry_none,
+			num_retry_counts=num_retry_counts,
+		)
+
+		assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
+		assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
+		assert result_stats.num_retryable >= result_stats.num_cancelled + result_stats.num_expired
+		assert result_stats.num_fatal >= result_stats.num_missing
+		assert result_stats.num_requests == result_stats.num_final + result_stats.num_retry
+		assert result_stats.num_final == result_stats.num_final_err + result_stats.num_final_warn + result_stats.num_final_none
+		assert result_stats.num_retry == result_stats.num_retry_err + result_stats.num_retry_warn + result_stats.num_retry_none
+		assert result_stats.num_retry_counts <= result_stats.num_retry
+
+		return result_stats
+
 	# Process a ResultInfo map corresponding to the results of a batch into a BatchResult and associated information required for a state update
 	def process_result_info_map(
 		self,
@@ -2844,60 +2962,11 @@ class GPTRequester:
 				))
 		assert result_info_map.keys() == batch.request_info.keys()
 
-		num_results = num_success = num_empty = num_warned = num_errored = num_retryable = num_cancelled = num_expired = num_fatal = num_missing = 0
-		for info in result_info_map.values():
-			num_results += 1
-			if info.err_info is None:
-				if info.resp_info is None:
-					num_empty += 1
-				if info.warn_infos:
-					num_warned += 1
-				else:
-					num_success += 1
-			else:
-				num_errored += 1
-				if info.err_info.fatal:
-					num_fatal += 1
-				else:
-					num_retryable += 1
-				if info.err_info.type == 'RequestError':
-					assert not info.err_info.fatal
-					if info.err_info.subtype == 'batch_cancelled':
-						num_cancelled += 1
-					elif info.err_info.subtype == 'batch_expired':
-						num_expired += 1
-				elif info.err_info.type == 'ResponseError':
-					assert info.err_info.fatal
-					if info.err_info.subtype == 'Missing':
-						num_missing += 1
-		assert num_results == batch.num_requests
-
-		num_pass = num_success + num_expired
-		pass_ratio = num_pass / batch.num_requests
+		result_stats = self.calc_result_stats(result_infos=result_info_map.values())
+		assert result_stats.num_requests == batch.num_requests == len(batch.request_info) == len(result_info_map)
 		duration = max((at for at in (batch.remote.batch.failed_at, batch.remote.batch.completed_at, batch.remote.batch.expired_at, batch.remote.batch.cancelled_at) if at is not None), default=batch.remote.batch.created_at) - batch.remote.batch.created_at
-		result_stats = ResultStats(
-			duration=duration,
-			duration_str=utils.format_duration_hmin(duration),
-			num_requests=batch.num_requests,
-			num_success=num_success,
-			num_empty=num_empty,
-			num_warned=num_warned,
-			num_errored=num_errored,
-			num_retryable=num_retryable,
-			num_cancelled=num_cancelled,
-			num_expired=num_expired,
-			num_fatal=num_fatal,
-			num_missing=num_missing,
-			num_pass=num_pass,
-			pass_ratio=pass_ratio,
-		)
-
-		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} took {result_stats.duration_str}{f' (max {batch.remote.batch.completion_window})' if batch.remote.batch.completion_window else ''} for {result_stats.num_requests} requests = {result_stats.num_success} success ({result_stats.num_empty} empty) + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio (PRIOR to task-specific processing)")
-		assert result_stats.num_requests == len(batch.request_info) == len(result_info_map)
-		assert result_stats.num_requests == result_stats.num_success + result_stats.num_warned + result_stats.num_errored
-		assert result_stats.num_errored == result_stats.num_retryable + result_stats.num_fatal
-		assert result_stats.num_retryable >= result_stats.num_cancelled + result_stats.num_expired
-		assert result_stats.num_fatal >= result_stats.num_missing
+		duration_hmin = utils.format_duration_hmin(duration)
+		log.info(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} took {duration_hmin}{f' (max {batch.remote.batch.completion_window})' if batch.remote.batch.completion_window else ''} for {result_stats.num_requests} requests = {result_stats.num_success} success ({result_stats.num_empty} empty) + {result_stats.num_warned} warned + {result_stats.num_errored} errored ({result_stats.num_fatal} fatal, {result_stats.num_retryable} retryable, {result_stats.num_missing} missing, {result_stats.num_cancelled} cancelled, {result_stats.num_expired} expired) => {result_stats.num_pass} pass = {result_stats.pass_ratio:.1%} ratio (PRIOR to task-specific processing)")
 
 		batch_metrics_succeeded = RequestMetrics()
 		batch_metrics_failed = RequestMetrics()
@@ -2922,6 +2991,8 @@ class GPTRequester:
 
 		result = BatchResult(
 			batch=batch,
+			duration=duration,
+			duration_hmin=duration_hmin,
 			errors=batch_errors,
 			info=dict(sorted(result_info_map.items())),
 			stats=result_stats,

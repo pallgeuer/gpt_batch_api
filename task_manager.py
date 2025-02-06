@@ -578,7 +578,7 @@ class TaskManager:
 	# Run the task manager to completion
 	def run(self):
 
-		log.info('-' * 80)
+		log.info('\u2550' * 120)
 		log.info("Running task manager...")
 
 		with self:
@@ -599,7 +599,7 @@ class TaskManager:
 			else:
 				log.warning("Not running the task manager due to 'run' flag being False")
 
-			log.info('-' * 80)
+			log.info('\u2550' * 120)
 			self.log_status()
 			self.GR.log_status()
 
@@ -744,7 +744,7 @@ class TaskManager:
 		# Condition to be completely done = D = GPQBLVMRF = ELR (as C implies not[L], note that C must be false in order to potentially be completely done)
 
 		self.step_num += 1
-		log.info('-' * 80)
+		log.info('\u2550' * 120)
 		log.info(f"Step {self.step_num}...")
 
 		while True:
@@ -777,15 +777,13 @@ class TaskManager:
 			# Push any pushable local batches to the server up to the extent of the push limits (ensures condition M, potentially sets condition L, nullifies condition R)
 			batch_congestion = self.commit_requests(batch=True, force_batch=generation_done, push=True)  # Condition C = Returns whether the batch pipeline is congested
 
-			# Log small divider
-			log.info('\xB7' * 50)
-
 			# Check whether the step and/or entire task is completed (nothing more to do)
 			assert self.GR.PQ.pool_len <= 0 and (self.GR.num_finished_batches() <= 0 or self.GR.dryrun)  # Assert PF (conditions B and M are less simple to assert, but should also always be true here)
 			if (self.GR.num_unpushable_batches() <= 0 or direct_limits_reached) and ((generation_done and self.GR.PQ.queue_len <= 0) or batch_congestion):  # Condition E = PBVMF(GQ + C) = V(GQ + C) as conditions P, B, M and F are all guaranteed due to the commands above, by just reaching this line
 				all_done = (self.GR.num_unpushed_batches() <= 0 and self.GR.num_unfinished_batches() <= 0)  # Condition D = ELR = There are no unpushed local batches and no unfinished remote batches (condition E must be met simply by reaching this line)
 				break
 
+		log.info('\u2500' * 90)
 		log.info(f"Finished step {self.step_num}")
 		return not all_done
 
@@ -795,8 +793,8 @@ class TaskManager:
 		# Returns a boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode)
 		# This method performs direct API calls, updates the task/requester state, and adds the corresponding BatchState's to direct_history
 
+		log.info('\u2500' * 90)
 		direct_limits_reached = False
-		log.info('\xB7' * 50)
 		for rstack, result, limited, _ in self.GR.direct_requests(reqs=reqs, yield_retry_reqs=False):
 			if rstack is not None and result is not None:
 				self.call_process_batch_result(result=result, rstack=rstack)
@@ -808,6 +806,7 @@ class TaskManager:
 	# Call the generate requests implementation
 	def call_generate_requests(self) -> bool:
 		# Passes on the return value of generate_requests()
+		log.info('\u2500' * 90)
 		log.info("Generating requests...")
 		assert not self.generating
 		self.generating = True
@@ -898,11 +897,12 @@ class TaskManager:
 	# Push as many pushable local batches as possible to the remote server
 	def push_batches(self) -> bool:
 		# Returns whether the batch pipeline is (now) congested
-		if self.GR.num_unpushed_batches() > 0:
+		if self.GR.num_pushable_batches() > 0:
+			log.info('\u2500' * 90)
 			log.info("Checking whether any local batches can be pushed to the remote server...")
 			return self.GR.push_batches()  # Returns whether the batch pipeline is congested
-		else:
-			return False  # Batch congestion is not possible if there are no unpushed local batches at all
+		else:  # No pushable local batches => Condition M satisfied
+			return self.GR.num_unpushed_batches() >= self.GR.max_unpushed_batches
 
 	# Execute, process and clean up after as many unpushable local batches as possible (up to first reaching of direct limits)
 	def process_unpushable_batches(self) -> tuple[int, bool]:
@@ -913,7 +913,7 @@ class TaskManager:
 		direct_limits_reached = self.GR.only_process
 
 		if num_unpushable_batches > 0:
-			log.info('\xB7' * 50)
+			log.info('\u2500' * 90)
 			log.info(f"Attempting to process the {num_unpushable_batches} available local unpushable batches...")
 			for rstack, result, limited in self.GR.process_unpushable_batches():  # Either processes all unpushable batches one virtual (sub-)batch at a time, or eventually yields limited=True and discontinues, or raises an exception if an unresolvable issue occurs
 				if rstack is not None and result is not None:
@@ -929,6 +929,7 @@ class TaskManager:
 	def process_batches(self) -> int:
 		# Returns the current number of unfinished remote batches (after the remote batch status updates)
 		# This method checks the remote for updated batch statuses, collects the results of any finished batches, updates the task/requester state, and cleans up that batch (also from the remote), moving the corresponding BatchState from batches to batch_history
+		log.info('\u2500' * 90)
 		for rstack, result in self.GR.process_batches():
 			self.call_process_batch_result(result=result, rstack=rstack)
 		assert self.GR.num_finished_batches() <= 0 or self.GR.dryrun  # Condition F
@@ -944,10 +945,8 @@ class TaskManager:
 			self.output.validate()
 			self.task.save(rstack=rstack)
 			self.output.save(rstack=rstack)
-			log.info('\xB7' * 50)
 			return True
 		else:
-			log.info('\xB7' * 50)
 			return False
 
 	# Process a batch result and accordingly update the task state and output files (must be a perfectly reversible operation managed by the RevertStack rstack)
@@ -956,8 +955,9 @@ class TaskManager:
 		# rstack => A RevertStack so that the actions of this method are perfectly reversible in the case of an exception
 		# Returns whether either the task state (self.T) or output (self.D) was modified, and thus that both need to be saved
 		#
-		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState).
-		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts.
+		# The final batch state---including the final remote batch status (result.batch.remote.batch: openai.type.Batch), API metrics (result.batch.metrics: APIMetrics), and true cost (result.batch.true_tokens_cost: TokensCost)---is available in result.batch (BatchState)
+		# The remote batch completion duration is available as an integer number of seconds (result.duration) and as a formatted hours and minutes string (result.duration_hmin)
+		# If the batch encountered any general/global errors then these are listed in result.errors (list[openai.types.BatchError])---however, there may nonetheless be valid responses even if there are such errors, so best to just immediately check the responses instead if that's all that counts
 		# The main results/responses to process are the values of the result.info dict, which maps request IDs (int, returned from self.GR.add_request() / self.GR.add_requests()) to ResultInfo instances.
 		# The following information is available for each ResultInfo instance 'info':
 		#   - The input request payload (info.req_payload: dict[str, Any]) and metadata (info.req_info.meta: Optional[dict[str, Any]])
@@ -968,7 +968,7 @@ class TaskManager:
 		#   - The default (on entering this method) value of info.retry is never True (and info.retry_counts is always True) IF there is no error present (info.err_info is None)
 		#   - The field info.retry can be MODIFIED in this method (calling self.GR.update_result_retry() after modifying info.err_info is suggested) to set whether the request will get retried (e.g. because of a task-specific parsing or value failure)
 		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general (e.g. care needs to be taken not to change anything in the payload that breaks auto-parsing)
-		# Statistics like the remote batch completion duration, request pass ratio, and number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats).
+		# Statistics like the request pass ratio, and the number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats)
 		raise NotImplementedError
 
 #
