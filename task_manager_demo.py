@@ -544,16 +544,19 @@ def main():
 	args = parser.parse_args()
 	if args.task_prefix is None:
 		args.task_prefix = args.task
+	if args.wandb is None:
+		args.wandb = True
 
-	task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks')
-	if args.task == 'char_codes':
-		demo_char_codes(cfg=args, task_dir=task_dir)
-	elif args.task == 'utterance_emotion':
-		demo_utterance_emotion(cfg=args, task_dir=task_dir)
-	elif args.task is None:
-		raise ValueError("Please specify which task to demo using --task")
-	else:
-		raise ValueError(f"Unrecognised task: {args.task}")
+	with gpt_requester.GPTRequester.wandb_init(config=args):
+		task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks')
+		if args.task == 'char_codes':
+			demo_char_codes(cfg=args, task_dir=task_dir)
+		elif args.task == 'utterance_emotion':
+			demo_utterance_emotion(cfg=args, task_dir=task_dir)
+		elif args.task is None:
+			raise ValueError("Please specify which task to demo using --task")
+		else:
+			raise ValueError(f"Unrecognised task: {args.task}")
 
 # Run main function
 if __name__ == "__main__":
