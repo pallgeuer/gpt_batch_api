@@ -1136,9 +1136,9 @@ class GPTRequester:
 		# wandb_kwargs = Extra wandb keyword arguments or argument overrides to pass to self.wandb_init()
 		# Returns a context manager that ensures wandb is initialised if required, and that updates self.wandb_run with any newly initialised wandb run
 		# Configuration parameters are extracted from each object obj based on obj.__kwargs__ for the keys, and getattr(obj, key) for the values (extra parameters or parameter value overrides can be specified using a dict of custom extra wandb configuration parameters)
-		# The call to this method does not do anything if a previous call to this method was already made and successfully initialised wandb
+		# The call to this method does not do anything if a previous call to this method was already made and successfully initialised wandb, or if dry run is active
 
-		if self.wandb_run:
+		if self.wandb_run or self.dryrun:
 			yield
 			return
 

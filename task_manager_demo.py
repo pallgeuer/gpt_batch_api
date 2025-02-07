@@ -545,7 +545,7 @@ def main():
 	if args.task_prefix is None:
 		args.task_prefix = args.task
 	if args.wandb is None:
-		args.wandb = True
+		args.wandb = not args.dryrun
 
 	with gpt_requester.GPTRequester.wandb_init(config=args):
 		task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks')
