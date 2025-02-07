@@ -457,10 +457,46 @@ class RevertStack(contextlib.ExitStack):
 	def __exit__(self, *exc_details) -> bool:
 		if exc_details[0] is None:
 			self._exit_callbacks = self._exit_callbacks_always
+			self._exit_callbacks_always = collections.deque()
 		else:
 			self._exit_callbacks_always.clear()
 		# noinspection PyArgumentList
 		return super().__exit__(*exc_details)
+
+# Revert stack that can inherently collect data and log it to wandb on successful unwinding
+# Note that ExitStack, RevertStack and LogRevertStack should be reusable in successive with statements, assuming they always either completely unwind or raise an exception that prevents subsequent with statements from executing
+class LogRevertStack(RevertStack):
+
+	def __init__(self, W: WandbRun):
+		super().__init__()
+		self.W = W
+		self._log_data = {}
+
+	def pop_all(self) -> Self:
+		new_stack = super().pop_all()
+		new_stack._log_data = self._log_data
+		self._log_data = {}
+		return new_stack
+
+	def log(self, *args: dict[str, Any], flush: bool = False, **kwargs: Any):
+		for arg in args:
+			self._log_data.update(arg)
+		if kwargs:
+			self._log_data.update(kwargs)
+		if flush and self._log_data:
+			self.W.log(data=self._log_data)
+			self._log_data = {}
+
+	def __enter__(self) -> Self:
+		return super().__enter__()
+
+	def __exit__(self, *exc_details) -> bool:
+		suppress_exc = super().__exit__(*exc_details)
+		if self._log_data:
+			if exc_details[0] is None:
+				self.W.log(data=self._log_data)
+			self._log_data = {}
+		return suppress_exc
 
 # Context manager that provides an ExitStack wrapped in DelayKeyboardInterrupt
 @contextlib.contextmanager
@@ -472,6 +508,12 @@ def AtomicExitStack() -> ContextManager[contextlib.ExitStack[Optional[bool]]]:
 @contextlib.contextmanager
 def AtomicRevertStack() -> ContextManager[RevertStack]:
 	with DelayKeyboardInterrupt(), RevertStack() as rstack:
+		yield rstack
+
+# Context manager that provides a LogRevertStack wrapped in DelayKeyboardInterrupt
+@contextlib.contextmanager
+def AtomicLogRevertStack(W: WandbRun) -> ContextManager[LogRevertStack]:
+	with DelayKeyboardInterrupt(), LogRevertStack(W=W) as rstack:
 		yield rstack
 
 # Affix class
