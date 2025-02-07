@@ -324,10 +324,11 @@ class StateFile:
 
 	state: Optional[State]
 
-	def __init__(self, path: str, endpoint: str, dryrun: bool):
+	def __init__(self, path: str, endpoint: str, dryrun: bool, W: Optional[utils.WandbRun] = None):
 		# path = Path to the JSON state file to load/save/manage (nominally *.json extension)
 		# endpoint = API endpoint to use
 		# dryrun = Whether to prevent any saving of state (dry run mode)
+		# W = Wandb run holder
 		self.path = os.path.abspath(path)
 		self.name = os.path.basename(self.path)
 		log.info(f"GPT requester state file: {self.path}")
@@ -335,12 +336,13 @@ class StateFile:
 		if not self.endpoint:
 			raise ValueError("State API endpoint must be non-empty")
 		self.dryrun = dryrun
+		self.W = W if W is not None else utils.WandbRun()
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
 
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
-			with utils.AtomicRevertStack() as rstack:
+			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				enter_stack.callback(self.unload)
 				try:
 					self.load(rstack=rstack)
@@ -473,12 +475,13 @@ class QueueFile:
 
 	pool_queue: Optional[PoolQueue]
 
-	def __init__(self, path: str, endpoint: str, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster, dryrun: bool):
+	def __init__(self, path: str, endpoint: str, token_estimator: tokens.TokenEstimator, token_coster: tokens.TokenCoster, dryrun: bool, W: Optional[utils.WandbRun] = None):
 		# path = Path to the JSONL queue file to load/save/manage (nominally *.jsonl extension)
 		# endpoint = API endpoint to use
 		# token_estimator = Token estimator instance to use
 		# token_coster = Token coster instance to use
 		# dryrun = Whether to prevent any saving of the queue file (dry run mode)
+		# W = Wandb run holder
 		self.path = os.path.abspath(path)
 		self.name = os.path.basename(self.path)
 		log.info(f"GPT requester queue file: {self.path}")
@@ -486,12 +489,13 @@ class QueueFile:
 		self.token_estimator = token_estimator
 		self.token_coster = token_coster
 		self.dryrun = dryrun
+		self.W = W if W is not None else utils.WandbRun()
 		self._enter_stack = contextlib.ExitStack()
 		self.pool_queue = None
 
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
-			with utils.AtomicRevertStack() as rstack:
+			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				enter_stack.callback(self.unload)
 				try:
 					self.load(rstack=rstack)
@@ -827,13 +831,13 @@ class GPTRequester:
 		log.info(f"Costs per input mtoken: Direct {self.cost_input_direct_mtoken:.3f}, Cached {self.cost_input_cached_mtoken:.3f}, Batch {self.cost_input_batch_mtoken:.3f}")
 		log.info(f"Costs per output mtoken: Direct {self.cost_output_direct_mtoken:.3f}, Batch {self.cost_output_batch_mtoken:.3f}")
 
-		self.wandb_run = utils.WandbRun()  # TODO: WHERE DOES THIS NEED TO END UP? rstack? state/queue files?
+		self.W = utils.WandbRun()
 		self.token_estimator = tokens.TokenEstimator(assumed_completion_ratio=assumed_completion_ratio, warn=token_estimator_warn)
 		self.set_assumed_completion_ratio(assumed_completion_ratio)
 		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
 		self.lock = utils.LockFile(path=os.path.join(self.working_dir, f"{self.name_prefix}.lock"), timeout=lock_timeout, poll_interval=lock_poll_interval, status_interval=lock_status_interval)
-		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"), endpoint=self.endpoint, dryrun=self.dryrun)
-		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster, dryrun=self.dryrun)
+		self.state = StateFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_state.json"), endpoint=self.endpoint, dryrun=self.dryrun, W=self.W)
+		self.queue = QueueFile(path=os.path.join(self.working_dir, f"{self.name_prefix}_queue.jsonl"), endpoint=self.endpoint, token_estimator=self.token_estimator, token_coster=self.token_coster, dryrun=self.dryrun, W=self.W)
 
 		self.remote_update_interval = remote_update_interval
 		if self.remote_update_interval < 1.0:
@@ -1134,11 +1138,11 @@ class GPTRequester:
 	def configure_wandb(self, *init_kwargs_objs: Union[Any, tuple[Any, dict[str, Any]]], **wandb_kwargs) -> ContextManager[None]:
 		# init_kwargs_objs = Objects to extract configuration parameters from (must be instances of classes that use @utils.init_kwargs), possibly packed into a tuple along with a dict of custom extra wandb configuration parameters
 		# wandb_kwargs = Extra wandb keyword arguments or argument overrides to pass to self.wandb_init()
-		# Returns a context manager that ensures wandb is initialised if required, and that updates self.wandb_run with any newly initialised wandb run
+		# Returns a context manager that ensures wandb is initialised if required, and that updates self.W with any newly initialised wandb run
 		# Configuration parameters are extracted from each object obj based on obj.__kwargs__ for the keys, and getattr(obj, key) for the values (extra parameters or parameter value overrides can be specified using a dict of custom extra wandb configuration parameters)
 		# The call to this method does not do anything if a previous call to this method was already made and successfully initialised wandb, or if dry run is active
 
-		if self.wandb_run or self.dryrun:
+		if self.W or self.dryrun:
 			yield
 			return
 
@@ -1173,10 +1177,10 @@ class GPTRequester:
 
 		try:
 			with self.wandb_init(config=config, **wandb_kwargs) as run:
-				self.wandb_run.set(run=run)
+				self.W.set(run=run)
 				yield
 		finally:
-			self.wandb_run.reset()
+			self.W.reset()
 
 	# Custom extra wandb configuration parameters
 	@property
@@ -1256,7 +1260,7 @@ class GPTRequester:
 				self.session_processed_failed_batches = 0
 
 				if not wipe_task:
-					with utils.RevertStack() as rstack:
+					with utils.LogRevertStack(W=self.W) as rstack:
 						self.validate_state_queue(clean=True)
 						self.queue.save(rstack=rstack)
 						self.state.save(rstack=rstack)
@@ -1275,7 +1279,7 @@ class GPTRequester:
 
 					log.warning("Wiping complete GPT requester state...")
 
-					with utils.RevertStack() as rstack:
+					with utils.LogRevertStack(W=self.W) as rstack:
 						self.state.create(rstack=rstack)
 						self.S = self.state.state
 						self.max_request_id = self.S.max_request_id
@@ -1804,7 +1808,7 @@ class GPTRequester:
 				self.S.direct_history[:] = direct_history
 				self.S.max_direct_batch_id = max_direct_batch_id
 
-			with utils.AtomicRevertStack() as rstack:
+			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 
 				rstack.callback(revert_push_stats, task_requests=self.S.task_push_stats.total_requests, session_requests=self.session_push_stats.total_requests, task_tokens_cost=self.S.task_push_stats.total_tokens_cost, session_tokens_cost=self.session_push_stats.total_tokens_cost)
 				self.S.task_push_stats.total_requests = post_batch_task_requests
@@ -1902,7 +1906,7 @@ class GPTRequester:
 	@contextlib.contextmanager
 	def commit_requests(self, reqs: Union[Iterable[GPTRequest], GPTRequest, None] = None, rstack: Optional[utils.RevertStack] = None) -> ContextManager[tuple[utils.RevertStack, list[CachedGPTRequest]]]:
 		# reqs = Optional requests to add to the request pool immediately prior to committing
-		# rstack = Optional RevertStack to use instead of creating and entering a new one internally (passing a RevertStack also ensures the adding of requests is reversible)
+		# rstack = Optional RevertStack to use instead of creating and entering a new one internally (a LogRevertStack to be precise, passing a RevertStack ensures the adding of requests is also reversible)
 		# The context manager returns the currently active RevertStack and the list of committed cached GPT requests
 		# The body of the context manager is executed within DelayKeyboardInterrupt and RevertStack context managers, the latter of which must completely reverse all actions taken if an exception is raised at any point whatsoever during the entered stack
 		# The idea is that the body of the entered commit_requests() context manager should be used to save to disk whatever state is necessary so that all requests added to the GPT requester so far (given by a list[CachedGPTRequest]) do not get generated again in this or a new run (as they are now committed, i.e. locked in), even if the current run were to be immediately keyboard interrupted (or crash)
@@ -1927,7 +1931,7 @@ class GPTRequester:
 			self.S.max_request_id = max_request_id
 			self.S.queue.request_id_meta = request_id_meta
 
-		cm_rstack = utils.RevertStack() if rstack is None else contextlib.nullcontext(enter_result=rstack)
+		cm_rstack = utils.LogRevertStack(W=self.W) if rstack is None else contextlib.nullcontext(enter_result=rstack)
 		with utils.DelayKeyboardInterrupt(), cm_rstack as rstack:
 			cached_reqs = self.P.copy()
 			if self.P or any(cached_req is None for cached_req in self.Q):
@@ -2024,7 +2028,7 @@ class GPTRequester:
 						self.S.batches.pop()
 					self.S.max_batch_id = max_batch_id
 
-				with utils.AtomicRevertStack() as rstack:
+				with utils.AtomicLogRevertStack(W=self.W) as rstack:
 
 					rstack.callback(revert_state, max_batch_id=self.S.max_batch_id, request_id_meta=self.S.queue.request_id_meta.copy(), queue=self.Q[batch_index:index])
 
@@ -2230,7 +2234,7 @@ class GPTRequester:
 							self.session_push_stats.total_requests = session_requests
 							self.session_push_stats.total_tokens_cost = session_tokens_cost
 
-						with utils.AtomicRevertStack() as rstack:
+						with utils.AtomicLogRevertStack(W=self.W) as rstack:
 
 							file_object = self.client.files.create(file=open(batch.local_jsonl, 'rb'), purpose='batch')
 							rstack.callback(self.delete_remote_file, file_id=file_object.id)
@@ -2377,7 +2381,7 @@ class GPTRequester:
 				utils.print_clear_line()
 			if status_changed:
 				log.info(f"Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
-			with utils.AtomicRevertStack() as rstack:
+			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				self.validate_state_queue(clean=False)
 				self.state.save(rstack=rstack, show_log=log_save)
 
@@ -2510,7 +2514,7 @@ class GPTRequester:
 								batch_wiped = True
 
 				else:
-					with utils.AtomicRevertStack() as rstack:
+					with utils.AtomicLogRevertStack(W=self.W) as rstack:
 						rstack.callback(self.S.batches.__setitem__, slice(None), self.S.batches.copy())  # noqa
 						self.S.batches.remove(batch)
 						if self.dryrun:
@@ -2756,7 +2760,7 @@ class GPTRequester:
 
 					with utils.DelayKeyboardInterrupt():
 
-						with utils.RevertStack() as rstack:
+						with utils.LogRevertStack(W=self.W) as rstack:
 
 							rstack.callback(revert_metrics, api_metrics_batch=copy.deepcopy(self.S.metrics.batch), api_metrics_all=copy.deepcopy(self.S.metrics.all))
 							batch.true_tokens_cost = batch_true_tokens_cost

@@ -41,17 +41,19 @@ class TaskStateFile:
 
 	state: Optional[TaskState]
 
-	def __init__(self, path: str, reinit_meta: bool, init_meta: Optional[dict[str, Any]], dryrun: bool):
+	def __init__(self, path: str, reinit_meta: bool, init_meta: Optional[dict[str, Any]], dryrun: bool, W: Optional[utils.WandbRun] = None):
 		# path = Path to the JSON task state file to load/save/manage (nominally *.json extension)
 		# reinit_meta = Whether to force a reinitialisation of the meta field even if the task state file already exists
 		# init_meta = Value to initialise the meta field with if the task state file is newly created (deep copy on create)
 		# dryrun = Whether to prevent any saving of state (dry run mode)
+		# W = Wandb run holder
 		self.path = os.path.abspath(path)
 		self.name = os.path.basename(self.path)
 		log.info(f"Task state file: {self.path}")
 		self.reinit_meta = reinit_meta
 		self.init_meta = init_meta if init_meta is not None else {}
 		self.dryrun = dryrun
+		self.W = W if W is not None else utils.WandbRun()
 		self._enter_stack = contextlib.ExitStack()
 		self.state = None
 
@@ -63,7 +65,7 @@ class TaskStateFile:
 
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
-			with utils.AtomicRevertStack() as rstack:
+			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				enter_stack.callback(self.unload)
 				try:
 					self.load(rstack=rstack)
@@ -116,11 +118,13 @@ class TaskStateFile:
 # Task output file class
 class TaskOutputFile:
 
-	def __init__(self, path_base: str, dryrun: bool):
+	def __init__(self, path_base: str, dryrun: bool, W: Optional[utils.WandbRun] = None):
 		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
 		# dryrun = Whether to prevent any saving of output (dry run mode)
+		# W = Wandb run holder
 		self.path_base = os.path.abspath(path_base)
 		self.dryrun = dryrun
+		self.W = W if W is not None else utils.WandbRun()
 		self.data = None
 
 	def __enter__(self) -> Self:
@@ -166,24 +170,26 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 	data: Optional[DataclassT]  # TaskOutputFile: Data backed by the output file (while the class is in the entered state)
 
 	@classmethod
-	def read(cls, path_base: str, data_cls: Optional[Type[DataclassT]] = None) -> Self:
+	def read(cls, path_base: str, W: Optional[utils.WandbRun] = None, data_cls: Optional[Type[DataclassT]] = None) -> Self:
 		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
+		# W = Wandb run holder
 		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
 		# Returns a new instance of the class in read-only mode (raises an exception if load() fails on enter, or a save() is attempted)
-		return cls(path_base=path_base, dryrun=True, data_cls=data_cls, read_only=True)
+		return cls(path_base=path_base, dryrun=True, W=W, data_cls=data_cls, read_only=True)
 
 	@classmethod
-	def output_factory(cls, data_cls: Optional[Type[DataclassT]] = None) -> Callable[[str, bool], DataclassOutputFile[DataclassT]]:
+	def output_factory(cls, data_cls: Optional[Type[DataclassT]] = None) -> Callable[[str, bool, Optional[utils.WandbRun]], DataclassOutputFile[DataclassT]]:
 		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
 		# Returns a (not read-only mode) factory function suitable for passing as the output_factory argument of the TaskManager class
 		return functools.partial(cls, data_cls=data_cls, read_only=False)
 
-	def __init__(self, path_base: str, dryrun: bool, *, data_cls: Optional[Type[DataclassT]], read_only: bool):
+	def __init__(self, path_base: str, dryrun: bool, W: Optional[utils.WandbRun] = None, *, data_cls: Optional[Type[DataclassT]], read_only: bool):
 		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output (extension of .json will automatically be added)
 		# dryrun = Whether to prevent any saving of output and just log what would have happened instead (dry run mode)
+		# W = Wandb run holder
 		# data_cls = Dataclass type to use (must be instantiatable without arguments, None = Assume cls.Dataclass exists and use it)
 		# read_only = Whether to use read-only mode (raises an exception if load() fails on enter, or a save() is attempted)
-		super().__init__(path_base=path_base, dryrun=dryrun)
+		super().__init__(path_base=path_base, dryrun=dryrun, W=W)
 		try:
 			self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')
 		except AttributeError:
@@ -196,7 +202,7 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
-			with utils.AtomicRevertStack() as rstack:
+			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				enter_stack.callback(self.unload)
 				try:
 					self.load(rstack=rstack)
@@ -269,28 +275,30 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 	data: Optional[Data]  # TaskOutputFile: Current data state (while the class is in the entered state)
 
 	@classmethod
-	def read(cls, path_base: str, data_cls: Optional[Type[DataclassT]] = None) -> Self:
+	def read(cls, path_base: str, W: Optional[utils.WandbRun] = None, data_cls: Optional[Type[DataclassT]] = None) -> Self:
 		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
+		# W = Wandb run holder
 		# data_cls = Dataclass type to use for each list entry (None = Assume cls.Dataclass exists and use it)
 		# Returns a new instance of the class in read-only mode (loads all entries from all output files, raises an exception if load() fails on enter or a save() is attempted)
-		return cls(path_base=path_base, dryrun=True, data_cls=data_cls, read_only=True, max_entries=0, max_size=0)
+		return cls(path_base=path_base, dryrun=True, W=W, data_cls=data_cls, read_only=True, max_entries=0, max_size=0)
 
 	@classmethod
-	def output_factory(cls, data_cls: Optional[Type[DataclassT]] = None, max_entries: int = 0, max_size: int = 0) -> Callable[[str, bool], DataclassListOutputFile[DataclassT]]:
+	def output_factory(cls, data_cls: Optional[Type[DataclassT]] = None, max_entries: int = 0, max_size: int = 0) -> Callable[[str, bool, Optional[utils.WandbRun]], DataclassListOutputFile[DataclassT]]:
 		# data_cls = Dataclass type to use for each list entry (None = Assume cls.Dataclass exists and use it)
 		# max_entries = Maximum number of entries to save per output file chunk (<=0 = No maximum)
 		# max_size = Maximum file size in bytes per output file chunk (<=0 = No maximum)
 		# Returns a (not read-only mode) factory function suitable for passing as the output_factory argument of the TaskManager class
 		return functools.partial(cls, data_cls=data_cls, read_only=False, max_entries=max_entries, max_size=max_size)
 
-	def __init__(self, path_base: str, dryrun: bool, *, data_cls: Optional[Type[DataclassT]], read_only: bool, max_entries: int = 0, max_size: int = 0):
+	def __init__(self, path_base: str, dryrun: bool, W: Optional[utils.WandbRun] = None, *, data_cls: Optional[Type[DataclassT]], read_only: bool, max_entries: int = 0, max_size: int = 0):
 		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output (suffix of .jsonl or _partXofY.jsonl will automatically be added as appropriate)
 		# dryrun = Whether to prevent any saving of output and just log what would have happened instead (dry run mode)
+		# W = Wandb run holder
 		# data_cls = Dataclass type to use for each list entry (None = Assume cls.Dataclass exists and use it)
 		# read_only = Whether to use read-only mode (loads all entries from all output files, raises an exception if load() fails on enter or a save() is attempted)
 		# max_entries = Maximum number of entries to save per output file chunk (<=0 = No maximum, not relevant in read-only mode)
 		# max_size = Maximum file size in bytes per output file chunk (<=0 = No maximum, not relevant in read-only mode)
-		super().__init__(path_base=path_base, dryrun=dryrun)
+		super().__init__(path_base=path_base, dryrun=dryrun, W=W)
 		try:
 			self.data_cls = data_cls if data_cls is not None else getattr(type(self), 'Dataclass')
 		except AttributeError:
@@ -307,7 +315,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
-			with utils.AtomicRevertStack() as rstack:
+			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				enter_stack.callback(self.unload)
 				try:
 					self.load(rstack=rstack)
@@ -527,17 +535,17 @@ class TaskManager:
 	# Construct a task manager to make use of the OpenAI Batch API to process samples
 	def __init__(
 		self,
-		task_dir: str,                                          # Path of the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
-		name_prefix: str,                                       # Name prefix to use for all files created in the task working directory (e.g. 'my_task')
-		output_factory: Callable[[str, bool], TaskOutputFile],  # Factory callable to create the required task output file instance (str argument is the required output file path base, e.g. /path/to/NAME_PREFIX_output, bool argument is whether dry run mode is active)
-		init_meta: Optional[dict[str, Any]],                    # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
-		*,                                                      # Keyword arguments only beyond here
+		task_dir: str,                                                          # Path of the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
+		name_prefix: str,                                                       # Name prefix to use for all files created in the task working directory (e.g. 'my_task')
+		output_factory: Callable[[str, bool, utils.WandbRun], TaskOutputFile],  # Factory callable to create the required task output file instance (str argument is the required output file path base, e.g. /path/to/NAME_PREFIX_output, bool argument is whether dry run mode is active, utils.WandbRun is a wandb run holder)
+		init_meta: Optional[dict[str, Any]],                                    # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
+		*,                                                                      # Keyword arguments only beyond here
 
-		run: bool = True,                                       # Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)
-		wipe_failed: bool = False,                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with only_process=True prior to wiping)
-		reinit_meta: bool = False,                              # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
+		run: bool = True,                                                       # Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)
+		wipe_failed: bool = False,                                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with only_process=True prior to wiping)
+		reinit_meta: bool = False,                                              # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
 
-		**gpt_requester_kwargs,                                 # Keyword arguments to be passed on to the internal GPTRequester instance
+		**gpt_requester_kwargs,                                                 # Keyword arguments to be passed on to the internal GPTRequester instance
 	):
 
 		self.run_flag = run
@@ -548,8 +556,8 @@ class TaskManager:
 			gpt_requester_kwargs['wandb'] = True
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
-		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta, dryrun=self.GR.dryrun)
-		self.output = output_factory(os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_output"), self.GR.dryrun)  # Arguments: path_base (str), dryrun (bool)
+		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta, dryrun=self.GR.dryrun, W=self.GR.W)
+		self.output = output_factory(os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_output"), self.GR.dryrun, self.GR.W)  # Arguments: path_base (str), dryrun (bool), W (utils.WandbRun)
 
 		self._enter_stack = contextlib.ExitStack()
 		self.step_num: Optional[int] = None
@@ -671,7 +679,7 @@ class TaskManager:
 			with utils.DelayKeyboardInterrupt():
 				log.info('\xB7' * 60)
 				log.warning("Wiping complete task output and state...")
-				with utils.RevertStack() as rstack:
+				with utils.LogRevertStack(W=self.GR.W) as rstack:
 					self.step_num = 0
 					self.task.create(rstack=rstack)
 					rstack.push_always(self.task.clear_reinit_meta)
@@ -690,7 +698,7 @@ class TaskManager:
 			with utils.DelayKeyboardInterrupt():
 				log.info('\xB7' * 60)
 				log.warning(f"Wiping unfinished{' and failed' if wipe_failed else ''} requests/samples...")
-				with utils.RevertStack() as rstack:
+				with utils.LogRevertStack(W=self.GR.W) as rstack:
 					save_output = self.wipe_unfinished(wipe_failed=wipe_failed, rstack=rstack)
 					self.validate_state(clean=True)
 					if save_output:
