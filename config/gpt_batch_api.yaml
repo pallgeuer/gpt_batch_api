@@ -18,6 +18,21 @@ client_base_url: null
 # API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)
 endpoint: null
 
+# Whether wandb logging is enabled
+wandb: null
+# Wandb directory (must already exist, see also the WANDB_DIR environment variable)
+wandb_dir: null
+# Wandb entity
+wandb_entity: null
+# Wandb project name
+wandb_project: gpt_batch_api
+# Wandb run ID to create or resume (auto-generated run IDs are typically lowercase alphanumeric strings of length 8)
+wandb_run_id: null
+# Wandb run name
+wandb_name: null
+# Wandb group (defaults to the class name of the task manager class)
+wandb_group: null
+
 ####################
 ##  Task Manager  ##
 ####################

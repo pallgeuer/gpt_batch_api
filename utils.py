@@ -571,7 +571,7 @@ class LockFile:
 		status_interval: Optional[float] = None,  # Time interval to regularly print a status update when waiting for the lock (default 5s)
 	):
 		self.lock = filelock.FileLock(lock_file=path)
-		self.timeout = timeout if timeout is not None else -1
+		self.timeout = timeout if timeout is not None else -1.0
 		self.poll_interval = poll_interval if poll_interval is not None else 0.25
 		self.status_interval = status_interval if status_interval is not None else 5.0
 		if self.poll_interval < 0.01:
@@ -629,7 +629,11 @@ def get_file_size(file: Union[TextIO, BinaryIO]) -> int:
 class Config(Protocol):
 	def __getattribute__(self, name: str) -> Any: ...
 
-# Protocol-base type annotation for a typed sized iterable
+# Protocol-based type annotation for types that support vars()
+class SupportsVars(Protocol):
+	__dict__: dict[str, Any]
+
+# Protocol-based type annotation for a typed sized iterable
 class SizedIterable(Protocol[T]):
 	def __iter__(self) -> Iterable[T]: ...
 	def __len__(self) -> int: ...
@@ -775,6 +779,7 @@ def add_init_argparse(
 	cls: C,                                                           # Class type to use as a reference for the __init__ keyword arguments (e.g. types and default values)
 	parser: Union[argparse.ArgumentParser, argparse._ArgumentGroup],  # noqa / Argument parser or group to add an argument to
 	name: str,                                                        # Argument name (as per __init__ method signature)
+	dest: Optional[str] = None,                                       # Override the argument destination (by default it is the same as the name)
 	metavar: Union[str, tuple[str, ...], None] = None,                # Metavar to use for the argument
 	unit: str = '',                                                   # String unit to use for the default value if one exists (if a space is needed between the default value and the unit then it must be part of this string)
 	type: Optional[type] = None,                                      # noqa / Override the type specification of the argument (only if required and different to base type of type annotation)
@@ -784,6 +789,8 @@ def add_init_argparse(
 ):
 	if not help:
 		raise ValueError(f"Help string must be provided for argument '{name}'")
+	if dest is None:
+		dest = name
 	if default is NONE and defaults is not None:
 		default = defaults.get(name, NONE)
 	if type is None or default is NONE:
@@ -800,11 +807,11 @@ def add_init_argparse(
 		if not (default is None or isinstance(default, bool)):
 			raise ValueError(f"Default value for boolean argument '{name}' must be None or boolean: {get_class_str(type(default))}")
 		if default:
-			parser.add_argument(f'--no_{name}', dest=name, action='store_false', help=help)
+			parser.add_argument(f'--no_{name}', dest=dest, action='store_false', default=default, help=help)
 		else:
-			parser.add_argument(f'--{name}', dest=name, action='store_true', help=help)
+			parser.add_argument(f'--{name}', dest=dest, action='store_true', default=default, help=help)
 	else:
-		parser.add_argument(f'--{name}', type=type, default=default, metavar=metavar, help=help if default is None else f'{help} [default: {default}{unit}]')
+		parser.add_argument(f'--{name}', dest=dest, type=type, default=default, metavar=metavar, help=help if default is None else f'{help} [default: {default}{unit}]')
 
 # Check whether an iterable is in ascending order
 def is_ascending(iterable: Iterable[Any], *, strict: bool) -> bool:

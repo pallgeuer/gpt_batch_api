@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import copy
+import enum
 import http
 import json
 import math
@@ -32,6 +33,8 @@ import openai._models as openai_models  # noqa
 import openai.types.chat as openai_chat
 import openai.lib._parsing as openai_parsing  # noqa
 import openai._utils as openai_utils  # noqa
+import wandb
+import wandb.sdk.wandb_run as wandb_run
 from .logger import log
 from . import tokens, utils
 from .utils import NONE
@@ -671,6 +674,14 @@ class GPTRequester:
 		client: Optional[openai.OpenAI] = None,                   # OpenAI API client instance to use, if given, otherwise one is created internally (Note: If an explicit client instance is given, the preceding client_* and openai_* arguments are ignored)
 		endpoint: Optional[str] = None,                           # Endpoint to use for all GPT requests (None => OPENAI_ENDPOINT environment variable with the DEFAULT_ENDPOINT constant as a fallback)
 
+		wandb: Optional[bool] = None,                             # noqa / Whether wandb logging is enabled
+		wandb_dir: Optional[str] = None,                          # Wandb directory (must already exist, see also the WANDB_DIR environment variable)
+		wandb_entity: Optional[str] = None,                       # Wandb entity
+		wandb_project: Optional[str] = 'gpt_batch_api',           # Wandb project name
+		wandb_run_id: Optional[str] = None,                       # Wandb run ID to create or resume (auto-generated run IDs are typically lowercase alphanumeric strings of length 8)
+		wandb_name: Optional[str] = None,                         # Wandb run name
+		wandb_group: Optional[str] = None,                        # Wandb group (defaults to the class name of the task manager class)
+
 		autocreate_working_dir: bool = True,                      # Whether to automatically create the GPT working directory if it does not exist (parent directory must already exist)
 		lock_timeout: Optional[float] = None,                     # Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)
 		lock_poll_interval: Optional[float] = None,               # Lock file polling interval (see utils.LockFile)
@@ -770,6 +781,14 @@ class GPTRequester:
 			log.info("Manage OpenAI file storage: https://platform.openai.com/storage")
 			log.info("Manage OpenAI batches: https://platform.openai.com/batches")
 			log.info("Monitor the OpenAI usage: https://platform.openai.com/settings/organization/usage")
+
+		self.wandb = wandb
+		self.wandb_dir = wandb_dir
+		self.wandb_entity = wandb_entity
+		self.wandb_project = wandb_project
+		self.wandb_run_id = wandb_run_id
+		self.wandb_name = wandb_name
+		self.wandb_group = wandb_group
 
 		if not isinstance(direct_verbose, DirectVerboseMode):
 			self.direct_verbose = DirectVerboseMode.from_str(direct_verbose)
@@ -916,6 +935,7 @@ class GPTRequester:
 		log.info(f"Triggering a processing error if {self.max_pass_failures} consecutive batches have a pass ratio less than {self.min_pass_ratio:.3g}")
 
 		self._enter_stack = contextlib.ExitStack()
+		self.wandb_run: Optional[wandb_run.Run] = None
 		self.type_cache: Optional[utils.SerialTypeCache] = None
 		self.S: Optional[State] = None
 		self.PQ: Optional[PoolQueue] = None
@@ -1000,6 +1020,15 @@ class GPTRequester:
 		if include_endpoint:
 			add_argument(name='endpoint', help="API endpoint to use for all requests (Careful: May be ignored by specific tasks that require specific endpoints)")
 
+		add_argument(name='wandb', default=None, help="Enable wandb logging")
+		add_argument(name='wandb', default=True, help="Disable wandb logging")
+		add_argument(name='wandb_dir', metavar='DIR', help="Wandb directory (must already exist, see also the WANDB_DIR environment variable)")
+		add_argument(name='wandb_entity', metavar='ENTITY', help="Wandb entity")
+		add_argument(name='wandb_project', metavar='PROJ', help="Wandb project name")
+		add_argument(name='wandb_run_id', metavar='ID', help="Wandb run ID to create or resume (auto-generated run IDs are typically lowercase alphanumeric strings of length 8)")
+		add_argument(name='wandb_name', metavar='NAME', help="Wandb run name")
+		add_argument(name='wandb_group', metavar='GROUP', help="Wandb group (defaults to the class name of the task manager class)")
+
 		add_argument(name='autocreate_working_dir', help="Do not automatically create the GPT working directory if it does not exist (parent directory must already exist)")
 		add_argument(name='lock_timeout', metavar='SEC', unit='s', help="Timeout (if any) to use when attempting to lock exclusive access to the files in the GPT working directory corresponding to the given name prefix (see utils.LockFile)")
 		add_argument(name='lock_poll_interval', metavar='SEC', unit='s', help="Lock file polling interval (see utils.LockFile)")
@@ -1053,10 +1082,118 @@ class GPTRequester:
 
 		return group
 
+	# Initialise wandb with a particular configuration
+	@classmethod
+	def wandb_init(cls, config: Union[dict[str, Any], utils.SupportsVars], **wandb_kwargs) -> ContextManager[Optional[wandb_run.Run]]:
+		# config = Configuration parameters to use for wandb (_* parameters are filtered out, wandb* parameters are filtered out and used for the call to wandb.init(), config can be a dict, argparse.Namespace, flat omegaconf.DictConfig, etc..)
+		# wandb_kwargs = Miscellaneous arguments or no-questions-asked argument overrides for the call to wandb.init()
+		# Returns a context manager that can be used to ensure that any newly initialised wandb run eventually receives a call to finish()
+		# If the config contains a parameter called 'wandb' that is False or None, then no wandb.init() call is made and a null context manager is returned that just returns None
+		# Otherwise if a wandb run has previously been initialised in this process, then no wandb.init() call is made and a null context manager is returned that just returns that existing wandb run (i.e. doesn't trigger a call to finish() on exiting, as that's some other code's responsibility)
+		# Otherwise, a wandb.init() call is made based on the passed config and wandb_kwargs, and the newly initialised run is returned (Run's are inherently context managers that return themselves on entering, and ensure a call to finish() on exiting)
+
+		config_type = type(config)
+		if isinstance(config, dict):
+			cfg = config.copy()
+		elif config_type.__name__ == 'DictConfig' and f"{config_type.__module__}.{config_type.__qualname__}".startswith('omegaconf.'):
+			cfg = {key: getattr(config, key) for key in dir(config)}
+		else:
+			cfg = dict(vars(config))
+
+		wandb_cfg = {}
+		for key in tuple(cfg):
+			if key and key[0] == '_':
+				del cfg[key]
+			elif key.startswith('wandb'):
+				wandb_cfg[key] = cfg.pop(key)
+
+		if not wandb_cfg.get('wandb', True):
+			return contextlib.nullcontext(None)
+		elif wandb.run is not None:
+			return contextlib.nullcontext(wandb.run)
+		else:
+			wandb_init_kwargs = dict(
+				entity=wandb_cfg.get('wandb_entity'),
+				project=wandb_cfg.get('wandb_project'),
+				dir=wandb_cfg.get('wandb_dir'),
+				id=wandb_cfg.get('wandb_run_id'),
+				name=wandb_cfg.get('wandb_name'),
+				config=cfg,
+				allow_val_change=False,
+				group=wandb_cfg.get('wandb_group'),
+				job_type='gpt_batch_api',
+				mode='online',
+				force=True,
+				reinit=False,
+				resume='allow',
+			)
+			wandb_init_kwargs.update(wandb_kwargs)
+			return wandb.init(**wandb_init_kwargs)
+
+	# Configure wandb as appropriate based on class instance(s) that use @utils.init_kwargs
+	@contextlib.contextmanager
+	def configure_wandb(self, *init_kwargs_objs: Union[Any, tuple[Any, dict[str, Any]]], **wandb_kwargs) -> ContextManager[None]:
+		# init_kwargs_objs = Objects to extract configuration parameters from (must be instances of classes that use @utils.init_kwargs), possibly packed into a tuple along with a dict of custom extra wandb configuration parameters
+		# wandb_kwargs = Extra wandb keyword arguments or argument overrides to pass to self.wandb_init()
+		# Returns a context manager that ensures wandb is initialised if required, and saves the currently active wandb run in self.wandb_run (None = Wandb disabled)
+		# Configuration parameters are extracted from each object obj based on obj.__kwargs__ for the keys, and getattr(obj, key) for the values (extra parameters or parameter value overrides can be specified using a dict of custom extra wandb configuration parameters)
+		# The call to this method does not do anything if a previous call to this method was already made and successfully initialised wandb (i.e. set self.wandb_run)
+
+		if self.wandb_run:
+			yield
+			return
+
+		config = {}
+		for item in init_kwargs_objs:
+
+			if isinstance(item, tuple):
+				obj, extra_configs = item
+			else:
+				obj = item
+				extra_configs = {}
+
+			for name, init_kwarg in obj.__kwargs__.items():
+				if init_kwarg.base_type in (str, int, float, bool) and name not in extra_configs:
+					try:
+						value = getattr(obj, name)
+					except AttributeError:
+						pass
+					else:
+						if value is not None and not isinstance(value, init_kwarg.base_type):
+							if init_kwarg.base_type is float and isinstance(value, int):
+								value = init_kwarg.base_type(value)
+							elif isinstance(value, enum.Enum):
+								value = value.name
+							else:
+								value = format(value)  # If we don't know what's going on then formatting to a string seems safest (rather than for instance arbitrarily applying bool() or int() on a miscellaneous type)
+						if name in config:
+							raise ValueError(f"Encountered multiple configuration parameters of the same name: {name}")
+						config[name] = value
+
+			config.update(extra_configs)
+
+		try:
+			with self.wandb_init(config=config, **wandb_kwargs) as self.wandb_run:
+				yield
+		finally:
+			self.wandb_run = None
+
+	# Custom extra wandb configuration parameters
+	@property
+	def extra_wandb_configs(self) -> dict[str, Any]:
+		return dict(
+			client_base_url=self.client.base_url,
+			lock_timeout=self.lock.timeout,
+			lock_poll_interval=self.lock.poll_interval,
+			lock_status_interval=self.lock.status_interval,
+			token_estimator_warn=self.token_estimator.warn,
+		)
+
 	# Enter method for the required use of GPTRequester as a context manager
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
 			enter_stack.enter_context(self.lock)
+			enter_stack.enter_context(self.configure_wandb((self, self.extra_wandb_configs)))
 			enter_stack.callback(self.on_exit)
 			self.type_cache = utils.SerialTypeCache()
 			enter_stack.enter_context(self.state)

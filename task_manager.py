@@ -544,6 +544,8 @@ class TaskManager:
 		self.wipe_failed = wipe_failed
 		if self.wipe_failed:
 			gpt_requester_kwargs['wipe_requests'] = True
+		if gpt_requester_kwargs.get('wandb', None) is None:
+			gpt_requester_kwargs['wandb'] = True
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
 		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta, dryrun=self.GR.dryrun)
@@ -615,10 +617,19 @@ class TaskManager:
 	def on_task_exit(self):
 		pass
 
+	# Custom extra wandb configuration parameters
+	@property
+	def extra_wandb_configs(self) -> dict[str, Any]:
+		return dict(
+			run=self.run_flag,
+			reinit_meta=self.task.reinit_meta,
+		)
+
 	# Enter method for the required use of TaskManager as a context manager
 	def __enter__(self) -> Self:
 		with self._enter_stack as enter_stack:
 			enter_stack.enter_context(self.GR.lock)
+			enter_stack.enter_context(self.GR.configure_wandb((self.GR, self.GR.extra_wandb_configs), (self, self.extra_wandb_configs)))
 			wipe_requests = self.GR.wipe_requests
 			wipe_task = self.GR.wipe_task
 			enter_stack.callback(self.on_exit)
