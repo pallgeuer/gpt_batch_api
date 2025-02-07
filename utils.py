@@ -21,10 +21,11 @@ import contextlib
 import collections
 import dataclasses
 import typing
-from typing import Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol, Callable, Counter
+from typing import TYPE_CHECKING, Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol, Callable, Counter
 from types import FrameType
 import filelock
 import pydantic
+import wandb
 
 # Types
 DataclassInstance = typing.TypeVar('DataclassInstance')  # Generic dataclass instance
@@ -121,6 +122,46 @@ def get_type_str(typ: type) -> str:
 		return typ_str[8:-2]
 	else:
 		return typ_str
+
+# Mutable wandb run holder
+if TYPE_CHECKING:
+	class WandbRun(wandb.sdk.wandb_run.Run):
+		pass
+else:
+	class WandbRun:
+
+		class NoneCallable:
+			def __call__(self, *args, **kwargs) -> None:
+				return None
+		NONE_CALLABLE = NoneCallable()
+
+		run: Optional[wandb.sdk.wandb_run.Run]
+
+		def __init__(self, run: Optional[wandb.sdk.wandb_run.Run] = None):
+			self.set(run=run)
+
+		def reset(self):
+			self.run = None
+
+		def set(self, run: Optional[wandb.sdk.wandb_run.Run]):
+			self.run = run
+
+		def __bool__(self) -> bool:
+			return self.run is not None
+
+		def __getattr__(self, name: str) -> Any:
+			# Raise AttributeError in all cases unless the requested attribute is a known (non-property) method (and in that case just return None if the returned attribute value is called)
+			if self.run is None:
+				try:
+					cls_attr = getattr(wandb.sdk.wandb_run.Run, name)
+				except AttributeError:
+					pass
+				else:
+					if callable(cls_attr) and inspect.isroutine(cls_attr):
+						return self.NONE_CALLABLE
+				raise AttributeError(f"Cannot get non-routine attribute '{name}' of {self.__class__.__name__} when internal run is None")
+			else:
+				return getattr(self.run, name)
 
 #
 # Error handling

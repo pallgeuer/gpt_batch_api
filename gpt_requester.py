@@ -34,7 +34,6 @@ import openai.types.chat as openai_chat
 import openai.lib._parsing as openai_parsing  # noqa
 import openai._utils as openai_utils  # noqa
 import wandb
-import wandb.sdk.wandb_run as wandb_run
 from .logger import log
 from . import tokens, utils
 from .utils import NONE
@@ -828,6 +827,7 @@ class GPTRequester:
 		log.info(f"Costs per input mtoken: Direct {self.cost_input_direct_mtoken:.3f}, Cached {self.cost_input_cached_mtoken:.3f}, Batch {self.cost_input_batch_mtoken:.3f}")
 		log.info(f"Costs per output mtoken: Direct {self.cost_output_direct_mtoken:.3f}, Batch {self.cost_output_batch_mtoken:.3f}")
 
+		self.wandb_run = utils.WandbRun()  # TODO: WHERE DOES THIS NEED TO END UP? rstack? state/queue files?
 		self.token_estimator = tokens.TokenEstimator(assumed_completion_ratio=assumed_completion_ratio, warn=token_estimator_warn)
 		self.set_assumed_completion_ratio(assumed_completion_ratio)
 		self.token_coster = tokens.TokenCoster(cost_input_direct_mtoken=self.cost_input_direct_mtoken, cost_input_cached_mtoken=self.cost_input_cached_mtoken, cost_input_batch_mtoken=self.cost_input_batch_mtoken, cost_output_direct_mtoken=self.cost_output_direct_mtoken, cost_output_batch_mtoken=self.cost_output_batch_mtoken)
@@ -935,7 +935,6 @@ class GPTRequester:
 		log.info(f"Triggering a processing error if {self.max_pass_failures} consecutive batches have a pass ratio less than {self.min_pass_ratio:.3g}")
 
 		self._enter_stack = contextlib.ExitStack()
-		self.wandb_run: Optional[wandb_run.Run] = None
 		self.type_cache: Optional[utils.SerialTypeCache] = None
 		self.S: Optional[State] = None
 		self.PQ: Optional[PoolQueue] = None
@@ -1084,7 +1083,7 @@ class GPTRequester:
 
 	# Initialise wandb with a particular configuration
 	@classmethod
-	def wandb_init(cls, config: Union[dict[str, Any], utils.SupportsVars], **wandb_kwargs) -> ContextManager[Optional[wandb_run.Run]]:
+	def wandb_init(cls, config: Union[dict[str, Any], utils.SupportsVars], **wandb_kwargs) -> ContextManager[Optional[wandb.sdk.wandb_run.Run]]:
 		# config = Configuration parameters to use for wandb (_* parameters are filtered out, wandb* parameters are filtered out and used for the call to wandb.init(), config can be a dict, argparse.Namespace, flat omegaconf.DictConfig, etc..)
 		# wandb_kwargs = Miscellaneous arguments or no-questions-asked argument overrides for the call to wandb.init()
 		# Returns a context manager that can be used to ensure that any newly initialised wandb run eventually receives a call to finish()
@@ -1135,9 +1134,9 @@ class GPTRequester:
 	def configure_wandb(self, *init_kwargs_objs: Union[Any, tuple[Any, dict[str, Any]]], **wandb_kwargs) -> ContextManager[None]:
 		# init_kwargs_objs = Objects to extract configuration parameters from (must be instances of classes that use @utils.init_kwargs), possibly packed into a tuple along with a dict of custom extra wandb configuration parameters
 		# wandb_kwargs = Extra wandb keyword arguments or argument overrides to pass to self.wandb_init()
-		# Returns a context manager that ensures wandb is initialised if required, and saves the currently active wandb run in self.wandb_run (None = Wandb disabled)
+		# Returns a context manager that ensures wandb is initialised if required, and that updates self.wandb_run with any newly initialised wandb run
 		# Configuration parameters are extracted from each object obj based on obj.__kwargs__ for the keys, and getattr(obj, key) for the values (extra parameters or parameter value overrides can be specified using a dict of custom extra wandb configuration parameters)
-		# The call to this method does not do anything if a previous call to this method was already made and successfully initialised wandb (i.e. set self.wandb_run)
+		# The call to this method does not do anything if a previous call to this method was already made and successfully initialised wandb
 
 		if self.wandb_run:
 			yield
@@ -1173,10 +1172,11 @@ class GPTRequester:
 			config.update(extra_configs)
 
 		try:
-			with self.wandb_init(config=config, **wandb_kwargs) as self.wandb_run:
+			with self.wandb_init(config=config, **wandb_kwargs) as run:
+				self.wandb_run.set(run=run)
 				yield
 		finally:
-			self.wandb_run = None
+			self.wandb_run.reset()
 
 	# Custom extra wandb configuration parameters
 	@property
