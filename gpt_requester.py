@@ -741,6 +741,17 @@ class GPTRequester:
 		if not self.name_prefix:
 			raise ValueError("Name prefix cannot be empty")
 
+		self.autocreate_working_dir = autocreate_working_dir
+		created_working_dir = False
+		if self.autocreate_working_dir:
+			with contextlib.suppress(FileExistsError):
+				os.mkdir(self.working_dir)
+				created_working_dir = True
+
+		log.info(f"Using GPT requester of prefix '{self.name_prefix}' in dir: {self.working_dir}{' [CREATED]' if created_working_dir else ''}")
+		if not os.path.isdir(self.working_dir):
+			raise FileNotFoundError(f"GPT working directory does not exist: {self.working_dir}")
+
 		self.dryrun = dryrun
 		if self.dryrun:
 			log.warning(f"{DRYRUN}GPT requester dry run mode => Not allowing remote batches or writing of state updates and such")
@@ -757,17 +768,6 @@ class GPTRequester:
 			log.info("An exception will be raised if failed batches occur")
 		else:
 			log.info("Processing and clearing up any failed batches that occur")
-
-		self.autocreate_working_dir = autocreate_working_dir
-		created_working_dir = False
-		if self.autocreate_working_dir:
-			with contextlib.suppress(FileExistsError):
-				os.mkdir(self.working_dir)
-				created_working_dir = True
-
-		log.info(f"Using GPT requester of prefix '{self.name_prefix}' in dir: {self.working_dir}{' [CREATED]' if created_working_dir else ''}")
-		if not os.path.isdir(self.working_dir):
-			raise FileNotFoundError(f"GPT working directory does not exist: {self.working_dir}")
 
 		self.client = client or openai.OpenAI(api_key=openai_api_key, organization=openai_organization, project=openai_project, base_url=client_base_url, **(client_kwargs or {}))
 		self.endpoint = endpoint
