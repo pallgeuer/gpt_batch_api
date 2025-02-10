@@ -7,8 +7,10 @@ import re
 import copy
 import json
 import math
+import types
 import argparse
 import functools
+import itertools
 import contextlib
 import collections
 import dataclasses
@@ -28,6 +30,7 @@ DataclassT = typing.TypeVar('DataclassT')
 # Task state class
 @dataclasses.dataclass
 class TaskState:
+
 	version: int = 1                                                             # Data format version number
 	meta: dict[str, Any] = dataclasses.field(default_factory=dict)               # Task-level metadata (arbitrary JSON-compatible key-value store, e.g. can be used to store parameters that should/must not change throughout an entire task, even if the task is resumed with different configuration arguments, TaskManager never modifies the meta for as long as the task manager is entered)
 	committed_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples committed so far (arbitrary JSON-compatible key-value store)
@@ -35,6 +38,33 @@ class TaskState:
 	responded_meta: dict[str, Any] = dataclasses.field(default_factory=dict)     # Task-level information about the samples that have received a response so far (arbitrary JSON-compatible key-value store)
 	failed_samples: dict[str, Any] = dataclasses.field(default_factory=dict)     # Sample-level information about the committed samples that have received a response so far and failed (maps sample keys to corresponding JSON-compatible data, keys MUST be a non-strict subset of committed_samples at all times)
 	succeeded_samples: dict[str, Any] = dataclasses.field(default_factory=dict)  # Sample-level information about the committed samples that have received a response so far and succeeded (maps sample keys to corresponding JSON-compatible data, keys MUST be a non-strict subset of committed_samples at all times)
+
+	def summary(self) -> dict[str, Any]:
+		# Returns a flat JSON-compatible summary of the data contained in the class
+
+		meta_summary = {}
+		for meta, base_key in (
+			(self.meta, 'TaskMeta/'),
+			(self.committed_meta, 'Task/committed_'),
+			(self.responded_meta, 'Task/responded_'),
+		):
+			for key, value in itertools.islice(meta.items(), 100):  # For safety, only include up to 100 items in the summary (we never want to have hundreds or thousands here, so rather omit some items than spam the summary and potentially slow down wandb)
+				if isinstance(value, (bool, int, float, str, types.NoneType)):
+					meta_summary[base_key + key] = value
+
+		num_committed = len(self.committed_samples)
+		num_pending = len(self.committed_samples.keys() - self.failed_samples.keys() - self.succeeded_samples.keys())
+		both_keys = self.failed_samples.keys() & self.succeeded_samples.keys()
+
+		return {
+			'Task/samples_committed': num_committed,                                   # Committed at least once
+			'Task/samples_pending': num_pending,                                       # No response received yet at all
+			'Task/samples_responded': num_committed - num_pending,                     # Responded at least once, but not necessarily yet as many times as committed
+			'Task/samples_succeeded': len(self.succeeded_samples.keys() - both_keys),  # All responses so far were successes
+			'Task/samples_failed': len(self.failed_samples.keys() - both_keys),        # All responses so far were failures
+			'Task/samples_mixed_success': len(both_keys),                              # Some responses were successes, some were failures
+			**meta_summary,
+		}
 
 # Task state file class
 class TaskStateFile:
@@ -97,6 +127,7 @@ class TaskStateFile:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=TaskState, json_data=file)
 		log.info(f"Loaded task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
 
 	def save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible saving of the task state file
@@ -107,9 +138,15 @@ class TaskStateFile:
 				utils.json_from_dataclass(obj=self.state, file=file)
 				file_size = utils.get_file_size(file)
 			log.info(f"Saved task state file with {len(self.state.committed_samples)} committed, {len(self.state.failed_samples)} failed, and {len(self.state.succeeded_samples)} succeeded sample keys ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
 
 	def unload(self):
 		self.state = None
+
+	def log_summary(self, rstack: utils.RevertStack):
+		# rstack = Possible LogRevertStack (subclass of RevertStack) to use for logging
+		if isinstance(rstack, utils.LogRevertStack):
+			rstack.log(self.state.summary())
 
 #
 # Task output file
@@ -163,6 +200,12 @@ class TaskOutputFile:
 	def unload(self):
 		# Unload the task output file
 		self.data = None
+
+	def log_summary(self, *args: dict[str, Any], rstack: utils.RevertStack, flush: bool = False, **kwargs: Any):
+		# rstack = Possible LogRevertStack (subclass of RevertStack) to use for logging
+		# args, flush, kwargs = Arguments to pass on to rstack.log() if rstack is a LogRevertStack
+		if isinstance(rstack, utils.LogRevertStack):
+			rstack.log(*args, flush=flush, **kwargs)
 
 # Dataclass output file class
 class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
@@ -237,6 +280,7 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 			file_size = utils.get_file_size(file)
 			self.data = utils.dataclass_from_json(cls=self.data_cls, json_data=file)
 		log.info(f"Loaded task output file with {self.status_str()} ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
 
 	def pre_save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use to make any changes to the data reversible
@@ -254,6 +298,13 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 				utils.json_from_dataclass(obj=self.data, file=file)
 				file_size = utils.get_file_size(file)
 			log.info(f"Saved task output file with {self.status_str()} ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
+
+	def log_summary(self, *args: dict[str, Any], rstack: utils.RevertStack, flush: bool = False, **kwargs: Any):
+		# It is encouraged to override this method to log a more useful summary (as subclasses know what DataclassT actually is)
+		super().log_summary({
+			'Output/num_data_fields': len(dataclasses.fields(self.data)),
+		}, *args, rstack=rstack, flush=flush, **kwargs)
 
 	def status_str(self) -> str:
 		# Returns a string summarizing the data status for logging purposes (intended to be overridden by subclasses, "... task output file with STATUS_STR")
@@ -352,6 +403,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 				file_size = utils.get_file_size(file)
 			assert file_size == self.data.last_size == 0
 			log.info(f"Created empty initial task output file: {os.path.basename(path)}")
+		self.log_summary(rstack=rstack)
 
 	def reset(self, rstack: utils.RevertStack) -> list[str]:
 		# Extends the base class signature with a return value => Returns a list of the temporary unlink backup paths
@@ -406,6 +458,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 			self.data.last_size = utils.get_file_size(file)
 
 		log.info(f"Loaded the task output file(s) in {len(self.data.paths)} parts")
+		self.log_summary(rstack=rstack)
 
 	def pre_save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use to make any changes to the data entries reversible
@@ -472,6 +525,16 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 			log.info(f"Appended {len(self.data.entries)} entries to the now {len(self.data.paths)} task output file(s) (added {utils.format_size_iec(added_entry_size)})")
 
 		self.data.entries.clear()
+		self.log_summary(rstack=rstack)
+
+	def log_summary(self, *args: dict[str, Any], rstack: utils.RevertStack, flush: bool = False, **kwargs: Any):
+		super().log_summary({
+			'Output/num_files': len(self.data.paths),
+			'Output/max_file_entries': self.max_entries,
+			'Output/last_file_entries': self.data.last_entries,
+			'Output/max_file_size_mb': self.max_size / 1048576,
+			'Output/last_file_size_mb': self.data.last_size / 1048576,
+		}, *args, rstack=rstack, flush=flush, **kwargs)
 
 	def entries(self) -> Iterable[DataclassT]:
 		for path in self.data.paths:
@@ -771,6 +834,7 @@ class TaskManager:
 		self.step_num += 1
 		log.info('\u2550' * 120)
 		log.info(f"Step {self.step_num}...")
+		self.GR.W.log(data={'Task/run_step': self.step_num})
 
 		while True:
 

@@ -8,7 +8,6 @@ import copy
 import enum
 import http
 import json
-import math
 import time
 import heapq
 import pprint
@@ -86,7 +85,7 @@ class TokensCost:
 	@property
 	def completion_ratio(self) -> float:
 		# Returns the output tokens completion ratio
-		return math.nan if self.max_output_tokens == 0 else self.output_tokens / self.max_output_tokens
+		return 0.0 if self.max_output_tokens == 0 else self.output_tokens / self.max_output_tokens
 
 	@property
 	def cost_direct(self) -> float:
@@ -203,7 +202,7 @@ class RequestMetrics:
 	@property
 	def completion_ratio(self) -> float:
 		# Returns the true output tokens completion ratio
-		return math.nan if self.max_output_tokens == 0 else self.usage.get('completion_tokens', 0) / self.max_output_tokens
+		return 0.0 if self.max_output_tokens == 0 else self.usage.get('completion_tokens', 0) / self.max_output_tokens
 
 	def __add__(self, other: RequestMetrics) -> RequestMetrics:
 		# other = Another RequestMetrics instance to combine with this one
@@ -306,6 +305,7 @@ class PushStats:
 # State class
 @dataclasses.dataclass
 class State:
+
 	version: int = 1                                                            # Data format version number
 	endpoint: str = ''                                                          # API endpoint to use (empty string is invalid)
 	max_request_id: int = 0                                                     # Maximum request ID used thus far (0 = No request ID used so far)
@@ -318,6 +318,78 @@ class State:
 	task_push_stats: PushStats = dataclasses.field(default_factory=PushStats)   # Task push statistics
 	metrics: Metrics = dataclasses.field(default_factory=Metrics)               # Completed request metrics
 	num_pass_failures: int = 0                                                  # Current number of consecutive batch pass failures
+
+	def summary(self) -> dict[str, Any]:
+		# Returns a flat JSON-compatible summary of the data contained in the class
+
+		unpushed_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.batches if batch.remote is None)
+		remote_tokens_cost = TokensCost().add(batch.tokens_cost for batch in self.batches if batch.remote is not None)
+		ongoing_tokens_cost = unpushed_tokens_cost + remote_tokens_cost
+
+		usage = {}
+		for key, value in self.metrics.all.total.usage.items():
+			if isinstance(value, dict):
+				key = key.removesuffix('_details')
+				key_is_tokens = key.endswith('_tokens')
+				for subkey, subvalue in value.items():
+					if isinstance(subvalue, (int, float)):
+						usage_key = f'Usage/{key}_{subkey}'
+						if usage_key.endswith('_tokens'):
+							if key_is_tokens:
+								usage_key = usage_key[:-7]
+							usage_key = usage_key.replace('_tokens', '_ktok')
+							subvalue /= 1000
+						usage[usage_key] = subvalue
+			elif isinstance(value, (int, float)):
+				usage_key = f'Usage/{key}'
+				if usage_key.endswith('_tokens'):
+					usage_key = usage_key.replace('_tokens', '_ktok')
+					value /= 1000
+				usage[usage_key] = value
+
+		return {
+			'Metrics/max_request_id': self.max_request_id,
+			'Batch/max_batch_id': self.max_batch_id,
+			'Direct/max_direct_id': self.max_direct_batch_id,
+			'Batch/num_total': len(self.batches) + len(self.batch_history),
+			'Batch/num_completed': len(self.batch_history),
+			'Batch/num_ongoing': len(self.batches),
+			'Batch/num_unpushed': sum(batch.remote is None for batch in self.batches),
+			'Batch/num_remote': sum(batch.remote is not None for batch in self.batches),
+			'Batch/ongoing_requests': sum(batch.num_requests for batch in self.batches),
+			'Batch/ongoing_json_size_mb': sum(batch.local_jsonl_size for batch in self.batches) / 1048576,
+			'Batch/ongoing_input_ktok': ongoing_tokens_cost.input_tokens / 1000,
+			'Batch/ongoing_pred_cost': ongoing_tokens_cost.cost_batch,
+			'Batch/unpushed_requests': sum(batch.num_requests for batch in self.batches if batch.remote is None),
+			'Batch/unpushed_json_size_mb': sum(batch.local_jsonl_size for batch in self.batches if batch.remote is None) / 1048576,
+			'Batch/unpushed_input_ktok': unpushed_tokens_cost.input_tokens / 1000,
+			'Batch/unpushed_pred_cost': unpushed_tokens_cost.cost_batch,
+			'Batch/remote_requests': sum(batch.num_requests for batch in self.batches if batch.remote is not None),
+			'Batch/remote_requests_completed': sum(batch.remote.batch.request_counts.completed for batch in self.batches if batch.remote is not None and batch.remote.batch.request_counts is not None),
+			'Batch/remote_requests_failed': sum(batch.remote.batch.request_counts.failed for batch in self.batches if batch.remote is not None and batch.remote.batch.request_counts is not None),
+			'Batch/remote_requests_running': sum(batch.remote.batch.request_counts.total for batch in self.batches if batch.remote is not None and batch.remote.batch.request_counts is not None),
+			'Batch/remote_json_size_mb': sum(batch.local_jsonl_size for batch in self.batches if batch.remote is not None) / 1048576,
+			'Batch/remote_input_ktok': remote_tokens_cost.input_tokens / 1000,
+			'Batch/remote_pred_cost': remote_tokens_cost.cost_batch,
+			'Batch/completed_requests': sum(batch.num_requests for batch in self.batch_history),
+			'Batch/completed_cost': sum(batch.true_tokens_cost.cost_batch for batch in self.batch_history),
+			'Direct/num_completed': len(self.direct_history),
+			'Direct/completed_requests': sum(batch.num_requests for batch in self.direct_history),
+			'Direct/completed_cost': sum(batch.true_tokens_cost.cost_direct for batch in self.direct_history),
+			'Pushed/task_requests': self.task_push_stats.total_requests,
+			'Pushed/task_input_ktok': self.task_push_stats.total_tokens_cost.input_tokens / 1000,
+			'Pushed/task_pred_cost': self.task_push_stats.total_tokens_cost.cost,
+			'Metrics/num_api_calls': self.metrics.all.num_api_calls,
+			'Metrics/num_requests': self.metrics.all.total.num_requests,
+			'Metrics/json_size_mb': self.metrics.all.total.local_jsonl_size / 1048576,
+			'Metrics/num_models': len(self.metrics.all.total.models),
+			'Metrics/num_fingerprints': len(self.metrics.all.total.system_fingerprints),
+			**usage,
+			'Metrics/completion_ratio': self.metrics.all.total.completion_ratio,
+			'Metrics/max_completion_tokens': self.metrics.all.total.max_seen_output_tokens,
+			'Metrics/cost': self.metrics.all.total.true_cost,
+			'Batch/consec_pass_failures': self.num_pass_failures,
+		}
 
 # State file class
 class StateFile:
@@ -373,9 +445,11 @@ class StateFile:
 			file_size = utils.get_file_size(file)
 			self.state = utils.dataclass_from_json(cls=State, json_data=file)
 		log.info(f"Loaded GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
 
 	def save(self, rstack: utils.RevertStack, show_log: bool = True):
 		# rstack = RevertStack to use for the safe reversible saving of the state file
+		# show_log = Whether to log that the state file was saved
 		if self.dryrun:
 			if show_log:
 				log.warning(f"{DRYRUN}Did not save GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches")
@@ -385,9 +459,15 @@ class StateFile:
 				file_size = utils.get_file_size(file)
 			if show_log:
 				log.info(f"Saved GPT requester state file with {len(self.state.queue.request_id_meta)} queued requests and {len(self.state.batches)} batches ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
 
 	def unload(self):
 		self.state = None
+
+	def log_summary(self, rstack: utils.RevertStack):
+		# rstack = Possible LogRevertStack (subclass of RevertStack) to use for logging
+		if isinstance(rstack, utils.LogRevertStack):
+			rstack.log(self.state.summary())
 
 #
 # Queue file
@@ -470,6 +550,23 @@ class PoolQueue:
 			raise ValueError("Request queue contains duplicate request IDs")
 		return request_id_meta
 
+	def summary(self) -> dict[str, Any]:
+		# Returns a flat JSON-compatible summary of the data contained in the class
+		total_json_size = sum(cached_req.info.json_size for cached_req in self.pool) + sum(cached_req.info.json_size for cached_req in self.queue if cached_req is not None)
+		total_tokens_cost = TokensCost().add((cached_req.info.tokens_cost for cached_req in self.pool), (cached_req.info.tokens_cost for cached_req in self.queue if cached_req is not None))
+		return {
+			'Queue/pool_len': self.pool_len,
+			'Queue/queue_len': self.queue_len,
+			'Queue/num_requests': self.pool_len + self.queue_len,
+			'Queue/json_size_mb': total_json_size / 1048576,
+			'Queue/input_ktok': total_tokens_cost.input_tokens / 1000,
+			'Queue/max_output_ktok': total_tokens_cost.max_output_tokens / 1000,
+			'Queue/pred_output_ktok': total_tokens_cost.output_tokens / 1000,
+			'Queue/pred_completion_ratio': total_tokens_cost.completion_ratio,
+			'Queue/pred_cost_direct': total_tokens_cost.cost_direct,
+			'Queue/pred_cost_batch': total_tokens_cost.cost_batch,
+		}
+
 # Queue file class
 class QueueFile:
 
@@ -527,6 +624,7 @@ class QueueFile:
 				token_coster=self.token_coster,
 			) for line in file])
 		log.info(f"Loaded GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
 
 	def save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible saving of the queue file
@@ -540,9 +638,15 @@ class QueueFile:
 						file.write('\n')
 				file_size = utils.get_file_size(file)
 			log.info(f"Saved GPT requester queue file with {self.pool_queue.queue_len} requests ({utils.format_size_iec(file_size)})")
+		self.log_summary(rstack=rstack)
 
 	def unload(self):
 		self.pool_queue = None
+
+	def log_summary(self, rstack: utils.RevertStack):
+		# rstack = Possible LogRevertStack (subclass of RevertStack) to use for logging
+		if isinstance(rstack, utils.LogRevertStack):
+			rstack.log(self.pool_queue.summary())
 
 #
 # Responses
@@ -1085,6 +1189,19 @@ class GPTRequester:
 
 		return group
 
+	# Save the GPT requester state to file
+	def save_state(self, rstack: utils.RevertStack, show_log: bool = True):
+		# rstack = RevertStack to use for the safe reversible saving of the state file
+		# show_log = Whether to log that the state file was saved
+		self.state.save(rstack=rstack, show_log=show_log)
+		if isinstance(rstack, utils.LogRevertStack):
+			rstack.log({
+				'Pushed/session_requests': self.session_push_stats.total_requests,
+				'Pushed/session_input_ktok': self.session_push_stats.total_tokens_cost.input_tokens / 1000,
+				'Pushed/session_pred_cost': self.session_push_stats.total_tokens_cost.cost,
+				'Metrics/processed_failed_batches': self.session_processed_failed_batches,
+			})
+
 	# Initialise wandb with a particular configuration
 	@classmethod
 	def wandb_init(cls, config: Union[dict[str, Any], utils.SupportsVars], **wandb_kwargs) -> ContextManager[Optional[wandb.sdk.wandb_run.Run]]:
@@ -1263,7 +1380,7 @@ class GPTRequester:
 					with utils.LogRevertStack(W=self.W) as rstack:
 						self.validate_state_queue(clean=True)
 						self.queue.save(rstack=rstack)
-						self.state.save(rstack=rstack)
+						self.save_state(rstack=rstack)
 
 				for batch_id in unfinished_batches:
 					self.cancel_remote_batch(batch_id=batch_id)
@@ -1863,7 +1980,7 @@ class GPTRequester:
 					yield rstack, result, None, retry_reqs  # Note: No updates to result or retry_reqs are permitted!
 
 				self.validate_state_queue(clean=False)
-				self.state.save(rstack=rstack)
+				self.save_state(rstack=rstack)
 
 				if batch_failed:
 					rstack.callback(setattr, self, 'session_processed_failed_batches', self.session_processed_failed_batches)
@@ -1944,7 +2061,7 @@ class GPTRequester:
 				self.S.queue.request_id_meta = self.PQ.queue_request_id_meta()
 				self.validate_state_queue(clean=True)
 				self.queue.save(rstack=rstack)
-				self.state.save(rstack=rstack)
+				self.save_state(rstack=rstack)
 			else:
 				self.validate_state_queue(clean=True)
 			yield rstack, cached_reqs  # Reaching this yield signifies that all requests that have been added to the request pool have been successfully committed to the request queue, queue file and state (BUT if the code executed during the yield raises an exception then ALL of this will be perfectly reversed)
@@ -2053,7 +2170,7 @@ class GPTRequester:
 
 					self.validate_state_queue(clean=False)
 					self.queue.save(rstack=rstack)
-					self.state.save(rstack=rstack)
+					self.save_state(rstack=rstack)
 
 				num_created += 1
 				num_created_requests += batch.num_requests
@@ -2260,7 +2377,7 @@ class GPTRequester:
 							self.session_push_stats.total_tokens_cost = next_session_tokens_cost
 
 							self.validate_state_queue(clean=False)
-							self.state.save(rstack=rstack)
+							self.save_state(rstack=rstack)
 
 							log.info(f"Pushed batch {batch.id} as '{batch.remote.batch.id}' based on '{batch.remote.file.id}' of size {utils.format_size_si(batch.remote.file.bytes)} with {batch.num_requests} requests, {batch.tokens_cost.input_tokens} tokens, {batch.tokens_cost.cost_batch:.3f} assumed cost (remote batch status: {batch.remote.batch.status})")
 
@@ -2341,8 +2458,7 @@ class GPTRequester:
 		return sum(batch.remote is not None and batch.remote.finished for batch in self.S.batches)
 
 	# Update the current state of all pushed remote batches (unless dry run)
-	def update_remote_batch_state(self, only_check_finished: bool, log_save: bool) -> tuple[bool, int]:
-		# only_check_finished = If True, return as soon as a single pushed remote batch is seen to be in the finished state (whether this is new or not)
+	def update_remote_batch_state(self, log_save: bool) -> tuple[bool, int]:
 		# log_save = Whether to log if the state file is saved
 		# Returns whether there are any finished remote batches, and how many batch statuses were updated
 
@@ -2354,8 +2470,6 @@ class GPTRequester:
 
 				if batch.remote.finished:
 					any_finished = True
-					if only_check_finished:
-						break
 				elif not self.dryrun:
 
 					try:
@@ -2370,8 +2484,6 @@ class GPTRequester:
 							if batch.remote.batch.status in FINISHED_BATCH_STATUSES:
 								batch.remote.finished = True
 								any_finished = True
-								if only_check_finished:
-									break
 					except (openai.OpenAIError, ValueError) as e:
 						utils.print_clear_line()
 						log.error(f"Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
@@ -2383,7 +2495,7 @@ class GPTRequester:
 				log.info(f"Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
 			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				self.validate_state_queue(clean=False)
-				self.state.save(rstack=rstack, show_log=log_save)
+				self.save_state(rstack=rstack, show_log=log_save)
 
 		return any_finished, num_status_updates
 
@@ -2399,7 +2511,7 @@ class GPTRequester:
 		printed_str = None
 
 		while True:
-			num_status_updates += self.update_remote_batch_state(only_check_finished=True, log_save=False)[1]
+			num_status_updates += self.update_remote_batch_state(log_save=False)[1]
 			num_unfinished_batches = self.num_unfinished_batches()
 			if self.num_finished_batches() > 0 or num_unfinished_batches <= 0:
 				utils.print_in_place(f"Waited {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")
@@ -2525,7 +2637,7 @@ class GPTRequester:
 						num_batches_finished += 1
 						batch_wiped = True
 						self.validate_state_queue(clean=False)
-						self.state.save(rstack=rstack)
+						self.save_state(rstack=rstack)
 
 				if batch_wiped:
 					log.info(f"Finished direct execution and processing of unpushable batch {batch.id}")
@@ -2540,7 +2652,7 @@ class GPTRequester:
 
 	# Update and prepare for the processing of remote batches
 	def prepare_process_batches(self):
-		self.update_remote_batch_state(only_check_finished=False, log_save=True)  # Does not do much in case of dry run
+		self.update_remote_batch_state(log_save=True)  # Does not do much in case of dry run
 		log.info(f"There are {self.num_unfinished_batches()} unfinished and {self.num_finished_batches()} finished REMOTE batches with a total of {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and not batch.remote.finished)} and {sum(batch.num_requests for batch in self.S.batches if batch.remote is not None and batch.remote.finished)} requests respectively")
 
 	# Generator: Process and clean up after any finished remote batches (unless dry run)
@@ -2807,7 +2919,7 @@ class GPTRequester:
 									log.info(f"Committed {len(cached_reqs) - len(retry_infos)} existing pooled requests and {len(retry_infos)} retried requests to the request queue")
 							else:
 								self.validate_state_queue(clean=False)
-								self.state.save(rstack=rstack)
+								self.save_state(rstack=rstack)
 
 							if batch_failed:
 								rstack.callback(setattr, self, 'session_processed_failed_batches', self.session_processed_failed_batches)
@@ -3086,7 +3198,7 @@ class GPTRequester:
 		if (min_input_tokens := min(batch_input_tokens, batch_predicted_input_tokens)) != 0 and max(batch_input_tokens, batch_predicted_input_tokens) / min_input_tokens > self.warn_predicted_input_factor:
 			log.warning(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} has an input token prediction mismatch in excess of a factor of {self.warn_predicted_input_factor:.3g}: {batch_input_tokens} true vs {batch_predicted_input_tokens} predicted tokens")
 		if (min_completion_tokens := min(batch_completion_tokens, batch_predicted_output_tokens)) != 0 and max(batch_completion_tokens, batch_predicted_output_tokens) / min_completion_tokens > self.warn_assumed_completion_factor:
-			log.warning(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens / completion ratios are {batch_true_tokens_cost.completion_ratio:.3g} true vs {math.nan if batch_max_output_tokens == 0 else batch_predicted_output_tokens / batch_max_output_tokens} predicted vs {self.assumed_completion_ratio:.3g} configured")
+			log.warning(f"{'Direct batch' if direct_mode else 'Batch'} {batch.id} has an assumed completion token mismatch in excess of a factor of {self.warn_assumed_completion_factor:.3g}: {batch_completion_tokens} true vs {batch_predicted_output_tokens} assumed tokens / completion ratios are {batch_true_tokens_cost.completion_ratio:.3g} true vs {0.0 if batch_max_output_tokens == 0 else batch_predicted_output_tokens / batch_max_output_tokens} predicted vs {self.assumed_completion_ratio:.3g} configured")
 
 		assert result_info_map.keys() <= batch.request_info.keys()
 		for req_id, req_info in batch.request_info.items():
@@ -3146,5 +3258,7 @@ class GPTRequester:
 
 	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
 	# TODO: Sync up with commands.txt
+	# TODO: Change all British english to American English (ask ChatGPT what regexes to search for in my codebase)
 	# TODO: Inspect the entire code for problems
+	# TODO: Line count
 # EOF

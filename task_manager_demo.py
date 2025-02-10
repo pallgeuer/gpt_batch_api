@@ -53,6 +53,11 @@ class CharCodesFile(task_manager.DataclassOutputFile):
 		rstack.callback(setattr, self.data, 'chars', self.data.chars)
 		self.data.chars = dict(sorted(self.data.chars.items()))
 
+	def log_summary(self, *args: dict[str, Any], rstack: utils.RevertStack, flush: bool = False, **kwargs: Any):
+		super().log_summary({
+			'Output/num_chars': len(self.data.chars),
+		}, *args, rstack=rstack, flush=flush, **kwargs)
+
 	def status_str(self) -> str:
 		return f"{len(self.data.chars)} chars"
 
