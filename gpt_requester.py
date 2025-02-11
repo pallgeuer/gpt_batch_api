@@ -200,6 +200,14 @@ class RequestMetrics:
 	true_cost: float = 0.0                                                                                       # Total true cost associated with completed requests
 
 	@property
+	def max_output_tokens_avg(self) -> float:
+		return 0.0 if self.num_requests == 0 else self.max_output_tokens / self.num_requests
+
+	@property
+	def output_tokens_avg(self) -> float:
+		return 0.0 if self.num_requests == 0 else self.usage.get('completion_tokens', 0) / self.num_requests
+
+	@property
 	def completion_ratio(self) -> float:
 		# Returns the true output tokens completion ratio
 		return 0.0 if self.max_output_tokens == 0 else self.usage.get('completion_tokens', 0) / self.max_output_tokens
@@ -386,7 +394,9 @@ class State:
 			'Metrics/num_fingerprints': len(self.metrics.all.total.system_fingerprints),
 			**usage,
 			'Metrics/completion_ratio': self.metrics.all.total.completion_ratio,
-			'Metrics/max_completion_tokens': self.metrics.all.total.max_seen_output_tokens,
+			'Metrics/max_completion_tokens_avg': self.metrics.all.total.max_output_tokens_avg,
+			'Metrics/num_completion_tokens_avg': self.metrics.all.total.output_tokens_avg,
+			'Metrics/longest_completion_tokens': self.metrics.all.total.max_seen_output_tokens,
 			'Metrics/cost': self.metrics.all.total.true_cost,
 			'Batch/consec_pass_failures': self.num_pass_failures,
 		}
@@ -1950,6 +1960,7 @@ class GPTRequester:
 					print_verbose(req_id_=info.req_id, req_info_=info.req_info, payload_=info.req_payload, resp_info_=info.resp_info, warn_infos_=info.warn_infos, err_info_=info.err_info)
 
 				self.update_result_stats(result=result, batch_id=batch.id, direct_mode=True)
+				self.log_result_summary(result=result, rstack=rstack)
 
 				rstack.callback(revert_state, max_direct_batch_id=self.S.max_direct_batch_id, direct_history=self.S.direct_history.copy(), max_request_id=self.S.max_request_id)
 				self.S.max_direct_batch_id = self.max_direct_batch_id
@@ -2887,6 +2898,7 @@ class GPTRequester:
 							yield rstack, result  # Note: The task is permitted to update result.info[REQID].retry/retry_counts (both boolean) to reflect whether a request will be retried or not, and whether it counts towards the retry number (theoretically, even the payload or such could be tweaked to update the retry)
 
 							self.update_result_stats(result=result, batch_id=batch.id, direct_mode=False)
+							self.log_result_summary(result=result, rstack=rstack)
 
 							rstack.callback(revert_state, request_info=batch.request_info, batches=self.S.batches.copy(), batch_history=self.S.batch_history.copy(), num_pass_failures=self.S.num_pass_failures)
 							batch.request_info = {}
@@ -3256,9 +3268,25 @@ class GPTRequester:
 
 		return result, batch_true_tokens_cost, batch_metrics_succeeded, batch_metrics_failed
 
-	# TODO: Wandb (the entire 'metrics' part of the current state, plus how many batches are active etc) => ALL wandb parameters associated with each are updated EVERY time the task state, state, poolqueue are saved (three wandb.log statements only, essentially)
+	@classmethod
+	def log_result_summary(cls, result: BatchResult, rstack: utils.RevertStack):
+		# result = BatchResult to log a summary of
+		# rstack = Possible LogRevertStack (subclass of RevertStack) to use for logging
+		if isinstance(rstack, utils.LogRevertStack):
+			rstack.log({
+				'Result/batch_id': result.batch.id,
+				'Result/direct_batch': result.batch.remote is None or result.batch.remote.batch.id.startswith('direct_batch_'),
+				'Result/duration_hours': result.duration / 3600,
+				'Result/num_batch_errors': len(result.errors),
+				**{f'Result/{key}': value for key, value in dataclasses.asdict(result.stats).items()},  # noqa
+			})
+
 	# TODO: Sync up with commands.txt
 	# TODO: Change all British english to American English (ask ChatGPT what regexes to search for in my codebase)
 	# TODO: Inspect the entire code for problems
 	# TODO: Line count
+	# TODO: Push to private GitHub
+	# TODO: Create gpt_batch_api_demo public namespace using GitHub-cloned repo
+	# TODO: Add wandb-workspaces to requirements / move to wandb being always pip-installed
+	# TODO: Write small self-contained script to configure a view in a new workspace based on the public namespace (https://docs.wandb.ai/guides/track/workspaces/?_gl=1*1pj41rj*_gcl_au*MTcwNTA0MTIyMy4xNzMyMDIzMzM1#copy-a-workspace-saved-view-to-another-workspace)
 # EOF
