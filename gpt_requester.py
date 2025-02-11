@@ -3281,12 +3281,13 @@ class GPTRequester:
 				**{f'Result/{key}': value for key, value in dataclasses.asdict(result.stats).items()},  # noqa
 			})
 
-	# TODO: Sync up with commands.txt
-	# TODO: Change all British english to American English (ask ChatGPT what regexes to search for in my codebase)
-	# TODO: Inspect the entire code for problems
-	# TODO: Line count
 	# TODO: Push to private GitHub
+	# TODO: Totally update commands.txt / README
+	# TODO: Change all British english to American English (ask ChatGPT what regexes to search for in my codebase)
 	# TODO: Create gpt_batch_api_demo public namespace using GitHub-cloned repo
 	# TODO: Add wandb-workspaces to requirements / move to wandb being always pip-installed
 	# TODO: Write small self-contained script to configure a view in a new workspace based on the public namespace (https://docs.wandb.ai/guides/track/workspaces/?_gl=1*1pj41rj*_gcl_au*MTcwNTA0MTIyMy4xNzMyMDIzMzM1#copy-a-workspace-saved-view-to-another-workspace)
+	# TODO: Inspect the entire code for problems
+	# TODO: Line count
+	# TODO: (private?) PyPi release
 # EOF
