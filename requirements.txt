@@ -7,3 +7,4 @@ python>=3.12
 requests
 tiktoken
 wandb
+wandb-workspaces
