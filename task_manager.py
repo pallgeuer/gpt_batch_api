@@ -616,7 +616,7 @@ class TaskManager:
 		if self.wipe_failed:
 			gpt_requester_kwargs['wipe_requests'] = True
 		if gpt_requester_kwargs.get('wandb', None) is None:
-			gpt_requester_kwargs['wandb'] = True
+			gpt_requester_kwargs['wandb'] = not gpt_requester_kwargs.get('dryrun', False)
 
 		self.GR = gpt_requester.GPTRequester(working_dir=task_dir, name_prefix=name_prefix, **gpt_requester_kwargs)
 		self.task = TaskStateFile(path=os.path.join(self.GR.working_dir, f"{self.GR.name_prefix}_task.json"), reinit_meta=reinit_meta, init_meta=init_meta, dryrun=self.GR.dryrun, W=self.GR.W)
