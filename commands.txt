@@ -79,7 +79,7 @@ Run Commands
 		The generic command is 'python ...', which could for example be 'python -m gpt_batch_api.task_manager_demo --task char_codes'.
 	List all available command line arguments:
 		python ... --help
-	A) [Assuming task does not exist yet...] Initialise a new task but don't run it (task metadata is taken and fixed beyond here unless using --reinit_meta):
+	A) [Assuming task does not exist yet...] Initialize a new task but don't run it (task metadata is taken and fixed beyond here unless using --reinit_meta):
 		python ... --no_wandb "${MODELARGS[@]}" --no_run [--max_completion_tokens NUM] [--completion_ratio RATIO] [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...
 	B) Generate a batch of 100 requests without actually executing the batch:
 		python ... --no_wandb "${MODELARGS[@]}" --max_session_requests 0 --max_batch_requests 100 --max_unpushed_batches 1
@@ -137,7 +137,7 @@ Run Commands
 	--only_process
 		Wait for and allow all pushed batches to complete and be processed without generating, commiting or pushing any new requests (i.e. no new work is generated or scheduled)
 	--reinit_meta
-		Force the task metadata to be updated (usually task metadata is only captured once when the task is created/initialised), for example to change the request model, temperature, hyperparameters for parsing, or such (you must ensure that your task implementation can deal with whatever of these parameters you are changing)
+		Force the task metadata to be updated (usually task metadata is only captured once when the task is created/initialized), for example to change the request model, temperature, hyperparameters for parsing, or such (you must ensure that your task implementation can deal with whatever of these parameters you are changing)
 	--wipe_requests
 		Wipe all ongoing requests (e.g. useful if you changed the request generation and want to reconstruct all the requests in the queue, local batches, and remote) => It is recommended to execute a separate run first with --only_process to avoid unnecessarily losing already-pushed requests and responses
 	--wipe_failed

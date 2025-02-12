@@ -57,7 +57,7 @@ class CCImageTokensConfig:
 class CCFuncTokensConfig:
 	call_none: int           # Number of extra tokens required if the call mode is 'none'
 	desc_strip_dot: int      # Maximum number of trailing dots to strip from description fields after whitespace has been stripped from both beginning and end
-	func_init: int           # Number of extra tokens required to initialise each function
+	func_init: int           # Number of extra tokens required to initialize each function
 	func_desc_pre: int       # Number of extra tokens required for descriptions that are non-empty prior to stripping whitespace
 	func_desc_post: int      # Number of extra tokens required for descriptions that are non-empty after stripping whitespace
 	func_end: int            # Number of extra tokens required at the end of all functions
@@ -100,7 +100,7 @@ class TokenEstimator:
 			log.warning(f"{msg} (WARN ONCE)")
 			self.seen_warnings.add(msg)
 
-	# Parse from a JSON payload all recognised content that counts towards input tokens and thereby estimate the input token requirements
+	# Parse from a JSON payload all recognized content that counts towards input tokens and thereby estimate the input token requirements
 	# Helpful source (accessed 28/10/2024): https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
 	def payload_input_tokens(self, payload: dict[str, Any], endpoint: str) -> InputTokensCount:
 
@@ -115,7 +115,7 @@ class TokenEstimator:
 				encoding = tiktoken.encoding_for_model(model)
 			except KeyError:
 				encoding = tiktoken.get_encoding('o200k_base')
-				self.warning(f"Assuming '{encoding.name}' encoding for unrecognised model: {model}")
+				self.warning(f"Assuming '{encoding.name}' encoding for unrecognized model: {model}")
 
 			core_cfg = CCCoreTokensConfig(
 				tokens_per_response=3,
@@ -131,7 +131,7 @@ class TokenEstimator:
 				core_cfg.tokens_per_name = 4
 				core_cfg.tokens_last_text_unended = 1
 			else:
-				self.warning(f"Assuming default chat completions core tokens configuration for unrecognised model: {model}")
+				self.warning(f"Assuming default chat completions core tokens configuration for unrecognized model: {model}")
 			special_end_tokens = (encoding.encode(' ')[0], encoding.encode('.')[0])
 
 			image_cfg = CCImageTokensConfig(
@@ -221,7 +221,7 @@ class TokenEstimator:
 									type_tokens['text'] += text_tokens
 								elif content_type == 'image_url':
 									if not supports_image:
-										self.warning(f"Assuming default chat completions image tokens configuration for unrecognised image model: {model}")
+										self.warning(f"Assuming default chat completions image tokens configuration for unrecognized image model: {model}")
 									image_spec = content_item['image_url']
 									image_tokens = self.cc_image_input_tokens(
 										url=image_spec['url'],
@@ -231,7 +231,7 @@ class TokenEstimator:
 									msg_tokens[role] += image_tokens
 									type_tokens['image'] += image_tokens
 								else:
-									self.warning(f"Ignoring input tokens corresponding to unrecognised content type: {content_type}")
+									self.warning(f"Ignoring input tokens corresponding to unrecognized content type: {content_type}")
 								last_content_type = content_type
 							if content_type == 'text' and content_text and content_text[-1] not in string.whitespace and content_text[-1] not in string.punctuation:
 								msg_tokens[role] += core_cfg.tokens_last_text_unended
@@ -257,7 +257,7 @@ class TokenEstimator:
 			payload_tools: Optional[Sequence[dict[str, Any]]] = payload.get('tools', None)
 			if payload_tools:
 				if not supports_tools:
-					self.warning(f"Assuming default chat completions function tokens configuration for unrecognised tool model: {model}")
+					self.warning(f"Assuming default chat completions function tokens configuration for unrecognized tool model: {model}")
 				type_tokens['tools'] += self.cc_tools_input_tokens(
 					encoding=encoding,
 					tools=payload_tools,
@@ -268,7 +268,7 @@ class TokenEstimator:
 			payload_functions: Optional[Sequence[dict[str, Any]]] = payload.get('functions', None)
 			if payload_functions:
 				if not supports_tools:
-					self.warning(f"Assuming default chat completions function tokens configuration for unrecognised function model: {model}")
+					self.warning(f"Assuming default chat completions function tokens configuration for unrecognized function model: {model}")
 				type_tokens['functions'] += self.cc_functions_input_tokens(
 					encoding=encoding,
 					functions=payload_functions,
@@ -277,7 +277,7 @@ class TokenEstimator:
 				)
 
 		else:
-			raise ValueError(f"Cannot estimate input tokens for unrecognised endpoint: {endpoint}")
+			raise ValueError(f"Cannot estimate input tokens for unrecognized endpoint: {endpoint}")
 
 		msg_system = msg_tokens['system']
 		msg_user = msg_tokens['user']
@@ -374,10 +374,10 @@ class TokenEstimator:
 			return 0
 		elif response_format_type == 'json_schema':
 			if not supports_json_schema:
-				self.warning(f"Assuming default chat completions function tokens configuration for unrecognised JSON schema response format model: {model}")
+				self.warning(f"Assuming default chat completions function tokens configuration for unrecognized JSON schema response format model: {model}")
 			return self.cc_functions_input_tokens(encoding=encoding, functions=(response_format['json_schema'],), function_call=None, func_cfg=func_cfg, key='schema')
 		else:
-			self.warning(f"Ignoring input tokens corresponding to unrecognised response format type: {response_format_type}")
+			self.warning(f"Ignoring input tokens corresponding to unrecognized response format type: {response_format_type}")
 			return 0
 
 	# Chat completions: Estimate the number of input tokens required for tool use
@@ -389,7 +389,7 @@ class TokenEstimator:
 			if tool_type == 'function':
 				functions.append(tool['function'])
 			else:
-				self.warning(f"Ignoring input tokens corresponding to unrecognised tool type: {tool_type}")
+				self.warning(f"Ignoring input tokens corresponding to unrecognized tool type: {tool_type}")
 
 		if isinstance(tool_choice, str) or tool_choice is None:
 			function_call = tool_choice
@@ -398,7 +398,7 @@ class TokenEstimator:
 			if tool_type == 'function':
 				function_call = tool_choice['function']
 			else:
-				self.warning(f"Ignoring input tokens corresponding to unrecognised tool choice type: {tool_type}")
+				self.warning(f"Ignoring input tokens corresponding to unrecognized tool choice type: {tool_type}")
 				function_call = None
 
 		return self.cc_functions_input_tokens(encoding=encoding, functions=functions, function_call=function_call, func_cfg=func_cfg)
@@ -431,7 +431,7 @@ class TokenEstimator:
 			if function_params:
 				function_params_type: Optional[str] = function_params.get('type', None)
 				if function_params_type != 'object':
-					self.warning(f"Ignoring input tokens corresponding to functions due to unrecognised root function parameters type: {function_params_type}")
+					self.warning(f"Ignoring input tokens corresponding to functions due to unrecognized root function parameters type: {function_params_type}")
 				else:
 					function_title: Optional[str] = function_params.get('title', None)
 					function_defs: Optional[dict[str, Any]] = function_params.get('$defs', None)
@@ -523,7 +523,7 @@ class TokenEstimator:
 			max_output_tokens = max(payload.get('max_completion_tokens', payload.get('max_tokens', 2048)), 0)
 			output_tokens = round(max_output_tokens * self.assumed_completion_ratio)
 		else:
-			raise ValueError(f"Cannot estimate output tokens for unrecognised endpoint: {endpoint}")
+			raise ValueError(f"Cannot estimate output tokens for unrecognized endpoint: {endpoint}")
 		return output_tokens, max_output_tokens
 
 # Token coster class

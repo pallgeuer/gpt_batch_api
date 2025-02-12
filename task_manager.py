@@ -73,8 +73,8 @@ class TaskStateFile:
 
 	def __init__(self, path: str, reinit_meta: bool, init_meta: Optional[dict[str, Any]], dryrun: bool, W: Optional[utils.WandbRun] = None):
 		# path = Path to the JSON task state file to load/save/manage (nominally *.json extension)
-		# reinit_meta = Whether to force a reinitialisation of the meta field even if the task state file already exists
-		# init_meta = Value to initialise the meta field with if the task state file is newly created (deep copy on create)
+		# reinit_meta = Whether to force a reinitialization of the meta field even if the task state file already exists
+		# init_meta = Value to initialize the meta field with if the task state file is newly created (deep copy on create)
 		# dryrun = Whether to prevent any saving of state (dry run mode)
 		# W = Wandb run holder
 		self.path = os.path.abspath(path)
@@ -165,7 +165,7 @@ class TaskOutputFile:
 		self.data = None
 
 	def __enter__(self) -> Self:
-		# Load/create the task output file and set/initialise self.data (must be mutable or None)
+		# Load/create the task output file and set/initialize self.data (must be mutable or None)
 		raise NotImplementedError
 
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -178,7 +178,7 @@ class TaskOutputFile:
 
 	def create(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible creation of the task output file
-		# Initialise the task output file on disk and in memory
+		# Initialize the task output file on disk and in memory
 		raise NotImplementedError
 
 	def reset(self, rstack: utils.RevertStack):
@@ -593,7 +593,7 @@ class TaskManager:
 	#  - Given just the task state, it should be possible to reduce the record of committed samples to just those for which a response was received so far
 	#  - Given just the task state, it should be possible to reduce the record of committed/responded samples to just those for which a succeeded response was received so far (failed samples are wiped, the task output needs to be able to be adjusted accordingly if it is potentially affected even though no succeeded samples are touched)
 	#
-	# The init_meta argument to __init__ specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta).
+	# The init_meta argument to __init__ specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behavior can be manually overridden using reinit_meta).
 
 	# Construct a task manager to make use of the OpenAI Batch API to process samples
 	def __init__(
@@ -601,12 +601,12 @@ class TaskManager:
 		task_dir: str,                                                          # Path of the task working directory to use (will be used for automatically managed lock, state, requests, batch, task state, and output files)
 		name_prefix: str,                                                       # Name prefix to use for all files created in the task working directory (e.g. 'my_task')
 		output_factory: Callable[[str, bool, utils.WandbRun], TaskOutputFile],  # Factory callable to create the required task output file instance (str argument is the required output file path base, e.g. /path/to/NAME_PREFIX_output, bool argument is whether dry run mode is active, utils.WandbRun is a wandb run holder)
-		init_meta: Optional[dict[str, Any]],                                    # Value to initialise the task state meta field with if the task state file is newly created (deep copy on create)
+		init_meta: Optional[dict[str, Any]],                                    # Value to initialize the task state meta field with if the task state file is newly created (deep copy on create)
 		*,                                                                      # Keyword arguments only beyond here
 
 		run: bool = True,                                                       # Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)
 		wipe_failed: bool = False,                                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with only_process=True prior to wiping)
-		reinit_meta: bool = False,                                              # CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)
+		reinit_meta: bool = False,                                              # CAUTION: Whether to force a reinitialization of the task state meta field even if the task state file already exists (normally the task state meta field is only initialized once at the beginning of a task and remains fixed after that across all future runs)
 
 		**gpt_requester_kwargs,                                                 # Keyword arguments to be passed on to the internal GPTRequester instance
 	):
@@ -644,7 +644,7 @@ class TaskManager:
 
 		add_argument(name='run', help="Whether to execute steps when the task manager is run, or just show the status and return (e.g. --no_run is useful in combination with --wipe_*)")
 		add_argument(name='wipe_failed', help="CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with --only_process prior to wiping)")
-		add_argument(name='reinit_meta', help="CAUTION: Whether to force a reinitialisation of the task state meta field even if the task state file already exists (normally the task state meta field is only initialised once at the beginning of a task and remains fixed after that across all future runs)")
+		add_argument(name='reinit_meta', help="CAUTION: Whether to force a reinitialization of the task state meta field even if the task state file already exists (normally the task state meta field is only initialized once at the beginning of a task and remains fixed after that across all future runs)")
 
 		return group
 

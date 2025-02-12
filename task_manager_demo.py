@@ -68,7 +68,7 @@ class CharCodesTask(task_manager.TaskManager):
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
 			output_factory=CharCodesFile.output_factory(),
-			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
+			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behavior can be manually overridden using reinit_meta)
 				model=utils.resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
 				max_completion_tokens=utils.resolve(cfg.max_completion_tokens, default=200),
 				completion_ratio=utils.resolve(cfg.completion_ratio, default=0.35),
@@ -274,7 +274,7 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 			task_dir=task_dir,
 			name_prefix=cfg.task_prefix,
 			output_factory=UtterancesFile.output_factory(),
-			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
+			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behavior can be manually overridden using reinit_meta)
 				model=utils.resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
 				max_completion_tokens=utils.resolve(cfg.max_completion_tokens, default=32),
 				completion_ratio=utils.resolve(cfg.completion_ratio, default=0.35),
@@ -526,7 +526,7 @@ def main():
 		elif args.task is None:
 			raise ValueError("Please specify which task to demo using --task")
 		else:
-			raise ValueError(f"Unrecognised task: {args.task}")
+			raise ValueError(f"Unrecognized task: {args.task}")
 
 # Run main function
 if __name__ == "__main__":

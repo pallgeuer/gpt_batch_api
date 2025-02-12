@@ -1212,15 +1212,15 @@ class GPTRequester:
 				'Metrics/processed_failed_batches': self.session_processed_failed_batches,
 			})
 
-	# Initialise wandb with a particular configuration
+	# Initialize wandb with a particular configuration
 	@classmethod
 	def wandb_init(cls, config: Union[dict[str, Any], utils.SupportsVars], **wandb_kwargs) -> ContextManager[Optional[wandb.sdk.wandb_run.Run]]:
 		# config = Configuration parameters to use for wandb (_* parameters are filtered out, wandb* parameters are filtered out and used for the call to wandb.init(), config can be a dict, argparse.Namespace, flat omegaconf.DictConfig, etc..)
 		# wandb_kwargs = Miscellaneous arguments or no-questions-asked argument overrides for the call to wandb.init()
-		# Returns a context manager that can be used to ensure that any newly initialised wandb run eventually receives a call to finish()
+		# Returns a context manager that can be used to ensure that any newly initialized wandb run eventually receives a call to finish()
 		# If the config contains a parameter called 'wandb' that is False or None, then no wandb.init() call is made and a null context manager is returned that just returns None
-		# Otherwise if a wandb run has previously been initialised in this process, then no wandb.init() call is made and a null context manager is returned that just returns that existing wandb run (i.e. doesn't trigger a call to finish() on exiting, as that's some other code's responsibility)
-		# Otherwise, a wandb.init() call is made based on the passed config and wandb_kwargs, and the newly initialised run is returned (Run's are inherently context managers that return themselves on entering, and ensure a call to finish() on exiting)
+		# Otherwise if a wandb run has previously been initialized in this process, then no wandb.init() call is made and a null context manager is returned that just returns that existing wandb run (i.e. doesn't trigger a call to finish() on exiting, as that's some other code's responsibility)
+		# Otherwise, a wandb.init() call is made based on the passed config and wandb_kwargs, and the newly initialized run is returned (Run's are inherently context managers that return themselves on entering, and ensure a call to finish() on exiting)
 
 		config_type = type(config)
 		if isinstance(config, dict):
@@ -1265,9 +1265,9 @@ class GPTRequester:
 	def configure_wandb(self, *init_kwargs_objs: Union[Any, tuple[Any, dict[str, Any]]], **wandb_kwargs) -> ContextManager[None]:
 		# init_kwargs_objs = Objects to extract configuration parameters from (must be instances of classes that use @utils.init_kwargs), possibly packed into a tuple along with a dict of custom extra wandb configuration parameters
 		# wandb_kwargs = Extra wandb keyword arguments or argument overrides to pass to self.wandb_init()
-		# Returns a context manager that ensures wandb is initialised if required, and that updates self.W with any newly initialised wandb run
+		# Returns a context manager that ensures wandb is initialized if required, and that updates self.W with any newly initialized wandb run
 		# Configuration parameters are extracted from each object obj based on obj.__kwargs__ for the keys, and getattr(obj, key) for the values (extra parameters or parameter value overrides can be specified using a dict of custom extra wandb configuration parameters)
-		# The call to this method does not do anything if a previous call to this method was already made and successfully initialised wandb, or if dry run is active
+		# The call to this method does not do anything if a previous call to this method was already made and successfully initialized wandb, or if dry run is active
 
 		if self.W or self.dryrun:
 			yield
@@ -1563,7 +1563,7 @@ class GPTRequester:
 	# Generator: Make a number of sequential synchronous requests using the direct API (responses may return as multiple BatchResult instances if there are many requests)
 	def direct_requests(self, reqs: Union[Iterable[Union[GPTRequest, GPTRequestItem, CachedGPTRequest]], GPTRequest, GPTRequestItem, CachedGPTRequest], yield_retry_reqs: bool) -> Iterable[tuple[Optional[utils.RevertStack], Optional[BatchResult], Optional[bool], Optional[list[CachedGPTRequest]]]]:
 		# reqs = The requests to make using the direct API (raw, itemized and/or cached requests can be provided)
-		# yield_retry_reqs = Whether to yield tuples (for complete transparency of operations) containing any retry requests that are generated and will be internally executed (in addition to, and generally alternating with, the tuples containing the virtual batch results for which the retry behaviour can still be modified)
+		# yield_retry_reqs = Whether to yield tuples (for complete transparency of operations) containing any retry requests that are generated and will be internally executed (in addition to, and generally alternating with, the tuples containing the virtual batch results for which the retry behavior can still be modified)
 		# CAUTION: No raw GPTRequest instances should be provided that have already been edited by the auto-parse functionality at some point, and need to be paired with their existing parse_info (e.g. a GPTRequest extracted or derived from a GPTRequestItem or CachedGPTRequest) => In that case, use self.create_request_item(req=..., parse_info=...) instead and pass the resulting GPTRequestItem
 		# The provided requests are auto-split into virtual batches based on direct request number/token limits and such
 		# Either processes and returns results for all requests (plus associated retries) one virtual batch at a time, or eventually yields limited=True and discontinues (after a possible trailing retry requests yield), or raises an exception if an unresolvable issue occurs
@@ -1574,7 +1574,7 @@ class GPTRequester:
 		#   - A boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode is active)
 		#   - A list of retry requests generated based on the results of the batch, that will be internally executed in a further virtual batch
 		# The possible combinations of yielded types are:
-		#   - tuple[utils.RevertStack, BatchResult, bool, None] => The result of a virtual batch, ready to be processed (the retry behaviour can still be modified by editing BatchResult while processing the results)
+		#   - tuple[utils.RevertStack, BatchResult, bool, None] => The result of a virtual batch, ready to be processed (the retry behavior can still be modified by editing BatchResult while processing the results)
 		#   - tuple[None, None, bool, None] => Status update whether the direct limits have been reached (generally when the bool is True but there is no BatchResult available that this update to the limited state can be yielded as part of)
 		#   - tuple[utils.RevertStack, BatchResult, None, list[CachedGPTRequest]] => If yield_retry_reqs, a tuple containing a list of retry requests that were generated from the immediately previously yielded batch result
 		# If the boolean is ever True that direct limits were reached, then no further batch results are sent (but one more set of retry requests may be sent, if some exist)
@@ -1825,7 +1825,7 @@ class GPTRequester:
 								stream_cls=openai.Stream[openai_chat.ChatCompletionChunk],
 							)
 						else:
-							raise EndpointError(f"Cannot post request to unrecognised endpoint: {self.endpoint}")
+							raise EndpointError(f"Cannot post request to unrecognized endpoint: {self.endpoint}")
 						num_api_calls += 1
 
 					except openai.APIError as e:
@@ -2545,7 +2545,7 @@ class GPTRequester:
 		#   - The results for one direct/virtual batch at a time (unpushable batches are auto-split into potentially smaller direct batch(es))
 		#   - A boolean whether direct limits were reached in the process (meaning that at least one request could not be fully completed due to them, or only-process mode is active)
 		# The possible combinations of yielded types are:
-		#   - tuple[utils.RevertStack, BatchResult, bool] => The result of a virtual batch, ready to be processed (the retry behaviour can still be modified by editing BatchResult while processing the results)
+		#   - tuple[utils.RevertStack, BatchResult, bool] => The result of a virtual batch, ready to be processed (the retry behavior can still be modified by editing BatchResult while processing the results)
 		#   - tuple[None, None, bool] => Status update whether the direct limits have been reached (generally when the bool is True but there is no BatchResult available that this update to the limited state can be yielded as part of)
 		# A single yield with no batch results and limited=True is expected if only-process mode is active
 		# Note: The generator must have its close() method called even if an exception occurs => This is automatically handled by the Python interpreter when using a for-loop to iterate the generator, but is not guaranteed if manually using next() and such
@@ -2785,7 +2785,7 @@ class GPTRequester:
 											resp_payload, err_info, resp_model, resp_system_fingerprint, resp_usage = self.process_response_payload(req_info=req_info, req_payload=req_payload, resp_payload=resp_payload, warn_infos=warn_infos, request_id=request_output.get('id', None))
 
 								else:
-									raise EndpointError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
+									raise EndpointError(f"Cannot process response for unrecognized endpoint: {self.endpoint}")
 
 								if resp_payload is not None:
 									assert resp_model is not None and resp_system_fingerprint is not None and resp_usage is not None
@@ -3043,11 +3043,11 @@ class GPTRequester:
 				err_info = ErrorInfo(fatal=False, type='MessageChoices', subtype='NoneValid', msg="No valid response message choices")
 
 		else:
-			raise EndpointError(f"Cannot process response for unrecognised endpoint: {self.endpoint}")
+			raise EndpointError(f"Cannot process response for unrecognized endpoint: {self.endpoint}")
 
 		return resp_payload, err_info, resp_model, resp_system_fingerprint, resp_usage
 
-	# Update a ResultInfo to reflect default error-dependent retry behaviour (e.g. useful if info.err_info was modified)
+	# Update a ResultInfo to reflect default error-dependent retry behavior (e.g. useful if info.err_info was modified)
 	def update_result_retry(self, info: ResultInfo, retry_counts: Optional[bool] = None) -> ResultInfo:
 		# info = The ResultInfo to update
 		# retry_counts = Optionally override/set whether a possible retry would count towards the maximum number of allowed retries (None = Leave info.retry_counts untouched)
