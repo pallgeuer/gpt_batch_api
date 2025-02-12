@@ -3280,9 +3280,4 @@ class GPTRequester:
 				'Result/num_batch_errors': len(result.errors),
 				**{f'Result/{key}': value for key, value in dataclasses.asdict(result.stats).items()},  # noqa
 			})
-
-	# TODO: Change all British english to American English (ask ChatGPT what regexes to search for in my codebase)
-	# TODO: Inspect the entire code for problems
-	# TODO: Line count
-	# TODO: (private?) PyPi release
 # EOF
