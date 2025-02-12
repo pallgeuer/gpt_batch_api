@@ -3281,8 +3281,6 @@ class GPTRequester:
 				**{f'Result/{key}': value for key, value in dataclasses.asdict(result.stats).items()},  # noqa
 			})
 
-	# TODO: Start the run with wandb, run the wandb view script, click three black horizontal lines icon at top left and switch to GPT Batch API saved view, click Copy to my workspace at top right
-	# TODO: Totally update commands.txt / README
 	# TODO: Change all British english to American English (ask ChatGPT what regexes to search for in my codebase)
 	# TODO: Inspect the entire code for problems
 	# TODO: Line count

@@ -20,7 +20,27 @@ Run Commands
 	export OPENAI_API_KEY=sk-...  # <-- NOTE: Replace with actual OpenAI API key
 	export WANDB_API_KEY=...  # <-- NOTE: Replace with actual Wandb API key
 
-- General configuration:
+- Wandb logging:
+	Wandb is by default used by the TaskManager/GPTRequester classes, unless explicitly disabled using wandb=False (--no_wandb).
+	You can control the wandb project name using wand_project='NAME' (--wandb_project NAME, otherwise default is 'gpt_batch_api'), and if need be the wandb entity using wandb_entity='NAME' (--wandb_entity NAME).
+	If you wish to resume and continue a previous wandb run (essentially append to it), then find out its run ID (e.g. a1dr4wwa) and use something like wandb_run_id='a1dr4wwa' (--wandb_run_id a1dr4wwa).
+	In order to get the most out of the wandb logging, it is recommended to use the preconfigured gpt_batch_api saved view for the project being logged to (to show and organize the most useful stuff to see/monitor):
+		Refer to the following URL to see how the saved view will look like:
+			https://wandb.ai/pallgeuer/gpt_batch_api_demo?nw=u38mn3ltgfn
+		Ensure your target wandb project exists and has at least one run in it => Easiest is just to start your first desired run
+		Copy the preconfigured gpt_batch_api saved view to the project workspace (assuming the project is ENTITY/PROJECT):
+			python -m gpt_batch_api.wandb_configure_view --dst_entity ENTITY --dst_project PROJECT
+		In most cases if the default PROJECT name of 'gpt_batch_api' is being used then you can just do:
+			python -m gpt_batch_api.wandb_configure_view --dst_entity ENTITY
+		Refer to the help for a more general understanding of what the script can do:
+			python -m gpt_batch_api.wandb_configure_view --help
+		Open your target wandb project in the web browser:
+			https://wandb.ai/ENTITY/PROJECT
+		Click on the icon with the three horizontal lines at the top-left of the workspace and switch to the saved view called 'GPT Batch API' (should exist if the wandb_configure_view script worked correctly)
+		Click the 'Copy to my workspace' button at the top-right of the workspace => This updates your personal workspace in the project to look like the desired preconfigured view
+	You can search the code for the name of logged variables (possibly including the prefix like 'Batch/' for example) to get an idea of what the variable represents (e.g. search for 'num_final_none').
+
+- General configuration (update to suit):
 	MODELARGS=(--model gpt-4o-mini-2024-07-18 --cost_input_direct_mtoken 0.150 --cost_input_cached_mtoken 0.075 --cost_input_batch_mtoken 0.075 --cost_output_direct_mtoken 0.600 --cost_output_batch_mtoken 0.300)
 
 - Run the available pytests:
@@ -43,9 +63,12 @@ Run Commands
 		python -m gpt_batch_api.task_manager_demo --task utterance_emotion "${MODELARGS[@]}"
 	Args:
 		Refer to --help
+		If you wish not to use wandb for logging and monitoring, use:
+			--no_wandb
 	Output:
 		gpt_batch_api/tasks/char_codes_*
 		gpt_batch_api/tasks/utterance_emotion_*
+		Associated wandb run in web browser (useful for monitoring progress)
 	Verify:
 		Verify that the final data output file(s) contain reasonable and complete data (e.g. gpt_batch_api/tasks/char_codes_output*, gpt_batch_api/tasks/utterance_emotion_output*)
 
@@ -57,32 +80,44 @@ Run Commands
 	List all available command line arguments:
 		python ... --help
 	A) [Assuming task does not exist yet...] Initialise a new task but don't run it (task metadata is taken and fixed beyond here unless using --reinit_meta):
-		python ... "${MODELARGS[@]}" --no_run [--max_completion_tokens NUM] [--completion_ratio RATIO] [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...
+		python ... --no_wandb "${MODELARGS[@]}" --no_run [--max_completion_tokens NUM] [--completion_ratio RATIO] [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...
 	B) Generate a batch of 100 requests without actually executing the batch:
-		python ... "${MODELARGS[@]}" --max_session_requests 0 --max_batch_requests 100 --max_unpushed_batches 1
+		python ... --no_wandb "${MODELARGS[@]}" --max_session_requests 0 --max_batch_requests 100 --max_unpushed_batches 1
 	C) Show 10 verbose examples of generated requests without actually executing them (requires that some batches have already been generated and saved to disk):
-		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --max_batch_requests 100 --max_unpushed_batches 1 --dryrun
+		python ... --no_wandb "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --max_batch_requests 100 --max_unpushed_batches 1 --dryrun
 	D) Show 10 verbose examples of generated requests and responses using the direct API:
-		python ... "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --max_batch_requests 100 --max_unpushed_batches 1
+		python ... --no_wandb "${MODELARGS[@]}" --force_direct --direct_verbose always --max_session_requests 10 --max_batch_requests 100 --max_unpushed_batches 1
 	E) Execute 100 requests using the direct API, and show those examples verbosely that had a warning or error:
-		python ... "${MODELARGS[@]}" --force_direct --direct_verbose warn --max_session_requests 100 --max_batch_requests 100 --max_unpushed_batches 1
+		python ... --no_wandb "${MODELARGS[@]}" --force_direct --direct_verbose warn --max_session_requests 100 --max_batch_requests 100 --max_unpushed_batches 1
 	F) Execute 250 requests using the batch API:
-		python ... "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 400 --max_unpushed_batches 1
+		python ... --no_wandb "${MODELARGS[@]}" --max_batch_requests 250 --max_session_requests 400 --max_unpushed_batches 1
 		# <-- Search the command outputs for 'max # completion tokens' (overall metrics) and 'max # tokens' (per batch), and decide on suitable values for request max_completion_tokens
 		# <-- Search the command outputs for 'completion ratio' (overall metrics and per batch), and decide on a suitable value for completion_ratio (keeping in mind/factoring in whatever change you just made to max_completion_tokens of course!)
-		python ... "${MODELARGS[@]}" --no_run --reinit_meta --max_completion_tokens NUM --completion_ratio RATIO [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...  # <-- Other than updating max_completion_tokens and completion_ratio, make sure to be consistent with A)
+		python ... --no_wandb "${MODELARGS[@]}" --no_run --reinit_meta --max_completion_tokens NUM --completion_ratio RATIO [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...  # <-- CAUTION: Other than updating max_completion_tokens and completion_ratio, make sure to be consistent with A) as --reinit_meta always updates ALL task meta variables
 	G) Execute 1 USD worth of fresh (thus wipe ongoing) requests using the batch API (or 1 of whatever currency/unit MODELARGS uses):
-		python ... "${MODELARGS[@]}" --only_process  # <-- If there are any unfinished batches busy on the remote (we don't want to unnecessarily wipe them)
-		python ... --wipe_requests "${MODELARGS[@]}" --max_batch_cost 1.00 --max_session_cost 1.00 --max_unpushed_batches 1
+		python ... --no_wandb "${MODELARGS[@]}" --only_process  # <-- If there are any unfinished batches busy on the remote (we don't want to unnecessarily wipe them)
+		python ... --no_wandb --wipe_requests "${MODELARGS[@]}" --max_batch_cost 1.00 --max_session_cost 1.00 --max_unpushed_batches 1
 		# <-- Refine completion ratio value if required (search the command outputs for the 'completion ratio' of any newly executed batches, and reinit meta as in F)
 	H) Reset the entire task to scratch and throw away any results obtained so far:
-		python ... --wipe_task "${MODELARGS[@]}" --no_run
-	I) Run the task normally to completion, respecting a batch queue limit of 5,000,000 tokens (= 5000 ktokens) at a time (refer to the OpenAI tier rate limits):
-		python ... "${MODELARGS[@]}" --max_remote_ktokens 5000  # <-- This command can be interrupted with Ctrl+C and restarted at any time, and it will safely and robustly just pick up where it left off without losing anything (assuming the custom task has been correctly and revertibly implemented like described in the documentation, and demonstrated in task_manager_demo.py)
+		python ... --no_wandb --wipe_task "${MODELARGS[@]}" --no_run
+	Run the task normally to completion (preferably enable wandb by omitting any --no_wandb, change MY_BATCH_TASK to a real name), respecting a batch queue limit of 5,000,000 tokens (= 5000 ktokens) at a time (refer to the OpenAI tier rate limits):
+		python ... --wandb_name MY_BATCH_TASK "${MODELARGS[@]}" --max_remote_ktokens 5000
+		# <-- The above command can be interrupted with Ctrl+C and restarted at any time, and it will safely and robustly just pick up where it left off without losing anything (assuming the custom task has been correctly and revertibly implemented like described in the documentation, and demonstrated in task_manager_demo.py)
+	Give failed samples another chance with up to 4 more retries = 5 more attempts allowed, resuming the previous wandb run (given by RUN_ID) in terms of logging:
+		python ... --wandb_name MY_BATCH_TASK --wandb_run_id RUN_ID --wipe_failed "${MODELARGS[@]}" --max_remote_ktokens 5000 --max_retries 4
+		# <-- You could also try the command above with for example an extra '--reinit_meta --temperature 0.9 ...' to change the temperature => CAUTION: Just make sure though to remain consistent with A) and F) in all other meta variables, as --reinit_meta always updates ALL task meta variables
 	Get the current status of a task without actually executing task steps:
 		python ... "${MODELARGS[@]}" --max_remote_ktokens 5000 --no_run
 
 - Commonly useful arguments for debugging, applying code changes, recovering from errors/batch failures, and such:
+	--no_wandb
+		Disable wandb logging
+	--wandb_project NAME
+		Set the desired target wandb project for logging
+	--wandb_name NAME
+		Set a custom fixed name for the target wandb logging run
+	--wandb_run_id RUN_ID
+		Resume/append to a wandb run (specified by the desired run ID), or create it if it does not exist (auto-generated run IDs are typically lowercase alphanumeric strings of length 8)
 	--dryrun
 		Prevent any API calls or changes to saved disk state, and just show what would be done based on the current task state
 	--force_direct --direct_verbose always --max_session_requests 20
@@ -109,5 +144,3 @@ Run Commands
 		Wipe all ongoing requests and failed samples, allowing them to be attempted again (with the full number of retries available again) => It is recommended to execute a separate run first with --only_process to avoid unnecessarily losing already-pushed requests and responses
 	--wipe_task
 		Wipe entire task and start completely from scratch (can be combined with --no_run in order to not actually run the task after wiping)
-
-TODO: UPDATE everything based on wandb feature
