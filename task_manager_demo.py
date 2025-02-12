@@ -3,9 +3,7 @@
 # Imports
 from __future__ import annotations
 import os
-import sys
 import enum
-import logging
 import argparse
 import functools
 import dataclasses
@@ -71,11 +69,11 @@ class CharCodesTask(task_manager.TaskManager):
 			name_prefix=cfg.task_prefix,
 			output_factory=CharCodesFile.output_factory(),
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
-				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
-				max_completion_tokens=resolve(cfg.max_completion_tokens, default=200),
-				completion_ratio=resolve(cfg.completion_ratio, default=0.35),
-				temperature=resolve(cfg.temperature, default=0.2),
-				top_p=resolve(cfg.top_p, default=0.6),
+				model=utils.resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
+				max_completion_tokens=utils.resolve(cfg.max_completion_tokens, default=200),
+				completion_ratio=utils.resolve(cfg.completion_ratio, default=0.35),
+				temperature=utils.resolve(cfg.temperature, default=0.2),
+				top_p=utils.resolve(cfg.top_p, default=0.6),
 			),
 			**utils.get_init_kwargs(cls=task_manager.TaskManager, cfg=cfg),
 			**utils.get_init_kwargs(cls=gpt_requester.GPTRequester, cfg=cfg, endpoint=cfg.chat_endpoint, assumed_completion_ratio=None)
@@ -277,14 +275,14 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 			name_prefix=cfg.task_prefix,
 			output_factory=UtterancesFile.output_factory(),
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behaviour can be manually overridden using reinit_meta)
-				model=resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
-				max_completion_tokens=resolve(cfg.max_completion_tokens, default=32),
-				completion_ratio=resolve(cfg.completion_ratio, default=0.35),
-				temperature=resolve(cfg.temperature, default=0.2),
-				top_p=resolve(cfg.top_p, default=0.6),
-				opinions_min=resolve(cfg.opinions_min, default=3),
-				opinions_max=resolve(cfg.opinions_max, default=5),
-				confidence=resolve(cfg.confidence, default=0.78),
+				model=utils.resolve(cfg.model, default='gpt-4o-mini-2024-07-18'),
+				max_completion_tokens=utils.resolve(cfg.max_completion_tokens, default=32),
+				completion_ratio=utils.resolve(cfg.completion_ratio, default=0.35),
+				temperature=utils.resolve(cfg.temperature, default=0.2),
+				top_p=utils.resolve(cfg.top_p, default=0.6),
+				opinions_min=utils.resolve(cfg.opinions_min, default=3),
+				opinions_max=utils.resolve(cfg.opinions_max, default=5),
+				confidence=utils.resolve(cfg.confidence, default=0.78),
 			),
 			**utils.get_init_kwargs(cls=task_manager.TaskManager, cfg=cfg),
 			**utils.get_init_kwargs(cls=gpt_requester.GPTRequester, cfg=cfg, endpoint=cfg.chat_endpoint, assumed_completion_ratio=None)
@@ -488,41 +486,8 @@ def demo_utterance_emotion(cfg: utils.Config, task_dir: str):
 	).run()
 
 #
-# Miscellaneous
-#
-
-# Resolve a default non-None value
-def resolve(value: Any, default: Any) -> Any:
-	return value if value is not None else default
-
-#
 # Run
 #
-
-# Custom color formatter for the logger
-class ColorFormatter(logging.Formatter):
-
-	FMT = "[%(levelname)s][%(asctime)s] %(message)s"
-	DATEFMT = "%d-%b-%y %H:%M:%S"
-	LEVEL_REMAP = {
-		'DEBUG': '\x1b[38;21mDEBUG\x1b[0m',
-		'INFO': '\x1b[38;5;39m INFO\x1b[0m',
-		'WARNING': '\x1b[38;5;226m WARN\x1b[0m',
-		'ERROR': '\x1b[38;5;196mERROR\x1b[0m',
-		'CRITICAL': '\x1b[31;1mFATAL\x1b[0m',
-	}
-
-	def format(self, record: logging.LogRecord) -> str:
-		record.levelname = self.LEVEL_REMAP.get(record.levelname, record.levelname)
-		return super().format(record)
-
-# Configure logging
-def configure_logging() -> logging.Logger:
-	stream_handler = logging.StreamHandler(sys.stdout)
-	stream_handler.set_name('console')
-	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
-	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
-	return logging.getLogger()
 
 # Main function
 def main():
@@ -565,6 +530,6 @@ def main():
 
 # Run main function
 if __name__ == "__main__":
-	log = configure_logging()
+	log = utils.configure_logging()
 	main()
 # EOF

@@ -2,6 +2,7 @@
 
 # Imports
 import os
+import sys
 import copy
 import enum
 import json
@@ -41,6 +42,31 @@ NONE = object()  # Sentinel object that can be used to determine whether a (poss
 #
 # Logging/Printing
 #
+
+# Custom color formatter for the logger
+class ColorFormatter(logging.Formatter):
+
+	FMT = "[%(levelname)s][%(asctime)s] %(message)s"
+	DATEFMT = "%d-%b-%y %H:%M:%S"
+	LEVEL_REMAP = {
+		'DEBUG': '\x1b[38;21mDEBUG\x1b[0m',
+		'INFO': '\x1b[38;5;39m INFO\x1b[0m',
+		'WARNING': '\x1b[38;5;226m WARN\x1b[0m',
+		'ERROR': '\x1b[38;5;196mERROR\x1b[0m',
+		'CRITICAL': '\x1b[31;1mFATAL\x1b[0m',
+	}
+
+	def format(self, record: logging.LogRecord) -> str:
+		record.levelname = self.LEVEL_REMAP.get(record.levelname, record.levelname)
+		return super().format(record)
+
+# Configure logging
+def configure_logging() -> logging.Logger:
+	stream_handler = logging.StreamHandler(sys.stdout)
+	stream_handler.set_name('console')
+	stream_handler.setFormatter(ColorFormatter(fmt=ColorFormatter.FMT, datefmt=ColorFormatter.DATEFMT))
+	logging.basicConfig(level=logging.INFO, format=ColorFormatter.FMT, handlers=[stream_handler])
+	return logging.getLogger()
 
 # In-place printing (replace the current line and don't advance to the next line)
 def print_in_place(obj: Any):
@@ -909,4 +935,8 @@ def is_descending(iterable: Iterable[Any], *, strict: bool) -> bool:
 		return all(a > b for a, b in itertools.pairwise(iterable))
 	else:
 		return all(a >= b for a, b in itertools.pairwise(iterable))
+
+# Resolve a default non-None value
+def resolve(value: Any, default: Any) -> Any:
+	return value if value is not None else default
 # EOF
