@@ -63,6 +63,8 @@ Run Commands
 		python -m gpt_batch_api.task_manager_demo --task utterance_emotion "${MODELARGS[@]}"
 	Args:
 		Refer to --help
+		If you wish to change the directory in which files are created to store the ongoing and final state, and output data of the command (recommended if installed via pip), use:
+			--task_dir /path/to/dir
 		If you wish not to use wandb for logging and monitoring, use:
 			--no_wandb
 	Output:
@@ -110,6 +112,8 @@ Run Commands
 		python ... "${MODELARGS[@]}" --max_remote_ktokens 5000 --no_run
 
 - Commonly useful arguments for debugging, applying code changes, recovering from errors/batch failures, and such:
+	--task_dir /PATH/TO/DIR
+		Change the directory in which files are created to store the ongoing and final state, and output data of the command (recommended if installed via pip)
 	--no_wandb
 		Disable wandb logging
 	--wandb_project NAME
