@@ -12,7 +12,7 @@ The library supports `wandb` integration to allow for the graphical/remote monit
 
 ## Getting Started
 
-Environment setup instructions and additional useful run commands are provided in `commands.txt`.
+Environment setup instructions and additional useful run commands are provided in `commands.txt`. See below for a condensed quickstart guide using pip to conveniently install `gpt_batch_api`.
 
 Applications should subclass the `TaskManager` class to implement the desired batch LLM task (see demos in `task_manager_demo.py` as well as the documentation in the `TaskManager` source code). Note that _very_ complex tasks could benefit from directly interacting with the underlying `GPTRequester` class (refer to how this class is used in `TaskManager`), but this should rarely be required.
 
@@ -30,6 +30,44 @@ Applications should subclass the `TaskManager` class to implement the desired ba
 - Monitor the OpenAI API usage (costs, credits and bills): https://platform.openai.com/settings/organization/usage
 - Manually monitor/manage the stored files on the OpenAI server: https://platform.openai.com/storage
 - Manually monitor/manage the started batches on the OpenAI server: https://platform.openai.com/batches
+
+## Quickstart
+
+The `gpt_batch_api` library is available on PyPi, allowing you to quickly get started. Start by creating a virtual Python environment (e.g. `conda` or `venv`):
+```bash
+conda create -n gpt_batch_api python=3.12
+conda activate gpt_batch_api
+# OR...
+python -m venv gpt_batch_api  # <-- Must be Python 3.12+
+source gpt_batch_api/bin/activate
+```
+Then install `gpt_batch_api`:
+```bash
+pip install gpt_batch_api
+```
+We can verify in an interactive `python` that the `gpt_batch_api` library has successfully been installed:
+```python
+import gpt_batch_api
+print(gpt_batch_api.__version__)                              # Version
+print(gpt_batch_api.TaskManager, gpt_batch_api.GPTRequester)  # Two main library classes
+import os
+print(os.path.join(os.path.dirname(gpt_batch_api.__file__), 'commands.txt'))  # Location of the installed commands.txt file (refer to this for command/script help)
+```
+Verify that the `gpt_batch_api` scripts can be run:
+```bash
+python -m gpt_batch_api.task_manager_demo --help
+python -m gpt_batch_api.wandb_configure_view --help
+```
+Test running a script that actually makes API calls (requires less than 0.01 USD):
+```bash
+export OPENAI_API_KEY=sk-...  # <-- Set the OpenAI API key
+export WANDB_API_KEY=...      # <-- Set the wandb API key (a project called gpt_batch_api is created/used and can be used to monitor the following run in real-time)
+python -m gpt_batch_api.task_manager_demo --task_dir /tmp/gpt_batch_api_tasks --task utterance_emotion --model gpt-4o-mini-2024-07-18 --cost_input_direct_mtoken 0.150 --cost_input_cached_mtoken 0.075 --cost_input_batch_mtoken 0.075 --cost_output_direct_mtoken 0.600 --cost_output_batch_mtoken 0.300 --min_batch_requests 200 --max_direct_requests 40  # <-- The last two arguments avoid actually using the Batch API (as this can take a while to complete, and this is just a quick test)
+python -m gpt_batch_api.wandb_configure_view --dst_entity ENTITY  # <-- [Substitute correct ENTITY! / Only need to execute this once ever per project!] Then go to https://wandb.ai/ENTITY/gpt_batch_api and select the saved view called 'GPT Batch API', and then click 'Copy to my workspace'
+# Output files: Refer to /tmp/gpt_batch_api_tasks directory
+# Note: If task_dir is not specified then a tasks directory will be auto-created inside the installed site-packages location, which is probably not desired in general
+```
+Now you are ready to implement your own custom tasks, and make full robust use of the power of the Batch API!
 
 ## Implementing a Custom Task
 

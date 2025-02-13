@@ -1,7 +1,13 @@
 Setup
 -----
 
-- Create conda environment:
+- Set up conda environment with pip install:
+	conda create -n gpt_batch_api python=3.12
+	conda activate gpt_batch_api
+	pip install gpt_batch_api
+	pip check
+
+- Set up conda environment for directly using the library source:
 	conda create -n gpt_batch_api python=3.12
 	conda activate gpt_batch_api
 	conda install -c conda-forge filelock pillow 'pydantic>=2' pytest requests
@@ -15,7 +21,7 @@ Run Commands
 ------------
 
 - General:
-	cd /path/to/gpt_batch_api/..  # <-- NOTE: Parent directory of gpt_batch_api
+	cd /path/to/gpt_batch_api/..  # <-- NOTE: Parent directory of gpt_batch_api (if directly using the library source OR use PYTHONPATH instead)
 	conda activate gpt_batch_api
 	export OPENAI_API_KEY=sk-...  # <-- NOTE: Replace with actual OpenAI API key
 	export WANDB_API_KEY=...  # <-- NOTE: Replace with actual Wandb API key
