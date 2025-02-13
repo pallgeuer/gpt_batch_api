@@ -2,7 +2,7 @@
 
 **Author:** Philipp Allgeuer
 
-**Version:** 1.0
+**Version:** 1.0.0
 
 A Python library for efficiently interacting with OpenAI's GPT API in batch mode. This library helps handle multiple requests in a single batch to streamline and optimize API usage, making it ideal for high-volume non-real-time text and image processing applications. The Batch API provides a significantly faster and more cost-effective solution than performing multiple single API requests individually.
 

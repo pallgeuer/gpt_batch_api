@@ -1,6 +1,7 @@
 # OpenAI GPT Batch API package
 
 # Imports
+from ._version import __version__
 from .logger import log
 from .utils import (
 	NONE,
