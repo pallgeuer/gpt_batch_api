@@ -62,10 +62,10 @@ class CharCodesFile(task_manager.DataclassOutputFile):
 # Character codes task class (runs the task)
 class CharCodesTask(task_manager.TaskManager):
 
-	def __init__(self, cfg: utils.Config, task_dir: str, char_ranges: Sequence[tuple[int, int]]):
+	def __init__(self, cfg: utils.Config, char_ranges: Sequence[tuple[int, int]]):
 
 		super().__init__(
-			task_dir=task_dir,
+			task_dir=cfg.task_dir,
 			name_prefix=cfg.task_prefix,
 			output_factory=CharCodesFile.output_factory(),
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behavior can be manually overridden using reinit_meta)
@@ -213,12 +213,10 @@ class CharCodesTask(task_manager.TaskManager):
 		return bool(sample_keys_succeeded) or bool(sample_keys_failed)
 
 # Demonstrate the task manager class on the task of generating information about unicode characters
-def demo_char_codes(cfg: utils.Config, task_dir: str):
+def demo_char_codes(cfg: utils.Config):
 	# cfg = Configuration parameters
-	# task_dir = Path of the task working directory to use
 	CharCodesTask(
 		cfg=cfg,
-		task_dir=task_dir,
 		char_ranges=(
 			(0x0000, 0x007F),  # Basic Latin
 			(0x0080, 0x00FF),  # Latin-1 Supplement
@@ -268,10 +266,10 @@ class UtterancesFile(task_manager.DataclassListOutputFile):
 # Utterance emotion task class (runs the task)
 class UtteranceEmotionTask(task_manager.TaskManager):
 
-	def __init__(self, cfg: utils.Config, task_dir: str, utterances: Sequence[str]):
+	def __init__(self, cfg: utils.Config, utterances: Sequence[str]):
 
 		super().__init__(
-			task_dir=task_dir,
+			task_dir=cfg.task_dir,
 			name_prefix=cfg.task_prefix,
 			output_factory=UtterancesFile.output_factory(),
 			init_meta=dict(  # Note: init_meta specifies parameter values that should always remain fixed throughout a task, even across multiple runs (this behavior can be manually overridden using reinit_meta)
@@ -430,12 +428,10 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 		return bool(succeeded_samples) or bool(failed_samples)
 
 # Demonstrate the task manager class on the task of classifying the emotion of utterances
-def demo_utterance_emotion(cfg: utils.Config, task_dir: str):
+def demo_utterance_emotion(cfg: utils.Config):
 	# cfg = Configuration parameters
-	# task_dir = Path of the task working directory to use
 	UtteranceEmotionTask(
 		cfg=cfg,
-		task_dir=task_dir,
 		utterances=(
 			"I can’t believe you went behind my back after everything I’ve done for you!",
 			"Why do you always have to ruin every single thing I plan?",
@@ -493,10 +489,11 @@ def demo_utterance_emotion(cfg: utils.Config, task_dir: str):
 def main():
 
 	parser = argparse.ArgumentParser(description="Demonstrate the TaskManager class with example applications.", add_help=False, formatter_class=functools.partial(argparse.HelpFormatter, max_help_position=36))
-	parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='Show this help message and exit')
-	parser.add_argument('--task', type=str, required=True, help='Which task to run (e.g. char_codes)')
-	parser.add_argument('--task_prefix', type=str, metavar='PREFIX', help='Name prefix to use for task-related files (default is same as task)')
-	parser.add_argument('--chat_endpoint', type=str, metavar='ENDPOINT', default='/v1/chat/completions', help='Chat completions endpoint to use')
+	parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help="Show this help message and exit")
+	parser.add_argument('--task', type=str, required=True, help="Which task to run (e.g. char_codes)")
+	parser.add_argument('--task_prefix', type=str, metavar='PREFIX', help="Name prefix to use for task-related files (default is same as task)")
+	parser.add_argument('--task_dir', type=str, metavar='DIR', help="Path to the working directory to use (will be used for automatically managed lock, task, output, state, requests and batch files, auto-created by default)")
+	parser.add_argument('--chat_endpoint', type=str, metavar='ENDPOINT', default='/v1/chat/completions', help="Chat completions endpoint to use")
 
 	parser_meta = parser.add_argument_group(title='Task metadata')  # Specifications of the task metadata to be used for new tasks (the default values are defined per-task in the corresponding task implementations)
 	parser_meta.add_argument('--model', type=str, help="LLM model to use")
@@ -514,15 +511,17 @@ def main():
 	args = parser.parse_args()
 	if args.task_prefix is None:
 		args.task_prefix = args.task
+	if args.task_dir is None:
+		args.task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks')  # Note: If library is pip-installed, then this will by default create a 'tasks' directory in the package installation location under site-packages!
 	if args.wandb is None:
 		args.wandb = not args.dryrun
 
 	with gpt_requester.GPTRequester.wandb_init(config=args):
-		task_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks')
+
 		if args.task == 'char_codes':
-			demo_char_codes(cfg=args, task_dir=task_dir)
+			demo_char_codes(cfg=args)
 		elif args.task == 'utterance_emotion':
-			demo_utterance_emotion(cfg=args, task_dir=task_dir)
+			demo_utterance_emotion(cfg=args)
 		elif args.task is None:
 			raise ValueError("Please specify which task to demo using --task")
 		else:
