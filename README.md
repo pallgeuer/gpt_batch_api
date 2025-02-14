@@ -41,7 +41,7 @@ conda activate gpt_batch_api
 python -m venv gpt_batch_api  # <-- Must be Python 3.12+
 source gpt_batch_api/bin/activate
 ```
-Then install `gpt_batch_api`:
+Then install `gpt_batch_api` (PyPi Python package built using [gpt_batch_api_build](https://github.com/pallgeuer/gpt_batch_api_build)):
 ```bash
 pip install gpt_batch_api
 ```
