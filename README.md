@@ -45,6 +45,10 @@ Then install `gpt_batch_api` (PyPi Python package built using [gpt_batch_api_bui
 ```bash
 pip install gpt_batch_api
 ```
+If planning to use the `wandb` support (it is enabled by default), then ensure `wandb` is logged in (only required once):
+```bash
+wandb login
+```
 We can verify in an interactive `python` that the `gpt_batch_api` library has successfully been installed:
 ```python
 import gpt_batch_api
