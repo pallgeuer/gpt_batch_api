@@ -14,14 +14,13 @@ import itertools
 import contextlib
 import collections
 import dataclasses
-import typing
-from typing import Any, Optional, Self, Type, Callable, Generic, Iterable, Union, Counter
+from typing import Any, Optional, Self, Type, Callable, Generic, Iterable, Union, Counter, TypeVar
 from .logger import log
 from . import gpt_requester, utils
 
 # Type variables
-T = typing.TypeVar('T')
-DataclassT = typing.TypeVar('DataclassT')
+T = TypeVar('T')
+DataclassT = TypeVar('DataclassT')
 
 #
 # Task state file

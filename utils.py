@@ -22,16 +22,16 @@ import contextlib
 import collections
 import dataclasses
 import typing
-from typing import TYPE_CHECKING, Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol, Callable, Counter
+from typing import TYPE_CHECKING, Any, Type, Self, Union, Optional, Iterable, TextIO, BinaryIO, ContextManager, Protocol, Callable, Counter, TypeVar
 from types import FrameType
 import filelock
 import pydantic
 import wandb
 
 # Types
-DataclassInstance = typing.TypeVar('DataclassInstance')  # Generic dataclass instance
-T = typing.TypeVar('T')                                  # Generic type variable
-C = typing.TypeVar('C', bound=type)                      # Generic type variable for class types
+DataclassInstance = TypeVar('DataclassInstance')  # Generic dataclass instance
+T = TypeVar('T')                                  # Generic type variable
+C = TypeVar('C', bound=type)                      # Generic type variable for class types
 
 # Logging configuration
 logging.getLogger("filelock").setLevel(logging.WARNING)
