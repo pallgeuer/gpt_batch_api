@@ -570,7 +570,7 @@ class TaskManager:
 	# This is in addition to the files stored by gpt_requester.GPTRequester, and the task files are also only updated when the gpt_requester.GPTRequester has its lock file locked.
 	#
 	# In order to use this class, subclass it for a particular task and implement/override:
-	#   - __init__(cfg: utils.Config) => Customize a call to super().__init__(..., **gpt_requester_kwargs) based on an attribute-based cfg (coming from either Python argparse or Hydra, see below) where gpt_requester_kwargs comes from gpt_requester.GPTRequester.get_kwargs(cfg)
+	#   - __init__(cfg: utils.Config) => Customize a call to super().__init__(..., **gpt_requester_kwargs) based on an attribute-based cfg (coming from either Python argparse or hydra, see below) where gpt_requester_kwargs comes from gpt_requester.GPTRequester.get_kwargs(cfg)
 	#   - on_task_enter()             => [Optional] Perform any required custom actions during entering of the task manager (called once task is entered and self.T is available, but before GPT requester is entered)
 	#   - on_task_exit()              => [Optional] Perform any required custom actions during exiting the task manager (called if on_task_enter() was executed to completion during entering)
 	#   - wipe_unfinished()           => Wipe any unfinished (and optionally also failed) requests/samples from the in-memory task state
