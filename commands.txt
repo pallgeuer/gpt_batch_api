@@ -24,7 +24,7 @@ Run Commands
 	cd /path/to/gpt_batch_api/..  # <-- NOTE: Parent directory of gpt_batch_api (if directly using the library source OR use PYTHONPATH instead)
 	conda activate gpt_batch_api
 	export OPENAI_API_KEY=sk-...  # <-- NOTE: Replace with actual OpenAI API key
-	export WANDB_API_KEY=...  # <-- NOTE: Replace with actual Wandb API key
+	export WANDB_API_KEY=...  # <-- NOTE: Replace with actual wandb API key (see https://wandb.ai/authorize)
 
 - Wandb logging:
 	Wandb is by default used by the TaskManager/GPTRequester classes, unless explicitly disabled using wandb=False (--no_wandb).
