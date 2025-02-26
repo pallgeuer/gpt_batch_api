@@ -2703,7 +2703,7 @@ class GPTRequester:
 						batch_failed = True
 					elif batch.remote.batch.status != 'completed' or batch_errors:
 						# [COVERED] If this occurs then we just log an error, and continue trying to parse the batch anyway and deal with any errors that we encounter doing that, because that's the only thing that actually matters (e.g. expired and cancelled batches can still have valid results)
-						(log.error if batch_errors else log.warning)(f"Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
+						log.log(logging.ERROR if batch_errors else logging.WARNING, f"Batch {batch.id} was overall unsuccessful with status '{batch.remote.batch.status}' and errors:{''.join(f'\n    {batch_error}' for batch_error in batch_errors) if batch_errors else ' None'}")
 
 					req_payload_map = self.load_local_jsonl(batch=batch)
 
