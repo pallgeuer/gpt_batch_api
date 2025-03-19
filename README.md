@@ -75,13 +75,15 @@ Now you are ready to implement your own custom tasks, and make full robust use o
 
 ## Implementing a Custom Task
 
-In order to define and run your own task, refer to the example task implementations in `task_manager_demo.py`, including the `main()` function and how the tasks are run. The general steps to creating your own tasks are:
+In order to define and run your own task, **refer to the example task implementations in `task_manager_demo.py`**, including the `main()` function and how the tasks are run.
+
+The general steps to creating your own tasks are:
 
 1) Read the documentation comments at the beginning of the `TaskManager` class, which outline which methods should be overridden, what sources of command line arguments are possible, and what simple properties the design of the task state, task output, and request metadata format need to satisfy.
 2) Design/plan (e.g. on paper) the task-specific data format of the task state, task output, and request metadata format, so that all properties are satisfied.
 3) If structured outputs are to be used in the requests, define a `pydantic.BaseModel` for the JSON schema that the LLM responses should strictly adhere to.
 4) Decide on a task output file class (e.g. `DataclassOutputFile`, `DataclassListOutputFile`, or a custom `TaskOutputFile` implementation) and possibly define an appropriate subclass (e.g. to specify `Dataclass`), and define any associated dataclasses, pydantic models, and such.
 5) Implement a custom task-specific subclass of `TaskManager`, given all the information from the previous steps. The subclass often needs to load data from file as input for generating the required requests and completing the task. This can be implemented inside the subclass, or can be implemented in separate code that e.g. then just passes pre-loaded data or a data loader class to the __init__ method of the `TaskManager` subclass. Refer to the documentation within each of the methods to override in the `TaskManager` class source code.
-6) Ensure Python logging is configured appropriately (e.g. see `utils.configure_logging()`, it is also helpful if warnings and errors stand out in terms of color, see `utils.ColorFormatter`).
+6) Ensure Python logging is configured appropriately (e.g. see `utils.configure_logging()`, or otherwise use `utils.ColorFormatter` manually to help ensure that warnings and errors stand out in terms of color).
 7) Use `argparse` or `hydra` to configure command line arguments and pass them to the custom `TaskManager` subclass on init (refer to `main()` in `task_manager_demo.py`, and `config/gpt_batch_api.yaml`).
 8) Run the custom task manager by constructing an instance of the class and calling `run()`.
