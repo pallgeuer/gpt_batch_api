@@ -647,8 +647,9 @@ class TaskManager:
 
 		return group
 
-	# Run the task manager to completion
-	def run(self):
+	# Run the task manager to completion (or as far as possible)
+	def run(self) -> bool:
+		# Returns whether the task manager is complete (all done)
 
 		log.info('\u2550' * 120)
 		log.info("Running task manager...")
@@ -659,6 +660,7 @@ class TaskManager:
 			self.log_status()
 			self.GR.log_status()
 
+			all_done = False
 			if self.run_flag:
 				while self.step():  # Returns True exactly if condition E*not[D] = PBVMF(GQ + C)(not[L] + not[R]), i.e. only if condition F is satisfied => There are no pushed remote batches that are finished yet unprocessed
 					if self.GR.dryrun:
@@ -669,6 +671,8 @@ class TaskManager:
 						break
 					else:  # Else if condition not[R]F...
 						self.GR.wait_for_batches()  # Waits (if not a dry run) until condition R + not[F] (nullifies condition F) => When this returns there must be at least one finished yet unprocessed remote batch, or no unfinished and/or unprocessed remote batches at all
+				else:  # Natural exit of while loop means self.step() returned False, indicating there is no more work left to do
+					all_done = True
 			else:
 				log.warning("Not running the task manager due to 'run' flag being False")
 
@@ -677,7 +681,9 @@ class TaskManager:
 			self.GR.log_status()
 
 		log.info('\xB7' * 60)
-		log.info("Finished running task manager")
+		log.info(f"Finished running task manager ({'all done' if all_done else 'work left to do'})")
+
+		return all_done
 
 	# Callback that can be used to perform custom actions during entering (called once task is entered and self.T is available, but before GPT requester is entered)
 	def on_task_enter(self):
