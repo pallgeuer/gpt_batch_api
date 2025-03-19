@@ -569,6 +569,9 @@ class TaskManager:
 	# This abstract base class manages a gpt_requester.GPTRequester instance to complete a certain custom task. Task progress is stored in a task state file as well as a task output file.
 	# This is in addition to the files stored by gpt_requester.GPTRequester, and the task files are also only updated when the gpt_requester.GPTRequester has its lock file locked.
 	#
+	# The task state file is of the format given by the TaskState class above => REVIEW the TaskState class above before continuing (e.g. defines committed_samples, failed_samples, succeeded_samples)
+	# The task output file is of type TaskOutputFile (without any particular mandated format) => Example implementations based on dataclasses are DataclassOutputFile and DataclassListOutputFile
+	#
 	# In order to use this class, subclass it for a particular task and implement/override:
 	#   - __init__(cfg: utils.Config) => Customize a call to super().__init__(..., **gpt_requester_kwargs) based on an attribute-based cfg (coming from either Python argparse or hydra, see below) where gpt_requester_kwargs comes from gpt_requester.GPTRequester.get_kwargs(cfg)
 	#   - on_task_enter()             => [Optional] Perform any required custom actions during entering of the task manager (called once task is entered and self.T is available, but before GPT requester is entered)
