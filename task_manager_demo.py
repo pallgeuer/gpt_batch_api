@@ -62,11 +62,15 @@ class CharCodesFile(task_manager.DataclassOutputFile):
 # Character codes task class (runs the task)
 class CharCodesTask(task_manager.TaskManager):
 
-	# Task state:           TaskState       => Stores only the information required to know for which samples requests still need to be generated and committed, as well as which samples have been completed so far (each sample must correspond to a unique ideally-short string sample key, see generate_requests() method)
+	# Sample key:
+	#  - Each sample must correspond to a unique (ideally short) string sample key
+	#  - 'char-CHAR' where CHAR is the character as a string of length 1 (see generate_requests() method)
+	#
+	# Task state:           TaskState       => Stores only the information required to know for which samples requests still need to be generated and committed, as well as which samples have been completed so far, and whatever information is needed for compiling the output entry if this is not based on just a single response at a time
 	#  - meta:              dict[str, Any]  => Dictionary of task-level metadata like the model and temperature to use for request generation (see init_meta in __init__() method)
-	#  - committed_samples: dict[str, None] => Map from a sample key to None, where a key simply existing signifies that a request has been committed for the corresponding character code (see commit_cached_request() method)
-	#  - failed_samples:    dict[str, None] => Map from a sample key to None, where a key simply existing signifies that the committed request for the corresponding character code failed (see process_batch_result() method)
-	#  - succeeded_samples: dict[str, None] => Map from a sample key to None, where a key simply existing signifies that the committed request for the corresponding character code succeeded (see process_batch_result() method)
+	#  - committed_samples: dict[str, None] => Maps a sample key to None, where a key simply existing signifies that a request has been committed for the corresponding character code (see commit_cached_request() method)
+	#  - failed_samples:    dict[str, None] => Maps a sample key to None, where a key simply existing signifies that the committed request for the corresponding character code failed (see process_batch_result() method)
+	#  - succeeded_samples: dict[str, None] => Maps a sample key to None, where a key simply existing signifies that the committed request for the corresponding character code succeeded (see process_batch_result() method)
 	#
 	# Task output:
 	#  - Single JSON file with the JSON-serialized contents of an instance of the CharCodesData dataclass
@@ -276,11 +280,15 @@ class UtterancesFile(task_manager.DataclassListOutputFile):
 # Utterance emotion task class (runs the task)
 class UtteranceEmotionTask(task_manager.TaskManager):
 
-	# Task state:           TaskState      => Stores only the information required to know for which samples requests still need to be generated and committed, as well as which samples have been completed so far (each sample must correspond to a unique ideally-short string sample key, see generate_requests() method)
+	# Sample key:
+	#  - Each sample must correspond to a unique (ideally short) string sample key
+	#  - 'I:UTTERANCE_START' where I is the 1-based index of the utterance and UTTERANCE_START is up to 30 leading characters of the utterance (see generate_requests() method)
+	#
+	# Task state:           TaskState      => Stores only the information required to know for which samples requests still need to be generated and committed, as well as which samples have been completed so far, and whatever information is needed for compiling the output entry if this is not based on just a single response at a time
 	#  - meta:              dict[str, Any] => Dictionary of task-level metadata like the model and temperature to use for request generation (see init_meta in __init__() method)
-	#  - committed_samples: dict[str, int] => Map from a sample key to the number of times a request has been committed for it so far (see commit_cached_request() method)
-	#  - failed_samples:    dict[str, int] => Map from a sample key to the number of committed requests that have failed for that sample key (see process_batch_result() method)
-	#  - succeeded_samples: dict[str, list[dict[str, Any]]] ~ dict[str, list[UtteranceInfo]] => Map from a sample key to a list of JSON-serialized UtteranceInfo opinions, one for each committed request that has succeeded for that sample key (see process_batch_result() method)
+	#  - committed_samples: dict[str, int] => Maps a sample key to the number of times a request has been committed for it so far (see commit_cached_request() method)
+	#  - failed_samples:    dict[str, int] => Maps a sample key to the number of committed requests that have failed for that sample key (see process_batch_result() method)
+	#  - succeeded_samples: dict[str, list[dict[str, Any]]] ~ dict[str, list[UtteranceInfo]] => Maps a sample key to a list of JSON-serialized UtteranceInfo opinions, one for each committed request that has succeeded for that sample key (see process_batch_result() method)
 	#
 	# Task output:
 	#  - Single JSONL file where each line is the JSON-serialized contents of an instance of the UtteranceData dataclass
