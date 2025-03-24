@@ -39,6 +39,8 @@ wandb_group: null
 
 # Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)
 run: True
+# Whether to allow/perform custom post-processing of the task output data if a run totally completes the task (options: never, if_written, always, where if_written means only if the task output file was written to during the run)
+postprocess_output: if_written
 # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with only_process=True prior to wiping)
 wipe_failed: False
 # CAUTION: Whether to force a reinitialization of the task state meta field even if the task state file already exists (normally the task state meta field is only initialized once at the beginning of a task and remains fixed after that across all future runs)

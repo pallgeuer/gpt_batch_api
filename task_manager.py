@@ -611,6 +611,7 @@ class TaskManager:
 	#   - commit_cached_request()     => Update the committed_meta/committed_samples task state to reflect that a particular request has been committed
 	#   - cached_request_keys()       => Extract from a list of requests a set of sample keys that is enough to cover all possible changes to the committed_samples task state when later supplying these requests to commit_cached_request()
 	#   - process_batch_result()      => Process a batch result and accordingly update the task state and output files (must be a perfectly reversible operation)
+	#   - postprocess_output_data()   => [Optional] Perform any required post-processing of the task output data (called only once the entire task completes)
 	#
 	# In order to conveniently provide relevant command line arguments, use either:
 	#   - gpt_requester.GPTRequester.configure_argparse() => Python argparse
@@ -636,6 +637,7 @@ class TaskManager:
 		*,                                                                      # Keyword arguments only beyond here
 
 		run: bool = True,                                                       # Whether to execute steps when the task manager is run, or just show the status and return (e.g. run=False is useful in combination with wipe_*)
+		postprocess_output: str = 'if_written',                                 # Whether to allow/perform custom post-processing of the task output data if a run totally completes the task (options: never, if_written, always, where if_written means only if the task output file was written to during the run)
 		wipe_failed: bool = False,                                              # CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with only_process=True prior to wiping)
 		reinit_meta: bool = False,                                              # CAUTION: Whether to force a reinitialization of the task state meta field even if the task state file already exists (normally the task state meta field is only initialized once at the beginning of a task and remains fixed after that across all future runs)
 
@@ -643,6 +645,9 @@ class TaskManager:
 	):
 
 		self.run_flag = run
+		self.postprocess_output = postprocess_output
+		if self.postprocess_output not in ('never', 'if_written', 'always'):
+			raise ValueError(f"Invalid post-process output mode: {self.postprocess_output}")
 		self.wipe_failed = wipe_failed
 		if self.wipe_failed:
 			gpt_requester_kwargs['wipe_requests'] = True
@@ -674,6 +679,7 @@ class TaskManager:
 		add_argument = functools.partial(utils.add_init_argparse, cls=TaskManager, parser=group, defaults=defaults)
 
 		add_argument(name='run', help="Whether to execute steps when the task manager is run, or just show the status and return (e.g. --no_run is useful in combination with --wipe_*)")
+		add_argument(name='postprocess_output', metavar='MODE', help="Whether to allow/perform custom post-processing of the task output data if a run totally completes the task (options: never, if_written, always, where if_written means only if the task output file was written to during the run)")
 		add_argument(name='wipe_failed', help="CAUTION: Wipe and forget all failed samples from the task state (implies wipe_requests, consider running the task with --only_process prior to wiping)")
 		add_argument(name='reinit_meta', help="CAUTION: Whether to force a reinitialization of the task state meta field even if the task state file already exists (normally the task state meta field is only initialized once at the beginning of a task and remains fixed after that across all future runs)")
 
@@ -711,6 +717,12 @@ class TaskManager:
 			log.info('\u2550' * 120)
 			self.log_status()
 			self.GR.log_status()
+
+			if self.postprocess_output == 'always' or (self.postprocess_output == 'if_written' and self.output.written):
+				log.info('\xB7' * 60)
+				log.info("Performing any required post-processing of the task output data...")
+				self.postprocess_output_data()
+				log.info("Finished all required post-processing of the task output data")
 
 		log.info('\xB7' * 60)
 		log.info(f"Finished running task manager ({'all done' if all_done else 'work left to do'})")
@@ -1096,6 +1108,11 @@ class TaskManager:
 		#   - Theoretically, info.req_payload, info.req_info.meta, info.retry_counts and info.req_info.retry_num can also be MODIFIED to affect/tweak the retry, but is not recommended in general (e.g. care needs to be taken not to change anything in the payload that breaks auto-parsing)
 		# Statistics like the request pass ratio, and the number of requests that were successful, warned, errored, cancelled, expired, etc, can be found in result.stats (ResultStats)
 		raise NotImplementedError
+
+	# Perform any required post-processing of the task output data (called only once the entire task completes)
+	def postprocess_output_data(self):
+		# Refer to the postprocess_output __init__ argument for additional information when this method is called
+		pass
 
 #
 # Task manager helpers
