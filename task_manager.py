@@ -4,6 +4,7 @@
 from __future__ import annotations
 import os
 import re
+import abc
 import copy
 import json
 import math
@@ -152,7 +153,7 @@ class TaskStateFile:
 #
 
 # Task output file class
-class TaskOutputFile:
+class TaskOutputFile(abc.ABC):
 
 	def __init__(self, path_base: str, dryrun: bool, W: Optional[utils.WandbRun] = None):
 		# path_base = Required output file path base, e.g. /path/to/NAME_PREFIX_output
@@ -162,11 +163,19 @@ class TaskOutputFile:
 		self.dryrun = dryrun
 		self.W = W if W is not None else utils.WandbRun()
 		self.data = None
+		self.written = False
 
 	def __enter__(self) -> Self:
+		# See _enter()
+		self.written = False
+		return self._enter()
+
+	@abc.abstractmethod
+	def _enter(self) -> Self:
 		# Load/create the task output file and set/initialize self.data (must be mutable or None)
 		raise NotImplementedError
 
+	@abc.abstractmethod
 	def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
 		# Unload the task output file (don't automatically just save the task output file here - it is the responsibility of the user of the class to explicitly call save() when required)
 		raise NotImplementedError
@@ -176,21 +185,40 @@ class TaskOutputFile:
 		pass
 
 	def create(self, rstack: utils.RevertStack):
+		# See _create()
+		self.written = True
+		self._create(rstack=rstack)
+
+	@abc.abstractmethod
+	def _create(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible creation of the task output file
 		# Initialize the task output file on disk and in memory
 		raise NotImplementedError
 
 	def reset(self, rstack: utils.RevertStack):
+		# See _reset()
+		self.written = True
+		self._reset(rstack=rstack)
+
+	@abc.abstractmethod
+	def _reset(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible resetting of the task output file
 		# Reset the task output file to the state it is in right after creation (don't necessarily assume that any self.data is currently already created/loaded)
 		raise NotImplementedError
 
+	@abc.abstractmethod
 	def load(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible loading of the task output file
 		# Load the task output file to memory
 		raise NotImplementedError
 
 	def save(self, rstack: utils.RevertStack):
+		# See _save()
+		self.written = True
+		self._save(rstack=rstack)
+
+	@abc.abstractmethod
+	def _save(self, rstack: utils.RevertStack):
 		# rstack = RevertStack to use for safe reversible saving of the task output file
 		# Save the current memory state of the task output file to disk
 		# It is permitted to make changes to self.data (e.g. sorting keys of a dictionary or so) just prior to saving, as long as it is reversible (rstack)
@@ -242,7 +270,7 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		log.info(f"Task output file: {self.path}")
 		self._enter_stack = contextlib.ExitStack()
 
-	def __enter__(self) -> Self:
+	def _enter(self) -> Self:
 		with self._enter_stack as enter_stack:
 			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				enter_stack.callback(self.unload)
@@ -265,13 +293,13 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		if not isinstance(self.data, self.data_cls):
 			raise ValueError(f"Data is of unexpected type: {utils.get_class_str(type(self.data))} vs {utils.get_class_str(self.data_cls)}")
 
-	def create(self, rstack: utils.RevertStack):
+	def _create(self, rstack: utils.RevertStack):
 		rstack.callback(setattr, self, 'data', self.data)
 		self.data = self.data_cls()
-		self.save(rstack=rstack)
+		self._save(rstack=rstack)
 
-	def reset(self, rstack: utils.RevertStack):
-		self.create(rstack=rstack)
+	def _reset(self, rstack: utils.RevertStack):
+		self._create(rstack=rstack)
 
 	def load(self, rstack: utils.RevertStack):
 		rstack.callback(setattr, self, 'data', self.data)
@@ -286,7 +314,7 @@ class DataclassOutputFile(TaskOutputFile, Generic[DataclassT]):
 		# This method can be overridden to perform changes to self.data immediately prior to each save (e.g. sorting keys of a dictionary or so)
 		pass
 
-	def save(self, rstack: utils.RevertStack):
+	def _save(self, rstack: utils.RevertStack):
 		if self.read_only:
 			raise RuntimeError("Cannot save dataclass output file in read-only mode")
 		self.pre_save(rstack=rstack)
@@ -363,7 +391,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 			raise ValueError("Cannot have empty path dirname or basename")
 		self._enter_stack = contextlib.ExitStack()
 
-	def __enter__(self) -> Self:
+	def _enter(self) -> Self:
 		with self._enter_stack as enter_stack:
 			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				enter_stack.callback(self.unload)
@@ -390,7 +418,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 		elif not all(isinstance(entry, self.data_cls) for entry in self.data.entries):
 			raise ValueError(f"Not all entries are of the expected type: {utils.get_class_str(self.data_cls)}")
 
-	def create(self, rstack: utils.RevertStack):
+	def _create(self, rstack: utils.RevertStack):
 		if self.read_only:
 			raise RuntimeError("Cannot create dataclass list output file in read-only mode")
 		rstack.callback(setattr, self, 'data', self.data)
@@ -404,7 +432,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 			log.info(f"Created empty initial task output file: {os.path.basename(path)}")
 		self.log_summary(rstack=rstack)
 
-	def reset(self, rstack: utils.RevertStack) -> list[str]:
+	def _reset(self, rstack: utils.RevertStack) -> list[str]:
 		# Extends the base class signature with a return value => Returns a list of the temporary unlink backup paths
 		backup_paths = []
 		if self.data is not None and not self.dryrun:
@@ -412,7 +440,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 				backup_path = utils.safe_unlink(path=path, rstack=rstack)
 				if backup_path is not None:
 					backup_paths.append(backup_path)
-		self.create(rstack=rstack)
+		self._create(rstack=rstack)
 		return backup_paths
 
 	def load(self, rstack: utils.RevertStack):
@@ -464,7 +492,7 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 		# This method can be overridden to perform changes to self.data.entries immediately prior to them being saved and cleared (e.g. sorting keys of a dictionary or so)
 		pass
 
-	def save(self, rstack: utils.RevertStack):
+	def _save(self, rstack: utils.RevertStack):
 
 		if self.read_only:
 			raise RuntimeError("Cannot save dataclass list output file in read-only mode")
@@ -547,16 +575,17 @@ class DataclassListOutputFile(TaskOutputFile, Generic[DataclassT]):
 	def rewrite(self, rstack: utils.RevertStack) -> Iterable[DataclassT]:
 		# While iterating through this generator with a for-loop, add any desired new contents to self.data.entries (for example, in order to simply filter the output file data, append the yielded entry to self.data.entries only if a particular conditional expression is true)
 		# Note that internally a reset occurs, so afterwards self.data points to a new instance
+		self.written = True
 		if self.read_only:
 			raise RuntimeError("Cannot rewrite dataclass list output file in read-only mode")
 		data_paths = self.data.paths
-		backup_paths = self.reset(rstack=rstack)
+		backup_paths = self._reset(rstack=rstack)
 		for path in (data_paths if self.dryrun else backup_paths):
 			with open(path, 'r', encoding='utf-8') as file:
 				for line in file:
 					yield utils.dataclass_from_json(cls=self.data_cls, json_data=line)
 			self.validate()
-			self.save(rstack=rstack)
+			self._save(rstack=rstack)
 
 #
 # Task manager class
