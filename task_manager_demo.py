@@ -43,7 +43,7 @@ class CharCodesData:
 	chars: dict[str, UnicodeCharacterInfo] = dataclasses.field(default_factory=dict)  # Map of all characters to their produced output character information
 
 # Character codes file class (output file class that can also be reused in downstream code to read and parse the generated data)
-class CharCodesFile(task_manager.DataclassOutputFile):
+class CharCodesFile(task_manager.DataclassOutputFile[CharCodesData]):
 
 	Dataclass = CharCodesData
 
@@ -75,6 +75,8 @@ class CharCodesTask(task_manager.TaskManager):
 	# Task output:
 	#  - Single JSON file with the JSON-serialized contents of an instance of the CharCodesData dataclass
 	#  - Contains 'chars', a sorted-on-save dict that maps each character code (string containing a single literal character) to the corresponding UnicodeCharacterInfo (contains information like character type, description and sample sentence)
+
+	output: CharCodesFile
 
 	def __init__(self, cfg: utils.Config, char_ranges: Sequence[tuple[int, int]]):
 
@@ -274,7 +276,7 @@ class UtteranceData:
 	emotions: dict[UtteranceEmotion, float]  # All utterance emotion classifications with their corresponding confidence score (in descending confidence order)
 
 # Utterances file class (output file class that can also be reused in downstream code to read and parse the generated data)
-class UtterancesFile(task_manager.DataclassListOutputFile):
+class UtterancesFile(task_manager.DataclassListOutputFile[UtteranceData]):
 	Dataclass = UtteranceData
 
 # Utterance emotion task class (runs the task)
@@ -293,6 +295,8 @@ class UtteranceEmotionTask(task_manager.TaskManager):
 	# Task output:
 	#  - Single JSONL file where each line is the JSON-serialized contents of an instance of the UtteranceData dataclass
 	#  - Each line contains a sample key, corresponding utterance, and information about the emotion classifications
+
+	output: UtterancesFile
 
 	def __init__(self, cfg: utils.Config, utterances: Sequence[str]):
 
