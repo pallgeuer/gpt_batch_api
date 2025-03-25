@@ -1032,7 +1032,7 @@ class GPTRequester:
 		log.info(f"Using safety factors (SF) of {self.max_mb_safety:.3g} for MB size, {self.max_token_safety:.3g} for tokens")
 		log.info(f"Using direct batch limits of {self.max_direct_requests} requests, {self.max_direct_tokens} tokens, {self.max_direct_cost:.3f} assumed cost")
 		log.info(f"Using batch size limits of {self.max_batch_requests} requests, {utils.format_size_si(self.max_batch_size)}, {self.max_batch_tokens} tokens, {self.max_batch_cost:.3f} assumed cost")
-		log.info(f"Using total push limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} assumed cost")
+		log.info(f"Using remote size limits of {self.max_remote_requests} requests, {utils.format_size_si(self.max_remote_size)}, {self.max_remote_tokens} tokens, {self.max_remote_cost:.3f} assumed cost")
 		if self.force_direct:
 			log.info("Using direct API for all batches (FORCED)")
 		else:
