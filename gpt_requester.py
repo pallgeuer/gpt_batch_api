@@ -1211,6 +1211,8 @@ class GPTRequester:
 		# save = Whether to actually save the state to file (or just update the log)
 		if save:
 			self.state.save(rstack=rstack, show_log=show_log)
+		else:
+			self.state.log_summary(rstack=rstack)
 		if isinstance(rstack, utils.LogRevertStack):
 			rstack.log({
 				'Pushed/session_requests': self.session_push_stats.total_requests,
