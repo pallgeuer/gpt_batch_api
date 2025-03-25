@@ -820,24 +820,24 @@ class GPTRequester:
 		assumed_completion_ratio: Optional[float] = 0.5,          # How many output tokens (including both reasoning and visible tokens) to assume will be generated for each request on average (as a ratio of the max_completion_tokens or max_tokens specified for each request, or as a ratio of a default value of 2048 if neither is specified)
 
 		max_task_requests: int = 10000000,                        # Maximum number of requests allowed for an entire task
-		max_task_ktokens: int = 2000000,                          # Maximum allowed total number of input tokens (in units of 1000) for an entire task
+		max_task_ktokens: int = 5000000,                          # Maximum allowed total number of input tokens (in units of 1000) for an entire task
 		max_task_cost: float = 1000.0,                            # Maximum allowed total cost (input + assumed output tokens) of an entire task
 		max_session_requests: int = 5000000,                      # Maximum number of requests allowed in a session
-		max_session_ktokens: int = 1000000,                       # Maximum allowed total number of input tokens (in units of 1000) in a session
+		max_session_ktokens: int = 2500000,                       # Maximum allowed total number of input tokens (in units of 1000) in a session
 		max_session_cost: float = 500.0,                          # Maximum allowed total cost (input + assumed output tokens) in a session
 		max_direct_requests: int = 50,                            # Maximum number of requests allowed in a virtual batch when using the direct API
-		max_direct_ktokens: int = 200,                            # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
+		max_direct_ktokens: int = 500,                            # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
 		max_direct_cost: float = 5.0,                             # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
 		min_batch_requests: int = 101,                            # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
 		max_batch_requests: int = 50000,                          # Maximum number of requests allowed in a batch
 		max_batch_mb: int = 100,                                  # Maximum allowed batch size in MB (not MiB)
-		max_batch_ktokens: int = 2000,                            # Maximum number of input tokens (in units of 1000) to include in a single batch
+		max_batch_ktokens: int = 20000,                           # Maximum number of input tokens (in units of 1000) to include in a single batch
 		max_batch_cost: float = 50.0,                             # Maximum allowed cost (input + assumed output tokens) of a batch
 		max_unpushed_batches: int = 5,                            # Maximum number of unpushed local batches at any one time
-		max_remote_batches: int = 100,                            # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
+		max_remote_batches: int = 15,                             # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
 		max_remote_requests: int = 5000000,                       # Maximum number of requests across all uploaded remote batches at any one time
 		max_remote_mb: int = 10000,                               # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
-		max_remote_ktokens: int = 5000,                           # Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time
+		max_remote_ktokens: int = 60000,                          # Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time
 		max_remote_cost: float = 150.0,                           # Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time
 		max_mb_safety: float = 1.01,                              # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)
 		max_token_safety: float = 1.05,                           # Safety factor (SF) to use when comparing token counts to specified maximum values (token counts are ultimately approximations until the batch is actually executed, so a safety factor can be useful in ensuring that token limits are truly never exceeded in practice)

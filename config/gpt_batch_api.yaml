@@ -101,19 +101,19 @@ assumed_completion_ratio: 0.5
 # Maximum number of requests allowed for an entire task
 max_task_requests: 10000000
 # Maximum allowed total number of input tokens (in units of 1000) for an entire task
-max_task_ktokens: 2000000
+max_task_ktokens: 5000000
 # Maximum allowed total cost (input + assumed output tokens) of an entire task
 max_task_cost: 1000.0
 # Maximum number of requests allowed in a session
 max_session_requests: 5000000
 # Maximum allowed total number of input tokens (in units of 1000) in a session
-max_session_ktokens: 1000000
+max_session_ktokens: 2500000
 # Maximum allowed total cost (input + assumed output tokens) in a session
 max_session_cost: 500.0
 # Maximum number of requests allowed in a virtual batch when using the direct API
 max_direct_requests: 50
 # Maximum number of input tokens (in units of 1000) to include in a single virtual batch when using the direct API
-max_direct_ktokens: 200
+max_direct_ktokens: 500
 # Maximum allowed cost (input + assumed output tokens) of a virtual batch when using the direct API
 max_direct_cost: 5.0
 # Minimum number of requests in a batch in order to use the batch API (otherwise automatically fall back to the direct API)
@@ -123,19 +123,19 @@ max_batch_requests: 50000
 # Maximum allowed batch size in MB (not MiB)
 max_batch_mb: 100
 # Maximum number of input tokens (in units of 1000) to include in a single batch
-max_batch_ktokens: 2000
+max_batch_ktokens: 20000
 # Maximum allowed cost (input + assumed output tokens) of a batch
 max_batch_cost: 50.0
 # Maximum number of unpushed local batches at any one time
 max_unpushed_batches: 5
 # Maximum number of remote batches at any one time (0 = Only prepare local batches and don't push any yet)
-max_remote_batches: 100
+max_remote_batches: 15
 # Maximum number of requests across all uploaded remote batches at any one time
 max_remote_requests: 5000000
 # Maximum allowed total size in MB (not MiB) of all uploaded remote batches at any one time
 max_remote_mb: 10000
 # Maximum allowed total number of input tokens (in units of 1000) across all uploaded remote batches at any one time
-max_remote_ktokens: 5000
+max_remote_ktokens: 60000
 # Maximum allowed cost (input + assumed output tokens) across all uploaded remote batches at any one time
 max_remote_cost: 150.0
 # Safety factor (SF) to use when comparing MB sizes to specified maximum values (can be useful to ensure that server-side MB limits are never used down to the very last byte, as the server could have some fuzzy exact limits, e.g. due to conversions or implicit metadata or overhead, despite giving an exact number for the size limit)

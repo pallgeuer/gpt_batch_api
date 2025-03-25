@@ -108,14 +108,14 @@ Run Commands
 		# <-- Refine completion ratio value if required (search the command outputs for the 'completion ratio' of any newly executed batches, and reinit meta as in F)
 	H) Reset the entire task to scratch and throw away any results obtained so far:
 		python ... --no_wandb --wipe_task "${MODELARGS[@]}" --no_run
-	Run the task normally to completion (preferably enable wandb by omitting any --no_wandb, change MY_BATCH_TASK to a real name), respecting a batch queue limit of 5,000,000 tokens (= 5000 ktokens) at a time (refer to the OpenAI tier rate limits):
-		python ... --wandb_name MY_BATCH_TASK "${MODELARGS[@]}" --max_remote_ktokens 5000
+	Run the task normally to completion (preferably enable wandb by omitting any --no_wandb, change MY_BATCH_TASK to a real name), respecting a batch queue limit of 60,000,000 tokens (= 60000 ktokens) at a time (refer to the OpenAI tier rate limits):
+		python ... --wandb_name MY_BATCH_TASK "${MODELARGS[@]}" --max_remote_ktokens 60000
 		# <-- The above command can be interrupted with Ctrl+C and restarted at any time, and it will safely and robustly just pick up where it left off without losing anything (assuming the custom task has been correctly and revertibly implemented like described in the documentation, and demonstrated in task_manager_demo.py)
 	Give failed samples another chance with up to 4 more retries = 5 more attempts allowed, resuming the previous wandb run (given by RUN_ID) in terms of logging:
-		python ... --wandb_name MY_BATCH_TASK --wandb_run_id RUN_ID --wipe_failed "${MODELARGS[@]}" --max_remote_ktokens 5000 --max_retries 4
+		python ... --wandb_name MY_BATCH_TASK --wandb_run_id RUN_ID --wipe_failed "${MODELARGS[@]}" --max_remote_ktokens 60000 --max_retries 4
 		# <-- You could also try the command above with for example an extra '--reinit_meta --temperature 0.9 ...' to change the temperature => CAUTION: Just make sure though to remain consistent with A) and F) in all other meta variables, as --reinit_meta always updates ALL task meta variables
 	Get the current status of a task without actually executing task steps:
-		python ... "${MODELARGS[@]}" --max_remote_ktokens 5000 --no_run
+		python ... "${MODELARGS[@]}" --max_remote_ktokens 60000 --no_run
 
 - Commonly useful arguments for debugging, applying code changes, recovering from errors/batch failures, and such:
 	--task_dir /PATH/TO/DIR
