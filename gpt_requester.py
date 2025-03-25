@@ -805,6 +805,7 @@ class GPTRequester:
 		lock_status_interval: Optional[float] = None,             # Lock file status update interval (see utils.LockFile)
 		token_estimator_warn: str = 'once',                       # Warning mode to use for internal token estimator (see tokens.TokenEstimator)
 		remote_update_interval: float = 10.0,                     # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
+		wait_save_interval: float = 900.0,                        # Minimum time interval in seconds between successive state saves to disk while waiting for batches to complete
 
 		direct_verbose: Union[str, DirectVerboseMode] = 'never',  # Whether to show verbose requests/responses when using the direct API (options: never, error, warn (i.e. if a warning or error occurs), always)
 		show_warnings: int = 50,                                  # How many warnings to show/log per batch per warning type when processing responses
@@ -956,6 +957,9 @@ class GPTRequester:
 		self.remote_update_interval = remote_update_interval
 		if self.remote_update_interval < 1.0:
 			raise ValueError(f"Remote batch update interval must be at least 1.0s: {self.remote_update_interval:.3g}")
+		self.wait_save_interval = wait_save_interval
+		if self.wait_save_interval < 10.0:
+			raise ValueError(f"State save interval while waiting for batches must be at least 10.0s: {self.wait_save_interval:.3g}")
 
 		self.max_task_requests = max_task_requests
 		if self.max_task_requests < 0:
@@ -1152,6 +1156,7 @@ class GPTRequester:
 		add_argument(name='lock_status_interval', metavar='SEC', unit='s', help="Lock file status update interval (see utils.LockFile)")
 		add_argument(name='token_estimator_warn', metavar='MODE', help="Warning mode to use for internal token estimator (see tokens.TokenEstimator)")
 		add_argument(name='remote_update_interval', metavar='SEC', unit='s', help="Interval in multiples of which to update remote batch states when waiting for remote batches to finish")
+		add_argument(name='wait_save_interval', metavar='SEC', unit='s', help="Minimum time interval in seconds between successive state saves to disk while waiting for batches to complete")
 
 		add_argument(name='direct_verbose', metavar='MODE', help="Whether to show verbose requests/responses when using the direct API (options: never, error, warn (i.e. if a warning or error occurs), always)")
 		add_argument(name='show_warnings', metavar='NUM', help="How many warnings to show/log per batch per warning type when processing responses")
@@ -1200,10 +1205,12 @@ class GPTRequester:
 		return group
 
 	# Save the GPT requester state to file
-	def save_state(self, rstack: utils.RevertStack, show_log: bool = True):
+	def save_state(self, rstack: utils.RevertStack, show_log: bool = True, save: bool = True):
 		# rstack = RevertStack to use for the safe reversible saving of the state file
 		# show_log = Whether to log that the state file was saved
-		self.state.save(rstack=rstack, show_log=show_log)
+		# save = Whether to actually save the state to file (or just update the log)
+		if save:
+			self.state.save(rstack=rstack, show_log=show_log)
 		if isinstance(rstack, utils.LogRevertStack):
 			rstack.log({
 				'Pushed/session_requests': self.session_push_stats.total_requests,
@@ -2469,9 +2476,10 @@ class GPTRequester:
 		return sum(batch.remote is not None and batch.remote.finished for batch in self.S.batches)
 
 	# Update the current state of all pushed remote batches (unless dry run)
-	def update_remote_batch_state(self, log_save: bool) -> tuple[bool, int]:
+	def update_remote_batch_state(self, log_save: bool, last_save_time: Optional[float] = None) -> tuple[bool, int, Optional[float]]:
 		# log_save = Whether to log if the state file is saved
-		# Returns whether there are any finished remote batches, and how many batch statuses were updated
+		# last_save_time = If given, the last time the state was saved (as per time.perf_counter()) so that the wait save interval can be applied
+		# Returns whether there are any finished remote batches, how many batch statuses were updated, and the new last save time (updated if state was saved)
 
 		any_finished = False
 		num_status_updates = 0
@@ -2500,15 +2508,19 @@ class GPTRequester:
 						log.error(f"Failed to retrieve remote batch status with {utils.get_class_str(e)}: {e}")
 
 		if num_status_updates != 0:
-			if status_changed or log_save:
+			now = time.perf_counter()
+			save = (last_save_time is None or now - last_save_time >= self.wait_save_interval)
+			if status_changed or (save and log_save):
 				utils.print_clear_line()
 			if status_changed:
 				log.info(f"Detected change of remote batch status{'es' if sum(len(ids) for ids in status_changed.values()) > 1 else ''} to: {', '.join(f'{status} (batch{"es" if len(ids) > 1 else ""} {", ".join(str(idd) for idd in sorted(ids))})' for status, ids in status_changed.items())}")
 			with utils.AtomicLogRevertStack(W=self.W) as rstack:
 				self.validate_state_queue(clean=False)
-				self.save_state(rstack=rstack, show_log=log_save)
+				self.save_state(rstack=rstack, show_log=log_save, save=save)
+				if save:
+					last_save_time = now
 
-		return any_finished, num_status_updates
+		return any_finished, num_status_updates, last_save_time
 
 	# Wait until there is at least one finished yet unprocessed remote batch or no more unfinished remote batches (unless dry run)
 	def wait_for_batches(self):
@@ -2519,10 +2531,12 @@ class GPTRequester:
 
 		start_time = time.perf_counter()
 		num_status_updates = 0
+		last_save_time = None
 		printed_str = None
 
 		while True:
-			num_status_updates += self.update_remote_batch_state(log_save=False)[1]
+			any_finished, new_status_updates, last_save_time = self.update_remote_batch_state(log_save=False, last_save_time=last_save_time)
+			num_status_updates += new_status_updates
 			num_unfinished_batches = self.num_unfinished_batches()
 			if self.num_finished_batches() > 0 or num_unfinished_batches <= 0:
 				utils.print_in_place(f"Waited {utils.format_duration(time.perf_counter() - start_time)} and {num_status_updates} status updates until {initial_num_unfinished_batches - num_unfinished_batches} batch(es) finished\n")

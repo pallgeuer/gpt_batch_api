@@ -73,6 +73,8 @@ lock_status_interval: null
 token_estimator_warn: once
 # Interval in multiples of which to update remote batch states when waiting for remote batches to finish (seconds)
 remote_update_interval: 10.0
+# Minimum time interval in seconds between successive state saves to disk while waiting for batches to complete
+wait_save_interval: 900.0
 
 # Whether to show verbose requests/responses when using the direct API (options: never, error, warn (i.e. if a warning or error occurs), always)
 direct_verbose: never
