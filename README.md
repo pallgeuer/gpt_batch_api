@@ -2,7 +2,7 @@
 
 **Author:** Philipp Allgeuer
 
-**Version:** 1.0.4
+**Version:** 1.0.5
 
 A Python library for efficiently interacting with OpenAI's [Batch API](https://platform.openai.com/docs/guides/batch). This library helps handle multiple requests in a single batch to streamline and optimize API usage, making it ideal for high-volume non-real-time text and image processing applications. The Batch API provides a significantly faster and more cost-effective solution than performing multiple single API requests individually using the [direct API](https://platform.openai.com/docs/api-reference/chat).
 
