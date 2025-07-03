@@ -182,14 +182,14 @@ Here are the recommended safe steps:
    ```
    At this point we can decide on suitable initial values for `--max_completion_tokens` and `--completion_ratio`. To do this, search the output of the command above for `max # completion tokens` (overall metrics) and `max # tokens` (per batch), where `#` are some numbers, and decide on a suitable value of `--max_completion_tokens` that has a significant safety margin to the values seen. Also search the command outputs for `completion ratio` (overall metrics and per batch), and decide on a suitable value for `--completion_ratio`, factoring in whatever change you just made to `--max_completion_tokens` of course, as the completion ratio is a ratio of that. We can then update the (otherwise usually fixed) metadata of the task run using:
    ```bash
-   python ARGS "${MODELARGS[@]}" --no_wandb --no_run --reinit_meta --max_completion_tokens NUM --completion_ratio RATIO [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...  # <-- CAUTION: Other than updating --max_completion_tokens and --completion_ratio, make sure to be consistent with command 2) as --reinit_meta always updates ALL task meta variables
+   python ARGS "${MODELARGS[@]}" --no_wandb --no_run --reinit_meta --max_completion_tokens NUM --completion_ratio RATIO [--temperature TEMP] [--top_p MASS] [--opinions_min NUM] [--opinions_max NUM] [--confidence RATIO] ...  # <-- CAUTION: Other than updating --max_completion_tokens and --completion_ratio, make sure to be consistent with point 2 as --reinit_meta always updates ALL task meta variables
    ```
 8) Execute 1 USD worth of fresh (thus wipe ongoing) requests using the batch API (or 1 of whatever currency or unit `MODELARGS` used for `--cost_*`):
    ```bash
    python ARGS "${MODELARGS[@]}" --no_wandb --only_process  # <-- If there are any unfinished batches busy on the remote let them finish and be processed (we do not want to unnecessarily wipe them if they are already costing money)
    python ARGS "${MODELARGS[@]}" --no_wandb --wipe_requests --max_session_cost 1.00 --max_batch_cost 1.00 --max_unpushed_batches 1
    ```
-   At this point you can refine the estimated value of the completion ratio, if required. Search the command outputs for the `completion ratio` of any newly executed batches, and reinitialize the task metadata as in 7).
+   At this point you can refine the estimated value of the completion ratio, if required. Search the command outputs for the `completion ratio` of any newly executed batches, and reinitialize the task metadata as in point 7.
 9) Reset the entire task to scratch (throwing away any results obtained so far, but ensuring a clean slate for a future full run):
    ```bash
    python ARGS "${MODELARGS[@]}" --no_wandb --wipe_task --no_run
@@ -273,7 +273,7 @@ python -m gpt_batch_api.task_manager_demo --task_dir /tmp/gpt_batch_api_tasks --
 ```
 Instead of specifying `--client_base_url`, you can alternatively just set the `OPENAI_BASE_URL` environment variable (see [Useful hints](#useful-hints)):
 ```bash
-export OPENAI_BASE_URL="http://IP:PORT/v1"
+export OPENAI_BASE_URL="http://IP:PORT/v1"  # <-- CAUTION: Set IP and PORT to appropriate values
 ```
 Local LLMs hosted by means other than Ollama should work similarly out of the box, provided the appropriate direct API is exposed.
 
